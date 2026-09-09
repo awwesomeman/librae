@@ -1009,6 +1009,24 @@ class TestInit:
         mock_api.activate_ca.assert_not_called()
         assert adapter._read_only is True
 
+    def test_execution_identity_uses_login_accounts_and_simulation(self):
+        from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+
+        mock_api = MagicMock()
+        mock_api.futopt_account.account_id = "F123456789"
+        with patch(
+            "librae.brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
+        ):
+            adapter = ShioajiAdapter(
+                credentials=ShioajiCredentials(api_key="k", secret_key="s"),
+                simulation=True,
+            )
+
+        identity = adapter.execution_identity()
+        assert identity.environment == "paper"
+        assert identity.endpoint == "sinopac"
+        assert "F123456789" not in identity.summary
+
     def test_login_with_ca_path_enables_trading(self):
         from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
 

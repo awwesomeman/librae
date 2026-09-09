@@ -1045,6 +1045,20 @@ def test_sandbox_enables_ccxt_sandbox_mode():
     mock_exchange.set_sandbox_mode.assert_called_once_with(True)
 
 
+def test_execution_identity_distinguishes_sandbox_without_exposing_api_key():
+    mock_exchange = MagicMock()
+    mock_exchange.has = {}
+    mock_exchange.options = {}
+    mock_exchange.urls = {"api": {}}
+
+    identity = _build_adapter_via_init("binance", mock_exchange).execution_identity()
+
+    assert identity.broker == "binance"
+    assert identity.environment == "sandbox"
+    assert identity.endpoint == "binance"
+    assert "k" not in identity.account_fingerprint
+
+
 def test_sandbox_patches_deprecated_binance_testnet_url():
     """Regression: ccxt's set_sandbox_mode() for binance still points to the
     deprecated testnet.binance.vision (ccxt/ccxt#27266, open as of 2026-07).

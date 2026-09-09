@@ -20,7 +20,7 @@ not something this adapter chooses.
 Credentials can be passed explicitly or loaded from environment variables
 using the ``IBKR_`` prefix convention::
 
-    IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID
+    IBKR_HOST, IBKR_PORT, IBKR_CLIENT_ID, IBKR_ENVIRONMENT (custom ports only)
 
 Install: ``pip install ib-async`` or ``pip install -e '.[us-live]'``
 """
@@ -52,6 +52,7 @@ from librae.core.trading_calendar import (
     validate_calendar_id,
 )
 from librae.core.utils import floor_to_step, validate_contract_month
+from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import PositionRequest
 
 from .base import (
@@ -231,6 +232,12 @@ class IBKRCredentials(CredentialConfig):
     host: str = "127.0.0.1"
     port: str = "7497"
     client_id: str = "1"
+    environment: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.environment not in ("", "paper", "production"):
+            raise ValueError("IBKR environment must be 'paper', 'production', or empty")
 
 
 class IBKRAdapter:
@@ -284,6 +291,15 @@ class IBKRAdapter:
             clientId=int(creds.client_id),
             readonly=self._read_only,
         )
+        port = int(creds.port)
+        self._execution_endpoint = f"{creds.host}:{port}"
+        inferred_environment = {
+            7497: "paper",
+            4002: "paper",
+            7496: "production",
+            4001: "production",
+        }.get(port)
+        self._execution_environment = creds.environment or inferred_environment
         logger.info(
             "IBKR connected host=%s port=%s clientId=%s trading_enabled=%s",
             creds.host,
@@ -297,6 +313,25 @@ class IBKRAdapter:
             adapter_id="ibkr",
             venue="IBKR",
             market_type="us_equity",
+        )
+
+    def execution_identity(self) -> ExecutionIdentity:
+        if self._execution_environment is None:
+            raise ValueError(
+                f"IBKR execution environment is ambiguous at {self._execution_endpoint}; "
+                "use a standard port or set IBKR_ENVIRONMENT=paper|production explicitly"
+            )
+        account_ids = tuple(str(value) for value in self._ib.managedAccounts())
+        if len(account_ids) != 1:
+            raise ValueError(
+                "IBKR live execution requires exactly one managed account per adapter "
+                f"session; observed {len(account_ids)}"
+            )
+        return ExecutionIdentity(
+            broker="ibkr",
+            environment=self._execution_environment,
+            endpoint=self._execution_endpoint,
+            account_fingerprint=account_fingerprint("ibkr", *account_ids),
         )
 
     def available_symbols(

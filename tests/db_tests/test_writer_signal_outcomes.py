@@ -67,7 +67,8 @@ def _config_subscriptions(config: RunConfig) -> tuple[MarketDataSubscription, ..
     )
 
 
-def test_run_metadata_persists_execution_policy_separately_from_params():
+@patch("librae.db.timescale_writer.require_current_schema")
+def test_run_metadata_persists_execution_policy_separately_from_params(_mock_schema):
     cursor = MagicMock()
 
     write_run_metadata(
@@ -110,11 +111,12 @@ def test_run_metadata_persists_execution_policy_separately_from_params():
         "max_bar_volume_participation_rate": 0.1,
     }
     assert json.loads(values[15]) == {"max_drawdown_rate": 0.2}
-    assert values[16:] == ("config-a", "revision-a", "cache-a")
+    assert values[16:] == ("config-a", "revision-a", "cache-a", None)
     assert "backtest_runs.primary_subscriptions = EXCLUDED.primary_subscriptions" in sql
 
 
-def test_run_metadata_rejects_existing_different_immutable_identity() -> None:
+@patch("librae.db.timescale_writer.require_current_schema")
+def test_run_metadata_rejects_existing_different_immutable_identity(_mock_schema) -> None:
     cursor = MagicMock(rowcount=0)
 
     with pytest.raises(ValueError, match="different immutable identity"):
@@ -127,6 +129,63 @@ def test_run_metadata_rejects_existing_different_immutable_identity() -> None:
             data_source="test",
             primary_subscriptions=(_subscription(),),
             cur=cursor,
+        )
+
+
+@patch("librae.db.timescale_writer.require_current_schema")
+def test_live_run_metadata_persists_sanitized_execution_identity(_mock_schema) -> None:
+    cursor = MagicMock(rowcount=1)
+    identity = {
+        "broker": "ibkr",
+        "environment": "paper",
+        "endpoint": "gateway:7497",
+        "account_fingerprint": "a" * 24,
+    }
+
+    write_run_metadata(
+        "live-run",
+        "strategy",
+        ["MU"],
+        "H1",
+        "live",
+        data_source="test",
+        primary_subscriptions=(
+            MarketDataSubscription(
+                symbol="MU",
+                timeframe="H1",
+                calendar_id="XNYS",
+                session_mode="extended",
+                data_source="test",
+                instrument_type="spot",
+            ),
+        ),
+        execution_identity=identity,
+        cur=cursor,
+    )
+
+    assert json.loads(cursor.execute.call_args.args[1][-1]) == identity
+
+
+def test_live_run_metadata_requires_execution_identity() -> None:
+    with pytest.raises(ValueError, match="requires an execution_identity"):
+        write_run_metadata(
+            "live-run",
+            "strategy",
+            ["MU"],
+            "H1",
+            "live",
+            data_source="test",
+            primary_subscriptions=(
+                MarketDataSubscription(
+                    symbol="MU",
+                    timeframe="H1",
+                    calendar_id="XNYS",
+                    session_mode="extended",
+                    data_source="test",
+                    instrument_type="spot",
+                ),
+            ),
+            cur=MagicMock(),
         )
 
 
@@ -772,10 +831,13 @@ class TestSaveSignalResults:
         # Verify batch INSERT was called
         mock_exec_values.assert_called_once()
 
+    @patch("librae.db.timescale_writer.require_current_schema")
     @patch("librae.db.timescale_writer.write_ohlcv", return_value=10)
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
-    def test_delete_scoped_to_own_run_id(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
+    def test_delete_scoped_to_own_run_id(
+        self, mock_conn_ctx, mock_exec_values, mock_ohlcv, _mock_schema
+    ):
         """Regression test: re-running save_signal_results for the same
         (strategy, symbol, timeframe) over an overlapping date range must
         only clear its own run's prior signal_events rows, not silently

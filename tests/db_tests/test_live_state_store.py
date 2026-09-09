@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from librae.db.timescale_state import TimescaleLiveStateStore
+from librae.live.execution_identity import ExecutionIdentity
 from librae.live.executor import OrderRequest
 from librae.live.state import LiveRuntimeState, TrackedOrder
 
@@ -17,6 +18,7 @@ def _state() -> LiveRuntimeState:
         config_hash="abc",
         mode="live",
         account_id="default",
+        execution_identity=ExecutionIdentity("fixture", "paper", "fixture", "a" * 24),
         runtime_revision="revision-a",
         cash=1_000.0,
         equity_peak=1_000.0,
@@ -54,8 +56,9 @@ def test_save_checkpoints_state_and_order_in_one_connection(mock_get_conn, mock_
     assert rows[0][8] == datetime(2025, 1, 1, tzinfo=UTC)
 
 
+@patch("librae.db.timescale_state.require_current_schema")
 @patch("librae.db.timescale_state.get_conn")
-def test_load_restores_json_checkpoint(mock_get_conn):
+def test_load_restores_json_checkpoint(mock_get_conn, _mock_schema):
     conn = MagicMock()
     mock_get_conn.return_value.__enter__.return_value = conn
     conn.cursor.return_value.fetchone.return_value = (_state().to_dict(),)

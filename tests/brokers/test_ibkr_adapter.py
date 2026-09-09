@@ -155,6 +155,41 @@ def test_connection_events_invalidate_adapter_caches():
     assert not adapter._market_rule_cache
 
 
+def test_execution_identity_uses_gateway_port_and_managed_account():
+    fake_ib = MagicMock()
+    fake_ib.connectedEvent = _FakeEvent()
+    fake_ib.disconnectedEvent = _FakeEvent()
+    fake_ib.managedAccounts.return_value = ["DU1234567"]
+    ib_async = SimpleNamespace(IB=MagicMock(return_value=fake_ib))
+
+    with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=ib_async):
+        adapter = IBKRAdapter(IBKRCredentials(host="gateway", port="7497"), trading_enabled=True)
+
+    identity = adapter.execution_identity()
+    assert identity.environment == "paper"
+    assert identity.endpoint == "gateway:7497"
+    assert "DU1234567" not in identity.summary
+
+
+def test_custom_ibkr_port_requires_explicit_environment():
+    fake_ib = MagicMock()
+    fake_ib.connectedEvent = _FakeEvent()
+    fake_ib.disconnectedEvent = _FakeEvent()
+    fake_ib.managedAccounts.return_value = ["DU1234567"]
+    ib_async = SimpleNamespace(IB=MagicMock(return_value=fake_ib))
+
+    with patch("librae.brokers.ibkr_adapter._require_ib_async", return_value=ib_async):
+        ambiguous = IBKRAdapter(IBKRCredentials(host="gateway", port="5000"), trading_enabled=True)
+        explicit = IBKRAdapter(
+            IBKRCredentials(host="gateway", port="5000", environment="paper"),
+            trading_enabled=True,
+        )
+
+    with pytest.raises(ValueError, match="IBKR_ENVIRONMENT"):
+        ambiguous.execution_identity()
+    assert explicit.execution_identity().environment == "paper"
+
+
 def test_available_symbols_lists_mnq_front_and_next_exact_contracts():
     adapter = _make_adapter()
     september = SimpleNamespace(

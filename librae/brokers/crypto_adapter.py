@@ -28,6 +28,7 @@ from librae.config.symbols import (
     canonicalize_price_to_increment,
 )
 from librae.core.utils import validate_contract_month
+from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import PositionRequest
 
 from .base import (
@@ -179,6 +180,8 @@ class CryptoAdapter:
 
         self._read_only = not bool(api_key)
         self._exchange_id = exchange_id
+        self._sandbox = bool(sandbox)
+        self._account_fingerprint = account_fingerprint(exchange_id, api_key) if api_key else None
         self._tick_size_precision_mode = getattr(ccxt, "TICK_SIZE", None)
         self._decimal_places_precision_mode = getattr(ccxt, "DECIMAL_PLACES", None)
 
@@ -188,6 +191,17 @@ class CryptoAdapter:
             adapter_id=f"crypto_{self._exchange_id}",
             venue=self._exchange_id.upper(),
             market_type="spot",
+        )
+
+    def execution_identity(self) -> ExecutionIdentity:
+        """Return the authenticated CCXT venue/account boundary."""
+        if self._read_only or self._account_fingerprint is None:
+            raise RuntimeError(f"{self._exchange_id} adapter has no authenticated trading account")
+        return ExecutionIdentity(
+            broker=self._exchange_id,
+            environment="sandbox" if self._sandbox else "production",
+            endpoint=self._exchange_id,
+            account_fingerprint=self._account_fingerprint,
         )
 
     def available_symbols(

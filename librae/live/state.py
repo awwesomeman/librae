@@ -22,6 +22,7 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 
+from .execution_identity import ExecutionIdentity
 from .executor import OrderRequest, OrderStatus
 
 
@@ -46,7 +47,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 24
+_STATE_SCHEMA_VERSION = 25
 
 
 def normalize_runtime_revision(
@@ -247,6 +248,7 @@ class LiveRuntimeState:
     mode: LiveMode
     account_id: str
     cash: float
+    execution_identity: ExecutionIdentity | None = None
     runtime_revision: str | None = None
     positions: dict[str, PositionState] = field(default_factory=dict)
     last_prices: dict[str, float] = field(default_factory=dict)
@@ -277,6 +279,10 @@ class LiveRuntimeState:
             self.runtime_revision,
             required=self.mode == "live",
         )
+        if self.mode == "live" and self.execution_identity is None:
+            raise ValueError("live runtime state requires an execution_identity")
+        if self.mode != "live" and self.execution_identity is not None:
+            raise ValueError("simulation runtime state cannot carry an execution_identity")
         self.last_feature_as_of = _to_utc(self.last_feature_as_of)
         if any(
             not isfinite(value)
@@ -297,6 +303,9 @@ class LiveRuntimeState:
             "config_hash": self.config_hash,
             "mode": self.mode,
             "account_id": self.account_id,
+            "execution_identity": (
+                self.execution_identity.to_dict() if self.execution_identity else None
+            ),
             "runtime_revision": self.runtime_revision,
             "cash": self.cash,
             "positions": positions,
@@ -351,6 +360,11 @@ class LiveRuntimeState:
             config_hash=str(raw["config_hash"]),
             mode=raw["mode"],
             account_id=str(raw["account_id"]),
+            execution_identity=(
+                ExecutionIdentity.from_dict(raw["execution_identity"])
+                if raw["execution_identity"] is not None
+                else None
+            ),
             runtime_revision=raw["runtime_revision"],
             cash=float(raw["cash"]),
             positions=positions,

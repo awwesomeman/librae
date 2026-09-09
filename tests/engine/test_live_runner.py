@@ -34,6 +34,7 @@ from librae.core.strategy import (
     Strategy,
 )
 from librae.live.engine import LiveTrader, _market_data_calendar_id, _market_data_route_owner
+from librae.live.execution_identity import ExecutionIdentity
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
 from librae.live.state import MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import build_live_trader
@@ -80,7 +81,12 @@ def _mock_order_adapter(mock_class: type[MagicMock] = MagicMock) -> MagicMock:
     adapter.find_order.return_value = None
     adapter.list_open_orders.return_value = []
     adapter.prepare_order.side_effect = lambda signal: signal
+    adapter.execution_identity.return_value = _test_execution_identity()
     return adapter
+
+
+def _test_execution_identity() -> ExecutionIdentity:
+    return ExecutionIdentity("fixture", "paper", "fixture", "a" * 24)
 
 
 def _broker_report(
@@ -569,6 +575,15 @@ class TestLiveTrader:
         kwargs.setdefault("clock", lambda: TEST_CLOCK_NOW)
         if test_config.mode == "live":
             kwargs.setdefault("runtime_revision", "test-runtime")
+            configured_order_adapter = kwargs.get("order_adapter")
+            routes = (
+                configured_order_adapter.values()
+                if isinstance(configured_order_adapter, dict)
+                else (configured_order_adapter,)
+            )
+            for route in routes:
+                if route is not None:
+                    route.execution_identity = _test_execution_identity
         resolved_feature_fn = (
             feature_fn
             if feature_fn is not None
@@ -4070,6 +4085,27 @@ class TestLiveExecutionLifecycle:
         adapter.list_open_orders.assert_not_called()
         adapter.place_order.assert_not_called()
 
+    def test_declared_execution_identity_must_match_adapter_before_state_lookup(self):
+        adapter = _mock_order_adapter()
+        store = MagicMock()
+        different = ExecutionIdentity("fixture", "production", "fixture", "b" * 24)
+
+        with pytest.raises(RuntimeError, match="identities disagree"):
+            LiveTrader(
+                _HoldStrategy(),
+                _simple_feature_fn,
+                config=_test_cfg(mode="live"),
+                adapter=lambda *args, **kwargs: _make_ohlcv_df(),
+                order_adapter=adapter,
+                cost_model=_zero_cost_model(),
+                state_store=store,
+                runtime_revision="revision-a",
+                execution_identity=different,
+            )
+
+        store.load.assert_not_called()
+        adapter.get_position.assert_not_called()
+
     def test_runtime_revision_mismatch_preserves_checkpoint_and_old_revision_rolls_back(self):
         store = MemoryLiveStateStore()
         first = self._make_trader(
@@ -4109,7 +4145,8 @@ class TestLiveExecutionLifecycle:
 
         checkpoint_after = store.load(first._state_key)
         assert checkpoint_after == checkpoint_before
-        assert first._state_key.endswith(first._config.config_hash)
+        assert first._config.config_hash in first._state_key
+        assert first._state_key.endswith(_test_execution_identity().key_digest)
         new_adapter.get_position.assert_not_called()
         new_adapter.get_balance.assert_not_called()
         new_adapter.find_order.assert_not_called()
@@ -5197,9 +5234,13 @@ class TestLiveExecutionLifecycle:
             state_store=store,
             config=_test_cfg(mode="live", strategy_name="second", account=shared_account),
         )
+        third_adapter = _mock_order_adapter()
+        third_adapter.execution_identity.return_value = ExecutionIdentity(
+            "fixture", "paper", "fixture", "b" * 24
+        )
         third = self._make_trader(
             _HoldStrategy(),
-            _mock_order_adapter(),
+            third_adapter,
             state_store=store,
             config=_test_cfg(
                 mode="live",
@@ -5215,7 +5256,7 @@ class TestLiveExecutionLifecycle:
         first._initialize_run()
         third._initialize_run()
         try:
-            with pytest.raises(RuntimeError, match="owns account_id='shared-account'"):
+            with pytest.raises(RuntimeError, match=r"owns execution account.*shared-account"):
                 second.run(max_iterations=1)
         finally:
             first._release_lease()
@@ -6684,7 +6725,7 @@ class TestCryptoLiveFactory:
             patch("librae.orchestration.live._build_notifier", return_value=None),
             patch("librae.orchestration.live._TimescaleCallbacks"),
         ):
-            mock_cls.return_value = MagicMock()
+            mock_cls.return_value = _mock_order_adapter()
             trader = build_live_trader(
                 _HoldStrategy(),
                 _simple_feature_fn,
@@ -6797,7 +6838,7 @@ class TestShioajiLiveFactory:
             patch("librae.orchestration.live._build_notifier", return_value=None),
             patch("librae.orchestration.live._TimescaleCallbacks"),
         ):
-            mock_cls.return_value = MagicMock()
+            mock_cls.return_value = _mock_order_adapter()
             trader = build_live_trader(
                 _HoldStrategy(),
                 _simple_feature_fn,

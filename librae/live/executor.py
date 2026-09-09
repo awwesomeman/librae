@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from librae.config.symbols import SymbolInfo
     from librae.core.executor import PositionEvent
 
+    from .execution_identity import ExecutionIdentity
+
 logger = logging.getLogger(__name__)
 
 OrderSide = Literal["buy", "sell"]
@@ -334,6 +336,8 @@ class OrderAdapter(Protocol):
     def cancel_order(self, order_id: str, symbol: str) -> BrokerOrderReport: ...
 
     def get_position(self, request: PositionRequest) -> BrokerPosition: ...
+
+    def execution_identity(self) -> ExecutionIdentity: ...
 
 
 class BalanceReader(Protocol):

@@ -1,9 +1,38 @@
--- TimescaleDB schema for a fresh or current-revision database.
--- This file is not a migration; recreate or migrate older schemas explicitly.
+-- TimescaleDB schema for an empty database or an already-current database.
+-- This file never upgrades an older schema; use `librae db migrate`.
 -- See docs/plans/enhance_db_schema.md for schema evolution history
 \set ON_ERROR_STOP on
+BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+-- Refuse to stamp an unversioned existing database as current.  The migration
+-- command first verifies the known legacy shape and upgrades transactionally.
+DO $$
+BEGIN
+    IF to_regclass('public.backtest_runs') IS NOT NULL
+       AND to_regclass('public.librae_schema_revision') IS NULL THEN
+        RAISE EXCEPTION
+            'unversioned Librae schema; run `librae db preflight` then `librae db migrate`';
+    END IF;
+END
+$$;
+
+CREATE TABLE IF NOT EXISTS librae_schema_revision (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO librae_schema_revision (singleton, revision)
+VALUES (TRUE, 2)
+ON CONFLICT (singleton) DO NOTHING;
+DO $$
+BEGIN
+    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 2 THEN
+        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 2';
+    END IF;
+END
+$$;
 
 -- Managed roles: quant_app writes runtime data; grafana_reader only reads it.
 -- The connecting quant role remains reserved for migrations and administration.
@@ -32,6 +61,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO quant_app
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO quant_app;
 GRANT USAGE ON SCHEMA public TO grafana_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_reader;
+REVOKE INSERT, UPDATE, DELETE ON librae_schema_revision FROM quant_app, grafana_reader;
 
 ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
     REVOKE ALL PRIVILEGES ON TABLES FROM quant_app, grafana_reader;
@@ -68,6 +98,7 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     config_hash     VARCHAR(32),
     backtest_revision TEXT,
     backtest_cache_key VARCHAR(32),
+    execution_identity JSONB,
     CONSTRAINT chk_mode CHECK (mode IN ('backtest', 'sim', 'live')),
     CONSTRAINT chk_run_data_sources_object
         CHECK (jsonb_typeof(data_source_by_symbol) = 'object'),
@@ -79,7 +110,9 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
                 OR jsonb_array_length(primary_subscriptions) = jsonb_array_length(symbols)
             )
         ),
-    CONSTRAINT chk_session_mode CHECK (session_mode IN ('regular', 'extended'))
+    CONSTRAINT chk_session_mode CHECK (session_mode IN ('regular', 'extended')),
+    CONSTRAINT chk_execution_identity_object
+        CHECK (execution_identity IS NULL OR jsonb_typeof(execution_identity) = 'object')
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_config_hash
     ON backtest_runs(config_hash) WHERE config_hash IS NOT NULL;
@@ -574,3 +607,24 @@ FROM external_factors ef
 GROUP BY ef.symbol, ef.data_source, ef.timeframe, ef.instrument_type, ef.factor_name
 
 ORDER BY table_name, symbol, factor_name;
+
+DO $$
+BEGIN
+    IF to_regclass('public.backtest_runs') IS NULL
+       OR to_regclass('public.execution_runtime_state') IS NULL
+       OR to_regclass('public.broker_orders') IS NULL
+       OR to_regclass('public.position_events') IS NULL
+       OR to_regclass('public.runtime_events') IS NULL
+       OR NOT EXISTS (
+           SELECT 1
+           FROM information_schema.columns
+           WHERE table_schema = 'public'
+             AND table_name = 'backtest_runs'
+             AND column_name = 'execution_identity'
+       ) THEN
+        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 2';
+    END IF;
+END
+$$;
+
+COMMIT;

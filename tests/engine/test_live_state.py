@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 from librae.core.strategy import OrderIntent, PortfolioWeights, PositionState
+from librae.live.execution_identity import ExecutionIdentity
 from librae.live.executor import OrderRequest
 from librae.live.state import (
     LiveRebalance,
@@ -13,6 +14,10 @@ from librae.live.state import (
     MemoryLiveStateStore,
     TrackedOrder,
 )
+
+
+def _execution_identity() -> ExecutionIdentity:
+    return ExecutionIdentity("fixture", "paper", "fixture", "a" * 24)
 
 
 def _position() -> PositionState:
@@ -105,6 +110,7 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         config_hash="abc",
         mode="live",
         account_id="default",
+        execution_identity=_execution_identity(),
         runtime_revision="revision-a",
         cash=800.0,
         positions={"BTC/USDT": _position()},
@@ -382,6 +388,7 @@ def test_live_runtime_state_rejects_missing_revision_in_current_schema():
         config_hash="abc",
         mode="live",
         account_id="default",
+        execution_identity=_execution_identity(),
         runtime_revision="revision-a",
         cash=1_000.0,
     ).to_dict()
@@ -398,6 +405,7 @@ def test_runtime_state_rejects_attempted_order_without_attempt_time():
         config_hash="abc",
         mode="live",
         account_id="default",
+        execution_identity=_execution_identity(),
         runtime_revision="revision-a",
         cash=1_000.0,
         active_orders=[_order()],

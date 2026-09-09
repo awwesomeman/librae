@@ -42,6 +42,7 @@ from librae.core.trading_calendar import (
     resample_session_ohlcv,
 )
 from librae.core.utils import floor_to_step, validate_contract_month
+from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import PositionRequest
 
 from .base import (
@@ -139,6 +140,7 @@ class ShioajiAdapter:
         # accounts tied to api_key instead); person_id is still needed by
         # activate_ca() below to pick which account's CA to activate.
         self._api.login(api_key=creds.api_key.reveal(), secret_key=creds.secret_key.reveal())
+        self._execution_environment = "paper" if simulation else "production"
         logger.info("Shioaji login successful (simulation=%s)", simulation)
 
         self._read_only = True
@@ -156,6 +158,17 @@ class ShioajiAdapter:
             adapter_id="shioaji",
             venue="SINOPAC",
             market_type="tw_futures",
+        )
+
+    def execution_identity(self) -> ExecutionIdentity:
+        return ExecutionIdentity(
+            broker="shioaji",
+            environment=self._execution_environment,
+            endpoint="sinopac",
+            account_fingerprint=account_fingerprint(
+                "shioaji",
+                str(getattr(self._api.futopt_account, "account_id", "") or ""),
+            ),
         )
 
     def available_symbols(

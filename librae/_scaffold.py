@@ -28,6 +28,8 @@ def main() -> None:
         "half-configured key pairs, DSN role and password (with a single .env and no "
         ".env.secrets, the file-placement checks are skipped)",
     )
+    db_parser = subparsers.add_parser("db", help="inspect or migrate the reference database schema")
+    db_parser.add_argument("action", choices=("preflight", "migrate"))
 
     args = parser.parse_args()
 
@@ -35,6 +37,10 @@ def main() -> None:
         _init(force=args.force)
     elif args.command == "doctor":
         raise SystemExit(_doctor())
+    elif args.command == "db":
+        from librae.db.schema import _run_cli
+
+        raise SystemExit(_run_cli(args.action))
 
 
 def _doctor() -> int:

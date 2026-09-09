@@ -8,6 +8,7 @@ from collections.abc import Sequence
 import psycopg2.extras
 
 from librae.db import get_conn, get_pool
+from librae.db.schema import require_current_schema
 from librae.live.state import LiveRuntimeState, TrackedOrder
 
 
@@ -21,6 +22,7 @@ class TimescaleLiveStateStore:
     def load(self, state_key: str) -> LiveRuntimeState | None:
         with get_conn(self._dsn) as conn:
             cur = conn.cursor()
+            require_current_schema(cur)
             cur.execute(
                 "SELECT state FROM execution_runtime_state WHERE state_key = %s",
                 (state_key,),

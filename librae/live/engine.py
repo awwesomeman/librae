@@ -79,6 +79,12 @@ from librae.core.strategy import (
 )
 from librae.core.trading_calendar import session_label, session_labels, validate_calendar_id
 
+from .execution_identity import (
+    ExecutionIdentity,
+    account_lease_key,
+    resolve_execution_identity,
+    runtime_state_key,
+)
 from .executor import ExecutionReport, LiveExecutor, OrderRequest
 from .interfaces import (
     BarCallback,
@@ -513,6 +519,9 @@ class LiveTrader:
             already-resolved source capability and subscription snapshot.
         runtime_revision: Caller-owned opaque runtime identity. Live mode
             requires it so checkpoints cannot cross code or image revisions.
+        execution_identity: Optional factory-observed broker identity. In live
+            mode the order adapter is still queried and must report the exact
+            same value before checkpoint lookup.
         notifier: Optional operational notifier implementing ``Notifier``.
         status_interval_periods: Optional polling-period cadence for status
             notifications. Scheduling is separate from the transport.
@@ -555,6 +564,7 @@ class LiveTrader:
         state_store: LiveStateStore | None = None,
         _market_data_snapshot: _MarketDataSubscriptionSnapshot | None = None,
         runtime_revision: str | None = None,
+        execution_identity: ExecutionIdentity | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         from librae.config.symbols import resolve_symbol
@@ -588,6 +598,10 @@ class LiveTrader:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._live_order_timeout_seconds = config.execution.live_order_timeout_seconds
         self._max_rebalance_delay_bars = config.execution.max_rebalance_delay_bars
+        self._runtime_revision = normalize_runtime_revision(
+            runtime_revision,
+            required=config.mode == "live",
+        )
 
         # --- Build per-symbol cost models and instrument routes ---
         if isinstance(cost_model, Mapping):
@@ -686,6 +700,22 @@ class LiveTrader:
         else:
             order_adapters = {}
 
+        is_live = config.mode == "live"
+        if is_live:
+            shared_order_adapter = next(iter(order_adapters.values()))
+            observed_execution_identity = resolve_execution_identity(shared_order_adapter)
+            if execution_identity is not None and execution_identity != observed_execution_identity:
+                raise RuntimeError(
+                    "declared and adapter-observed execution identities disagree; "
+                    "trading did not start"
+                )
+            self._execution_identity = observed_execution_identity
+            logger.info("Live execution identity: %s", self._execution_identity.summary)
+        else:
+            if execution_identity is not None:
+                raise ValueError("execution_identity is only valid in live mode")
+            self._execution_identity = None
+
         # --- Build run_id ---
         strategy_name = config.strategy_name
         self._run_id = generate_run_id(
@@ -695,7 +725,6 @@ class LiveTrader:
         )
 
         # --- Build executor ---
-        is_live = config.mode == "live"
         self._executor = LiveExecutor(
             resolved_cost_models,
             simulation=not is_live,
@@ -705,11 +734,15 @@ class LiveTrader:
         )
 
         # --- Restore restart-critical state before callbacks capture run_id ---
-        self._state_key = f"{config.mode}:{config.config_hash}"
-        self._account_lease_key = f"live-account:{self._account_id}"
-        self._runtime_revision = normalize_runtime_revision(
-            runtime_revision,
-            required=is_live,
+        self._state_key = runtime_state_key(
+            config.mode,
+            config.config_hash,
+            self._execution_identity,
+        )
+        self._account_lease_key = (
+            account_lease_key(self._execution_identity)
+            if self._execution_identity
+            else f"sim-account:{self._account_id}"
         )
         self._state_store = state_store
         if is_live and self._state_store is None:
@@ -831,6 +864,7 @@ class LiveTrader:
             config_hash=self._config.config_hash,
             mode=self._config.mode,
             account_id=self._account_id,
+            execution_identity=self._execution_identity,
             runtime_revision=self._runtime_revision,
             cash=self._cash,
             positions=deepcopy(self._positions),
@@ -873,6 +907,8 @@ class LiveTrader:
         self._run_id = state.run_id
         if state.account_id != self._account_id:
             raise ValueError("runtime state account does not match this run")
+        if state.execution_identity != self._execution_identity:
+            raise RuntimeError("runtime state execution identity does not match this broker route")
         self._cash = state.cash
         self._positions = state.positions
         self._last_prices = state.last_prices
@@ -1522,7 +1558,9 @@ class LiveTrader:
         if not self._executor.simulation:
             if not self._state_store.acquire_lease(self._account_lease_key):
                 raise RuntimeError(
-                    f"another live process already owns account_id={self._account_id!r}"
+                    "another live process already owns execution account "
+                    f"({self._execution_identity.summary}); configured "
+                    f"account_id={self._account_id!r}"
                 )
             self._account_lease_acquired = True
             if not self._state_store.acquire_lease(self._state_key):

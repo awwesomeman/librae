@@ -137,8 +137,8 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument(
         "--reset-state",
         action="store_true",
-        help="delete this config's sim/live checkpoint instead of running "
-        "(next start begins a fresh run_id); does not touch trade/equity history",
+        help="delete this config's simulation checkpoint instead of running; "
+        "live reset additionally requires an adapter-observed execution identity",
     )
     return p
 
@@ -396,6 +396,11 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
 
     # 3. dry_run -> no_db
     dry_run = args.dry_run
+    if args.mode == "live" and dry_run:
+        raise ValueError(
+            "--mode live --dry-run is unsafe: dry-run only disables persistence and "
+            "notifications; use --mode sim for no-order execution"
+        )
     no_db = args.no_db or dry_run
 
     # poll_seconds has no implicit default in sim/live: it is an API polling
@@ -533,7 +538,11 @@ def check_existing_run(
 # ---------------------------------------------------------------------------
 
 
-def reset_realtime_state(config: RunConfig) -> None:
+def reset_realtime_state(
+    config: RunConfig,
+    *,
+    execution_identity: object | None = None,
+) -> None:
     """Delete this config's sim/live checkpoint so the next start begins a
     fresh run_id. Does not touch position_events/equity_curve/etc — those are
     real execution history, not derivable from the checkpoint, and require
@@ -548,10 +557,14 @@ def reset_realtime_state(config: RunConfig) -> None:
         raise ValueError("--reset-state applies to sim/live only; backtest has no checkpoint")
 
     from librae.db.timescale_state import TimescaleLiveStateStore
+    from librae.live.execution_identity import ExecutionIdentity, runtime_state_key
 
-    # Must match LiveTrader._state_key (librae/live/engine.py) exactly, or
-    # this looks up the wrong (or no) checkpoint.
-    state_key = f"{config.mode}:{config.config_hash}"
+    if config.mode == "live" and not isinstance(execution_identity, ExecutionIdentity):
+        raise ValueError(
+            "resetting live state requires the adapter-observed execution_identity; "
+            "a config hash alone cannot select a paper or production checkpoint"
+        )
+    state_key = runtime_state_key(config.mode, config.config_hash, execution_identity)
     store = TimescaleLiveStateStore()
 
     if not store.acquire_lease(state_key):

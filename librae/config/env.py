@@ -142,6 +142,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("IBKR_HOST", Where.SECRETS),
     EnvVar("IBKR_PORT", Where.SECRETS),
     EnvVar("IBKR_CLIENT_ID", Where.SECRETS),
+    EnvVar("IBKR_ENVIRONMENT", Where.SECRETS),
     # .env.secrets — shared infra secrets, one set per deployment
     EnvVar("POSTGRES_PASSWORD", Where.SECRETS, secret=True),
     EnvVar("POSTGRES_APP_PASSWORD", Where.SECRETS, secret=True),
