@@ -49,6 +49,14 @@ def next_expected_close(
     candidate is not, the session ended at this boundary and the next
     observation belongs to the following session.
 
+    Bar timestamps are assumed to be **session-anchored**: a period is stamped
+    at the instant it opens, which is what librae's own adapters produce. A
+    daily or weekly bar stamped at midnight instead precedes its own session's
+    open, so it resolves to that session's close rather than the following
+    one — a deadline one period early. Grace absorbs that at daily and weekly
+    sizes and no shipped adapter stamps that way, but caller-supplied data that
+    does will be held to a slightly stricter deadline than it deserves.
+
     An observation outside every session — an extended-hours feed under the
     default ``session_mode="extended"`` — anchors on the next session directly.
     The result is a deadline rather than a prediction, so resolving a
