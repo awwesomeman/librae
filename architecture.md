@@ -132,7 +132,10 @@ DB-first history plus API gap filling is a caller-owned policy injected through
 TimescaleDB, and Telegram integrations and accepts explicit third-party
 adapter factories, notifier, and state store instances. Direct `LiveTrader`
 construction never imports reference integrations. Sim may run in memory,
-while live always requires an explicitly injected durable `state_store`.
+while live always requires an explicitly injected durable `state_store`. The
+store must declare `restart_durable = True`; the persistence methods alone are
+satisfied by a dictionary, so live fails closed on a store that declares
+nothing rather than reaching order-capable startup with no recovery state.
 
 Database-backed backtest reuse is opt-in. `config_hash` identifies resolved
 engine configuration only; it does not identify caller-owned strategy code or
@@ -622,7 +625,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
 | `order_adapter` | `prepare_order(signal)`, `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`, plus mandatory live reconciliation `get_position(PositionRequest)`; all order results follow the cumulative execution-report contract above |
 | `execution_identity` | adapter-observed `ExecutionIdentity`; live-only, compared with the order adapter before checkpoint lookup |
-| `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts |
+| `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts; `restart_durable` declares whether those writes survive the process, and live requires `True` |
 | `runtime_revision` | caller-owned opaque code/image identity; required in live mode and checked against restored state before broker access |
 | `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
 | `status_interval_periods` | optional positive polling-period count for status notifications; scheduling is independent of notifier transport configuration |

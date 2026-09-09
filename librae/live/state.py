@@ -424,7 +424,17 @@ class LiveRuntimeState:
 
 
 class LiveStateStore(Protocol):
-    """Minimal persistence boundary used by ``LiveTrader``."""
+    """Minimal persistence boundary used by ``LiveTrader``.
+
+    ``restart_durable`` is the capability an order-capable live run requires:
+    whether this store's writes survive the process. The persistence methods
+    alone cannot express it — a dictionary satisfies them — so a live runner
+    had no way to tell production storage from a test double, and the gap only
+    showed after a crash, with the book gone and the broker still holding
+    positions. Declaring nothing means not durable: silence is not a claim.
+    """
+
+    restart_durable: bool
 
     def load(self, state_key: str) -> LiveRuntimeState | None: ...
 
@@ -440,9 +450,16 @@ class LiveStateStore(Protocol):
 
 
 class MemoryLiveStateStore:
-    """Process-local store for deterministic tests; not restart durability."""
+    """Process-local store for deterministic tests; not restart durability.
 
-    def __init__(self) -> None:
+    ``restart_durable_for_tests`` exists so a test can exercise the live path
+    without a database. It is deliberately verbose and greppable: production
+    storage must never acquire durability by accident, and the flag names the
+    only reason to set it.
+    """
+
+    def __init__(self, *, restart_durable_for_tests: bool = False) -> None:
+        self.restart_durable = bool(restart_durable_for_tests)
         self._states: dict[str, LiveRuntimeState] = {}
         self.orders: dict[str, TrackedOrder] = {}
         self._leases: set[str] = set()

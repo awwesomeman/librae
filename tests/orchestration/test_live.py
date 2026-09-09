@@ -552,7 +552,7 @@ def test_factory_keys_binance_order_adapter_by_execution_venue() -> None:
             config=config,
             database_enabled=False,
             adapter_factories={"vendor_plugin": MagicMock()},
-            state_store=MemoryLiveStateStore(),
+            state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
             runtime_revision="test-runtime",
         )
 
@@ -606,7 +606,7 @@ def test_live_execution_allows_independent_market_data_sources() -> None:
         config=config,
         database_enabled=False,
         adapter_factories=factories,
-        state_store=MemoryLiveStateStore(),
+        state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
         runtime_revision="test-runtime",
     )
 
@@ -639,7 +639,7 @@ def test_factory_reuses_external_adapter_for_live_orders() -> None:
         config=config,
         database_enabled=False,
         adapter_factories={"vendor_plugin": factory},
-        state_store=MemoryLiveStateStore(),
+        state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
         runtime_revision="test-runtime",
     )
 

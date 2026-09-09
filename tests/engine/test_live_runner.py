@@ -571,7 +571,12 @@ class TestLiveTrader:
         **kwargs,
     ) -> LiveTrader:
         test_config = config or _test_cfg()
-        kwargs.setdefault("state_store", MemoryLiveStateStore())
+        # Only the live path requires a store that declares restart durability,
+        # so the flag reads as a live marker rather than boilerplate.
+        kwargs.setdefault(
+            "state_store",
+            MemoryLiveStateStore(restart_durable_for_tests=test_config.mode == "live"),
+        )
         kwargs.setdefault("clock", lambda: TEST_CLOCK_NOW)
         if test_config.mode == "live":
             kwargs.setdefault("runtime_revision", "test-runtime")
@@ -1814,7 +1819,7 @@ class TestLiveTrader:
             subscription = batch.active_primary_subscriptions[0]
             return {subscription: batch.market_data.history(subscription)}
 
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         runner = self._make_runner(
             strategy=Buy(),
             fetcher=lambda *_args, **_kwargs: frame,
@@ -1863,7 +1868,7 @@ class TestLiveTrader:
             "filled": 0.0,
         }
         adapter.place_order.return_value = accepted
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         runner = self._make_runner(
             strategy=Buy(),
             fetcher=lambda *_args, **_kwargs: frame,
@@ -4057,7 +4062,7 @@ class TestLiveExecutionLifecycle:
             on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,
-            state_store=state_store or MemoryLiveStateStore(),
+            state_store=state_store or MemoryLiveStateStore(restart_durable_for_tests=True),
             runtime_revision=runtime_revision,
             clock=clock or (lambda: TEST_CLOCK_NOW),
             on_ready=on_ready,
@@ -4110,7 +4115,7 @@ class TestLiveExecutionLifecycle:
         adapter.get_position.assert_not_called()
 
     def test_runtime_revision_mismatch_preserves_checkpoint_and_old_revision_rolls_back(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         first = self._make_trader(
             _HoldStrategy(),
             _mock_order_adapter(),
@@ -4495,7 +4500,7 @@ class TestLiveExecutionLifecycle:
         assert runner._adv_filled_quantities == {"AAA": 0.0}
 
     def test_restored_live_target_waits_for_a_fresh_completed_bar(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         adapter.place_order.side_effect = lambda signal: {
             "id": f"order-{adapter.place_order.call_count}",
@@ -5052,7 +5057,7 @@ class TestLiveExecutionLifecycle:
         }
 
     def test_live_group_checkpoints_all_siblings_and_resumes_after_restart(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         runner = self._make_trader(
             _HoldStrategy(),
@@ -5197,7 +5202,7 @@ class TestLiveExecutionLifecycle:
         assert runner._halted is True
 
     def test_run_releases_lease_when_startup_initialization_raises(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         runner = self._make_trader(_HoldStrategy(), _mock_order_adapter(), state_store=store)
         runner._reconcile_positions = MagicMock(side_effect=RuntimeError("boom"))
 
@@ -5208,7 +5213,7 @@ class TestLiveExecutionLifecycle:
         assert store.acquire_lease(runner._account_lease_key) is True
 
     def test_state_lease_conflict_releases_account_ownership(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         runner = self._make_trader(_HoldStrategy(), _mock_order_adapter(), state_store=store)
         assert store.acquire_lease(runner._state_key) is True
 
@@ -5218,7 +5223,7 @@ class TestLiveExecutionLifecycle:
         assert store.acquire_lease(runner._account_lease_key) is True
 
     def test_three_live_deployments_isolate_accounts_across_strategy_configs(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         shared_account = AccountConfig(
             account_id="shared-account",
             currency="USDT",
@@ -5270,7 +5275,7 @@ class TestLiveExecutionLifecycle:
         assert first._state_key != second._state_key
 
     def test_ready_callback_runs_after_ownership_and_reconciliation(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         observations: list[tuple[str, bool, bool]] = []
         runner = self._make_trader(
             _HoldStrategy(),
@@ -5290,7 +5295,7 @@ class TestLiveExecutionLifecycle:
         assert observations == [(runner.run_id, True, True)]
 
     def test_ready_publication_failure_releases_live_ownership(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         runner = self._make_trader(
             _HoldStrategy(),
             _mock_order_adapter(),
@@ -5633,7 +5638,7 @@ class TestLiveExecutionLifecycle:
             on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,
-            state_store=MemoryLiveStateStore(),
+            state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
             runtime_revision="test-runtime",
             clock=lambda: TEST_CLOCK_NOW,
         )
@@ -5834,7 +5839,7 @@ class TestLiveExecutionLifecycle:
         assert runner._positions == {}
 
     def test_halt_persists_failed_cancel_and_retries_after_restart(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         accepted = {
             "id": "open-1",
@@ -5921,7 +5926,7 @@ class TestLiveExecutionLifecycle:
         assert runner._active_orders == []
 
     def test_open_order_resumes_after_restart_without_resubmission(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = {
             "id": "open-1",
@@ -5954,7 +5959,7 @@ class TestLiveExecutionLifecycle:
         assert second._positions["BTCUSDT"].entry_commission == 0.2
 
     def test_live_order_timeout_age_survives_restart(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         accepted = {
             "id": "open-1",
@@ -6004,7 +6009,7 @@ class TestLiveExecutionLifecycle:
     def test_drawdown_exit_remains_active_while_halted_and_resumes_after_restart(
         self,
     ):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = _broker_report(
             order_id="risk-exit-1",
@@ -6055,7 +6060,7 @@ class TestLiveExecutionLifecycle:
         adapter.cancel_order.assert_not_called()
 
     def test_restored_cycle_does_not_repeat_decision(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = _broker_report()
 
@@ -6087,7 +6092,7 @@ class TestLiveExecutionLifecycle:
         assert second._run_id == first._run_id
 
     def test_restore_reports_state_recovered_runtime_event(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = _broker_report()
 
@@ -6113,7 +6118,7 @@ class TestLiveExecutionLifecycle:
         """CCXT spot balances never carry avg_price; restore must not halt
         forever just because that field is absent — only size/side are
         cross-checked against the broker in that case."""
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = _broker_report()
 
@@ -6135,7 +6140,7 @@ class TestLiveExecutionLifecycle:
 
     @pytest.mark.parametrize("status", ["cancelled", "rejected"])
     def test_final_failed_order_is_persisted_and_halts(self, status):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = {
             "id": "final-1" if status == "cancelled" else "",
@@ -6188,7 +6193,7 @@ class TestLiveExecutionLifecycle:
             runner.halt(" ")
 
     def test_halt_survives_restart_until_operator_reset(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         adapter.place_order.return_value = {
             "id": "",
@@ -6210,7 +6215,7 @@ class TestLiveExecutionLifecycle:
         assert restored.halted is False
 
     def test_halt_reset_starts_new_risk_epoch(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         runner = self._make_trader(
             _HoldStrategy(),
             _mock_order_adapter(),
@@ -6287,7 +6292,7 @@ class TestLiveExecutionLifecycle:
             ),
         ]
         events: list[PositionEvent] = []
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
 
         runner = self._make_trader(
             _AlwaysBuyStrategy(),
@@ -6601,7 +6606,7 @@ class TestLiveExecutionLifecycle:
         assert [call.args[0][0].group_id for call in execute.call_args_list] == ["pair", "pair"]
 
     def test_order_is_normalized_before_checkpoint_and_submission(self):
-        store = MemoryLiveStateStore()
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
         adapter.prepare_order.side_effect = lambda signal: {
             **signal,
@@ -6723,7 +6728,7 @@ class TestCryptoLiveFactory:
             patch("librae.brokers.crypto_adapter.CryptoAdapter") as mock_cls,
             patch(
                 "librae.orchestration.live._build_state_store",
-                return_value=MemoryLiveStateStore(),
+                return_value=MemoryLiveStateStore(restart_durable_for_tests=True),
             ),
             patch("librae.orchestration.live._build_notifier", return_value=None),
             patch("librae.orchestration.live._TimescaleCallbacks"),
@@ -6795,7 +6800,7 @@ class TestIBKRLiveFactory:
             patch("librae.brokers.ibkr_adapter.IBKRAdapter") as mock_cls,
             patch(
                 "librae.orchestration.live._build_state_store",
-                return_value=MemoryLiveStateStore(),
+                return_value=MemoryLiveStateStore(restart_durable_for_tests=True),
             ),
             patch("librae.orchestration.live._build_notifier", return_value=None),
             patch("librae.orchestration.live._TimescaleCallbacks"),
@@ -6836,7 +6841,7 @@ class TestShioajiLiveFactory:
             patch("librae.brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
             patch(
                 "librae.orchestration.live._build_state_store",
-                return_value=MemoryLiveStateStore(),
+                return_value=MemoryLiveStateStore(restart_durable_for_tests=True),
             ),
             patch("librae.orchestration.live._build_notifier", return_value=None),
             patch("librae.orchestration.live._TimescaleCallbacks"),
@@ -6866,7 +6871,7 @@ class TestShioajiLiveFactory:
             patch("librae.brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
             patch(
                 "librae.orchestration.live._build_state_store",
-                return_value=MemoryLiveStateStore(),
+                return_value=MemoryLiveStateStore(restart_durable_for_tests=True),
             ),
             patch("librae.orchestration.live._build_notifier", return_value=None),
             patch("librae.orchestration.live._TimescaleCallbacks"),

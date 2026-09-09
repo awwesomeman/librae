@@ -768,6 +768,18 @@ class LiveTrader:
         self._state_store = state_store
         if is_live and self._state_store is None:
             raise ValueError("live mode requires an explicit durable state_store")
+        if is_live and getattr(self._state_store, "restart_durable", False) is not True:
+            # Fail closed on silence, and on anything that is not literally
+            # True: the persistence methods alone are satisfied by a
+            # dictionary, so an undeclared store would reach order-capable
+            # startup with no recovery state and only reveal it after a crash.
+            # A truthy string or 1 is not the bool claim the Protocol types.
+            raise ValueError(
+                f"live mode requires a restart-durable state_store; "
+                f"{type(self._state_store).__name__} does not declare "
+                "restart_durable=True. Use the reference database store, or a "
+                "custom store that genuinely survives the process."
+            )
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         self._consecutive_errors: int = 0
