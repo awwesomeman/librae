@@ -120,6 +120,36 @@ class TestTheVenueIsResolvedPerSymbol:
     def test_only_the_intents_own_symbol_decides(self) -> None:
         _validate(_resting("gtc"), broker="ibkr", routes={"OTHER": "shioaji"})
 
+    def test_a_non_primary_symbol_is_resolved_on_its_own_route(self) -> None:
+        """The lookup key must be the intent's symbol, not the run's primary.
+
+        With every intent on the primary symbol the two are the same
+        expression, so this is the case that tells them apart.
+        """
+        routed = OrderIntent(action="long", symbol="Y", limit_price=99.0, time_in_force="gtc")
+
+        with pytest.raises(ValueError, match="shioaji does not support"):
+            validate_strategy_decision(
+                [routed],
+                {"X", "Y"},
+                primary_symbol="X",
+                bars={"X": {"close": 100.0}, "Y": {"close": 100.0}},
+                positions={},
+                broker_for=lambda symbol: {"Y": "shioaji"}.get(symbol, "ibkr"),
+            )
+
+    def test_the_primary_symbols_route_does_not_leak_onto_another_symbol(self) -> None:
+        permitted = OrderIntent(action="long", symbol="Y", limit_price=99.0, time_in_force="gtc")
+
+        validate_strategy_decision(
+            [permitted],
+            {"X", "Y"},
+            primary_symbol="X",
+            bars={"X": {"close": 100.0}, "Y": {"close": 100.0}},
+            positions={},
+            broker_for=lambda symbol: {"X": "shioaji"}.get(symbol, "ibkr"),
+        )
+
 
 class TestTheResolverIsTheOneRule:
     def test_run_config_resolves_the_override_over_the_run_broker(self) -> None:

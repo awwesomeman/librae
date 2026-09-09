@@ -19,6 +19,10 @@ from .ibkr_adapter import SUPPORTED_TIME_IN_FORCE as _IBKR_TIME_IN_FORCE
 from .shioaji_adapter import SUPPORTED_TIME_IN_FORCE as _SHIOAJI_TIME_IN_FORCE
 
 # Keys are the broker names librae.orchestration.live resolves to an adapter.
+# "crypto" and "binance" resolve to a Binance-family exchange there, which is
+# what the table describes. A caller who registers an adapter factory for a
+# different exchange under one of these names is naming it something it is
+# not; their adapter stays the authority, as for any name not listed here.
 BROKER_TIME_IN_FORCE: Mapping[str, Mapping[str, frozenset[str]]] = {
     "binance": _CRYPTO_TIME_IN_FORCE,
     "crypto": _CRYPTO_TIME_IN_FORCE,

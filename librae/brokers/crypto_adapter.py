@@ -49,7 +49,6 @@ SUPPORTED_TIME_IN_FORCE: dict[str, frozenset[str]] = {
     "limit": frozenset({"day", "gtc", "ioc", "fok"}),
     "market": frozenset({"ioc"}),
 }
-_TIME_IN_FORCE_VENUES = "binance"
 
 logger = logging.getLogger(__name__)
 
@@ -692,7 +691,7 @@ class CryptoAdapter:
         )
         order_type = signal["order_type"]
         price = signal.get("price")
-        if self._exchange_id.startswith(_TIME_IN_FORCE_VENUES):
+        if self._exchange_id.startswith("binance"):
             validate_time_in_force(
                 self._exchange_id, SUPPORTED_TIME_IN_FORCE, order_type, signal["time_in_force"]
             )
