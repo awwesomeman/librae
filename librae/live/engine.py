@@ -78,6 +78,7 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 from librae.core.trading_calendar import (
+    require_resting_session_support,
     resting_session_label,
     session_label,
     session_labels,
@@ -924,12 +925,22 @@ class LiveTrader:
     ) -> None:
         """Fail on the emitting event, not mid-run, when a day limit has no
         session to expire against. This is engine expressibility, not a venue
-        rule, so it belongs with the decision that requested it."""
+        rule, so it belongs with the decision that requested it. Only calendar
+        presence is checked — labelling this event would reject a decision
+        emitted during another instrument's session."""
+        del ts
         if isinstance(decision, PortfolioWeights):
             return
         for intent in decision:
             if intent.time_in_force == "day" and intent.limit_price is not None:
-                self._session_of(intent.symbol or primary_symbol, ts)
+                symbol = intent.symbol or primary_symbol
+                try:
+                    require_resting_session_support(
+                        calendar_id=self._instruments[symbol].calendar_id,
+                        timeframe=self._config.timeframe,
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"{symbol}: {exc}") from exc
 
     def _prune_pending_submissions(self, *, primary_symbol: str) -> None:
         """Forget submissions whose intent is no longer pending."""

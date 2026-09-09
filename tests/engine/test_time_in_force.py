@@ -724,3 +724,105 @@ class TestSimulationMirrorsTheFixedBacktest:
 
         assert runner._positions, "the replacing market order should fill"
         assert any(e.detail.get("reason") == "resting_order_replaced" for e in events)
+
+
+def _two_calendar_panel() -> pd.DataFrame:
+    """A union timeline where one symbol trades 24/7 and the other only
+    inside the XNYS session, so most bars belong to one instrument alone."""
+    rows: list[tuple[str, pd.Timestamp]] = []
+    for ts in pd.date_range("2025-01-02T00:00Z", periods=48, freq="h", tz="UTC"):
+        rows.append(("CRYPTO24", ts))
+        if 15 <= ts.hour <= 20:
+            rows.append(("EQUITY", ts))
+    index = pd.MultiIndex.from_tuples(rows, names=["symbol", "datetime"]).sort_values()
+    size = len(index)
+    return pd.DataFrame(
+        {
+            "open": [100.0] * size,
+            "high": [101.0] * size,
+            "low": [99.0] * size,
+            "close": [100.0] * size,
+            "volume": [1_000.0] * size,
+        },
+        index=index,
+    )
+
+
+def _two_calendar_config():
+    from librae.core.run_config import AccountConfig, RunConfig
+
+    shared = {"data_adapter": "test", "instrument_type": "spot", "currency": "USD"}
+    return RunConfig(
+        strategy_name="two-calendar",
+        mode="backtest",
+        symbols=["CRYPTO24", "EQUITY"],
+        timeframe="H1",
+        market="us_equity",
+        data_source="test",
+        account=AccountConfig(currency="USD", initial_cash=100_000.0),
+        symbol_cost_overrides={"EQUITY": {"multiplier": 1.0}, "CRYPTO24": {"multiplier": 1.0}},
+        instrument_overrides={
+            "EQUITY": {**shared, "calendar_id": "XNYS"},
+            "CRYPTO24": {**shared, "calendar_id": "24/7"},
+        },
+    )
+
+
+class TestUnionTimelineDoesNotBorrowAnotherCalendar:
+    """Most bars on a union timeline belong to one instrument alone. Asking
+    for another symbol's session label there raises, and that timestamp is
+    not a boundary its orders ever crossed."""
+
+    def test_day_limit_may_be_emitted_during_another_instruments_session(self) -> None:
+        class EmitOffSession(Strategy):
+            def on_bar(self, ctx):
+                # 02:00Z: only CRYPTO24 has a bar, and it lies outside every
+                # XNYS session.
+                if ctx.ts.hour == 2 and ctx.ts.day == 2:
+                    return [
+                        OrderIntent(
+                            action="long",
+                            symbol="EQUITY",
+                            quantity=1.0,
+                            limit_price=95.0,
+                            time_in_force="day",
+                        )
+                    ]
+                return []
+
+        result = Backtest(
+            _two_calendar_panel(),
+            EmitOffSession(),
+            config=_two_calendar_config(),
+            cost_model=CostModel.zero(),
+        ).run()
+
+        assert result.position_events == []
+
+    def test_resting_day_limit_survives_another_instruments_bars(self) -> None:
+        """The order rests from an XNYS bar and must not be expired — or
+        crash — by the crypto bars that follow it overnight."""
+
+        class RestOverAnotherCalendar(Strategy):
+            def on_bar(self, ctx):
+                if ctx.ts.hour == 15 and ctx.ts.day == 2:
+                    return [
+                        OrderIntent(
+                            action="long",
+                            symbol="EQUITY",
+                            quantity=1.0,
+                            limit_price=95.0,
+                            time_in_force="day",
+                        )
+                    ]
+                return []
+
+        result = Backtest(
+            _two_calendar_panel(),
+            RestOverAnotherCalendar(),
+            config=_two_calendar_config(),
+            cost_model=CostModel.zero(),
+        ).run()
+
+        expiries = [reason for reason in _skip_reasons(result) if reason == "day_order_expired"]
+        assert len(expiries) <= 1, "expiry must be judged once, on the symbol's own bars"

@@ -140,6 +140,23 @@ def session_lookback_days(value: object, periods: int, calendar_id: str) -> int:
     return max(1, ceil((timestamp - first_open).total_seconds() / 86_400))
 
 
+def require_resting_session_support(*, calendar_id: str | None, timeframe: str) -> None:
+    """Check a ``day`` lifetime has a session boundary to expire at.
+
+    Deliberately does not label any timestamp. On a union timeline the bar
+    that emits a decision can belong to a different instrument entirely and
+    fall outside this symbol's session, which is not an error — only the
+    absence of a calendar is.
+    """
+    if timeframe == "D1":
+        return
+    if calendar_id is None:
+        raise ValueError(
+            "time_in_force='day' on intraday data requires a calendar_id: "
+            "the session boundary is what makes the order expire"
+        )
+
+
 def resting_session_label(
     value: object,
     *,
@@ -153,14 +170,14 @@ def resting_session_label(
     expire at, and guessing a UTC date would silently mis-expire every venue
     whose session spans midnight. Backtest and simulation share this so a
     deterministic runtime cannot drift on order lifetime.
+
+    Only call this for a timestamp the symbol itself has a bar at; see
+    ``require_resting_session_support`` for the emission-time check.
     """
+    require_resting_session_support(calendar_id=calendar_id, timeframe=timeframe)
     if timeframe == "D1":
         return _timestamp(value)
-    if calendar_id is None:
-        raise ValueError(
-            "time_in_force='day' on intraday data requires a calendar_id: "
-            "the session boundary is what makes the order expire"
-        )
+    assert calendar_id is not None  # narrowed by the check above
     return session_label(value, calendar_id)
 
 
