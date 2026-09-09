@@ -578,6 +578,7 @@ class TestLiveTrader:
             MemoryLiveStateStore(restart_durable_for_tests=test_config.mode == "live"),
         )
         kwargs.setdefault("clock", lambda: TEST_CLOCK_NOW)
+        kwargs.setdefault("on_ohlcv", None)
         if test_config.mode == "live":
             kwargs.setdefault("runtime_revision", "test-runtime")
             configured_order_adapter = kwargs.get("order_adapter")
@@ -606,7 +607,6 @@ class TestLiveTrader:
             ),
             on_bar=None,
             on_position_event=None,
-            on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,
             warmup_fetcher=None,

@@ -429,6 +429,12 @@ class _TimescaleCallbacks:
             detail=event.detail,
         )
 
+    # The first-party persistence path opts into at-least-once delivery: the
+    # engine queues each row in the checkpoint before offering it, and only
+    # drops it once this returns. write_ohlcv is idempotent on an equal or
+    # older row version, so a duplicate replay is a deterministic no-op.
+    durable_ohlcv_delivery = True
+
     def on_ohlcv(
         self,
         symbol: str,

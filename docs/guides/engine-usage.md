@@ -1146,6 +1146,31 @@ that has never delivered at all is logged rather than alerted, since there is
 no observation for it to be late relative to. Refetching is skipped until the calendar says a new observation could
 exist, so a daily auxiliary is not pulled once per hourly poll.
 
+## OHLCV audit delivery
+
+The runtime advances its watermark and lands the checkpoint before the audit
+row is written, so a failed write used to be lost outright: the writer treats
+an equal row version as an idempotent no-op, and nothing re-delivered it.
+
+A sink that declares `durable_ohlcv_delivery = True` gets at-least-once
+delivery. The row is queued in the checkpoint before it is offered and removed
+only once the call returns, so a failed write retries on the next cycle and a
+crash between acceptance and acknowledgement replays after restart. Duplicate
+delivery is harmless because the writer accepts only a strictly later row
+version. Queued rows are offered in order, since replaying a correction before
+the bar it corrects would drop it. The first-party TimescaleDB path declares
+this; a retry never re-runs a strategy decision or a broker order, because it
+is a persistence concern only.
+
+Any other callback keeps the documented best-effort contract: it is invoked,
+its failure is logged, and nothing is queued. The engine cannot acknowledge on
+a caller's behalf, and queueing would grow the checkpoint for work it can
+never retire.
+
+The queue is bounded. Reaching the bound is terminal runtime health — the run
+halts rather than discarding audit rows, because a silent drop leaves the
+table diverged with nothing recording that it happened.
+
 Both the stale alert and the not-ready alert are edge-triggered: one
 diagnostic when the condition starts and one when it clears, not one per poll
 cycle.

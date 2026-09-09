@@ -633,6 +633,10 @@ would let the local book disagree with the broker. Most changes are not
 safely defaultable — forgetting a cancel intent or a bar's already-filled
 quantity diverges silently, which is the failure this prevents.
 
+A checkpoint may also carry unacknowledged OHLCV audit rows, so migrating one
+externally means carrying that queue too or accepting that those rows are lost
+from the audit table; they are analytics, not the book.
+
 The procedure is the same whichever version is stored. Stop flat and start a
 new checkpoint, or externally migrate the JSON document and key only after
 reconciling its positions and active orders to the same authenticated broker
