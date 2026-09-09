@@ -773,6 +773,7 @@ class LiveTrader:
         self._last_financing_ts: dict[str, datetime] = {}
         self._stale_alerted: dict[MarketDataSubscription, bool] = {}
         self._data_gap_alerted = False
+        self._unanchored_reported: set[MarketDataSubscription] = set()
         self._last_prices: dict[str, float] = {}
         self._positions: dict[str, PositionState] = {}
         self._cash = config.account.initial_cash
@@ -1185,6 +1186,15 @@ class LiveTrader:
             calendar_id=subscription.calendar_id,
             grace=self._staleness_grace(subscription),
         )
+        if not status.calendar_anchored and subscription not in self._unanchored_reported:
+            self._unanchored_reported.add(subscription)
+            logger.warning(
+                "Freshness for %s is not calendar-anchored: %s has no session in %s, "
+                "so weekend and holiday awareness is lost for this subscription",
+                symbol,
+                latest_ts,
+                subscription.calendar_id,
+            )
         is_stale = not status.fresh
         was_stale = self._stale_alerted.get(subscription, False)
 
@@ -1963,7 +1973,7 @@ class LiveTrader:
             logger.info(
                 "Live warmup ready: required=%d usable=%s",
                 self._warmup_periods,
-                {symbol: len(self._ohlcv_cache[symbol]) for symbol in self._symbols},
+                {symbol: len(self._ohlcv_cache.get(symbol, ())) for symbol in self._symbols},
             )
             self._reported_warmup_reasons.clear()
 
@@ -1985,7 +1995,19 @@ class LiveTrader:
             if self._check_staleness(symbol, latest_ts):
                 logger.warning("Skipping stale frame for %s at %s", symbol, latest_ts)
                 continue
+            # warmup_ready no longer waits on an optional symbol, so an optional
+            # one can still be short of history here. Omitting it is what
+            # "stepped over" has to mean: a strategy handed one bar would
+            # compute indicators over one bar.
+            if self._warmup_gap(symbol, self._ohlcv_cache.get(symbol)) is not None:
+                logger.info("Omitting under-warmed optional market data: %s", symbol)
+                continue
             frames[symbol] = df
+
+        # Report before the active-order gate below, so an outage that starts
+        # or clears while an order rests is still announced once; only the hold
+        # itself waits for that gate.
+        data_not_ready = self._report_data_readiness(sorted(set(self._symbols) - set(frames)))
 
         # Keep heartbeat, cache, and staleness monitoring alive while a broker
         # order is resting. Strategy evaluation remains serialized behind the
@@ -1996,7 +2018,7 @@ class LiveTrader:
         # A required subscription with no usable observation blocks evaluation
         # rather than letting the strategy silently decide on a partial view.
         # Reconciliation, order monitoring and heartbeat above stay running.
-        if self._report_data_readiness(sorted(set(self._symbols) - set(frames))):
+        if data_not_ready:
             return
 
         candidate_symbols_by_timestamp: dict[datetime, set[str]] = {}

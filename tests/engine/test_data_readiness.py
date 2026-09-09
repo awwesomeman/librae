@@ -36,6 +36,17 @@ class TestNextExpectedClose:
             ("always_open_midnight", "2025-01-03T23:00Z", "H1", "24/7", "2025-01-04T01:00Z"),
             # EST close 21:00Z becomes EDT close 20:00Z across the transition.
             ("dst_spring_forward", "2025-03-07T14:30Z", "D1", "XNYS", "2025-03-10T20:00Z"),
+            # session_mode defaults to "extended", so a post-market bar is the
+            # common case, not an edge case: it must anchor on the next regular
+            # session rather than losing calendar awareness.
+            ("post_market", "2025-01-03T22:00Z", "H1", "XNYS", "2025-01-06T15:30Z"),
+            # A period spanning many sessions must not resolve to its own close.
+            ("multi_session_period", "2025-01-06T14:30Z", "W1", "XNYS", "2025-01-17T21:00Z"),
+            # TAIFEX treats a session close as inclusive, so the boundary
+            # cannot be detected by asking whether the close has a period.
+            ("inclusive_close_daily", "2025-01-02T05:00Z", "D1", "XTAIFEX", "2025-01-03T05:45Z"),
+            ("inclusive_close_hourly", "2025-01-02T05:00Z", "H1", "XTAIFEX", "2025-01-02T08:00Z"),
+            ("inclusive_close_mid", "2025-01-02T02:00Z", "H1", "XTAIFEX", "2025-01-02T03:45Z"),
         ],
     )
     def test_boundary_follows_the_calendar(
@@ -49,6 +60,16 @@ class TestNextExpectedClose:
         assert next_expected_close(
             _ts(last_ts), timeframe=timeframe, calendar_id=calendar_id
         ) == _ts(expected)
+
+    @pytest.mark.parametrize("calendar_id", ["XNYS", "XTAIFEX", "24/7"])
+    @pytest.mark.parametrize("timeframe", ["H1", "D1", "W1"])
+    def test_the_deadline_always_moves_forward(self, calendar_id: str, timeframe: str) -> None:
+        """The one invariant every calendar shares. A boundary that resolved to
+        the observation's own close made a healthy feed look permanently
+        stale — how TAIFEX broke before the strict-progress rule."""
+        last_ts = _ts("2025-01-02T02:00Z")
+
+        assert next_expected_close(last_ts, timeframe=timeframe, calendar_id=calendar_id) > last_ts
 
     def test_each_subscription_uses_its_own_timeframe(self) -> None:
         """The same symbol on H1 and D1 must not share one boundary."""
@@ -110,10 +131,11 @@ class TestEvaluateObservation:
         assert status.expected_close is None
 
 
-class TestObservationsTheCalendarCannotPlace:
-    """Staleness monitoring is a safety check; it must not become a new way
-    for a poll cycle to die. An extended-session feed, or simply odd data,
-    can carry a timestamp the calendar has no session for."""
+class TestObservationsOutsideARegularSession:
+    """session_mode defaults to "extended", so observations outside the regular
+    session are ordinary. They must stay calendar-anchored: falling back to a
+    bare interval there would leave the weekend regression this module exists
+    to fix in place for the default configuration."""
 
     def _evaluate(self, as_of: str):
         return evaluate_observation(
@@ -124,28 +146,41 @@ class TestObservationsTheCalendarCannotPlace:
             grace=timedelta(hours=2),
         )
 
-    def test_it_falls_back_instead_of_raising(self) -> None:
+    def test_an_out_of_session_observation_stays_calendar_anchored(self) -> None:
+        assert self._evaluate("2025-01-01T06:00Z").calendar_anchored
+
+    def test_it_waits_for_the_next_session_rather_than_one_interval(self) -> None:
         status = self._evaluate("2025-01-01T06:00Z")
 
+        assert status.expected_close > _ts("2025-01-01T07:00Z")
         assert status.fresh
-        assert not status.calendar_anchored
 
-    def test_the_fallback_still_detects_a_dead_feed(self) -> None:
-        status = self._evaluate("2025-01-02T05:00Z")
+    def test_it_still_detects_a_dead_feed(self) -> None:
+        assert not self._evaluate("2025-01-05T05:00Z").fresh
 
-        assert not status.fresh
-        assert not status.calendar_anchored
+    def test_a_calendar_that_cannot_answer_degrades_instead_of_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Last-resort guard: staleness monitoring must not become a new way
+        for a poll cycle to die if the calendar cannot answer at all."""
+        import librae.core.readiness as readiness
 
-    def test_a_placeable_observation_stays_calendar_anchored(self) -> None:
+        def unusable(*_args, **_kwargs):
+            raise ValueError("calendar unavailable")
+
+        monkeypatch.setattr(readiness, "period_close", unusable)
+        monkeypatch.setattr(readiness, "next_session_open_after", unusable)
+
         status = evaluate_observation(
-            _ts("2025-01-03T14:30Z"),
-            as_of=_ts("2025-01-05T12:00Z"),
-            timeframe="D1",
-            calendar_id="XNYS",
+            _ts("2025-01-01T05:00Z"),
+            as_of=_ts("2025-01-01T06:00Z"),
+            timeframe="H1",
+            calendar_id="XTAIFEX",
             grace=timedelta(hours=2),
         )
 
-        assert status.calendar_anchored
+        assert status.fresh
+        assert not status.calendar_anchored
 
 
 class TestOptionalSubscriptionDeclaration:
@@ -174,10 +209,45 @@ class TestOptionalSubscriptionDeclaration:
         with pytest.raises(ValueError, match="optional_symbols"):
             self._config(optional_symbols=["CCC"])
 
+    def test_duplicates_are_rejected(self) -> None:
+        """Length-based validation let [AAA, BBB, AAA] through and produced a
+        run with no required inputs at all, which no gate can ever block."""
+        with pytest.raises(ValueError, match="duplicates"):
+            self._config(optional_symbols=["AAA", "BBB", "AAA"])
+
+    def test_the_primary_symbol_cannot_be_optional(self) -> None:
+        """symbols[0] is the default symbol for bare intents and the cadence
+        anchor, so the run cannot proceed without it."""
+        with pytest.raises(ValueError, match="primary symbol"):
+            self._config(optional_symbols=["AAA"])
+
+    def test_a_run_cannot_be_left_without_a_required_input(self) -> None:
+        """Covering every symbol necessarily includes the primary one, so the
+        primary rule is what enforces this — no separate check needed."""
+        with pytest.raises(ValueError, match="primary symbol"):
+            self._config(symbols=["AAA"], optional_symbols=["AAA"])
+
+    def test_declaration_order_does_not_change_the_config_hash(self) -> None:
+        """Unlike symbols, optional membership has no observable order."""
+        forward = self._config(symbols=["AAA", "BBB", "CCC"], optional_symbols=["BBB", "CCC"])
+        reversed_ = self._config(symbols=["AAA", "BBB", "CCC"], optional_symbols=["CCC", "BBB"])
+
+        assert forward.config_hash == reversed_.config_hash
+
     def test_optional_symbols_change_the_config_hash(self) -> None:
         """A strategy that may run without an input is a different strategy,
         so research and live cannot silently share one identity."""
         assert self._config().config_hash != self._config(optional_symbols=["BBB"]).config_hash
+
+    def test_the_strategy_config_file_reaches_run_config(self) -> None:
+        """A documented YAML key that build_run never reads is silently
+        dropped: no error, unchanged config_hash, every symbol still required.
+        calendar_id had exactly this bug (#210)."""
+        import inspect
+
+        from librae.orchestration import cli
+
+        assert "optional_symbols" in inspect.getsource(cli.build_run)
 
 
 class TestDataReadinessGate:
@@ -357,3 +427,80 @@ class TestSimulationHoldsOnStaleRequiredData:
 
         assert seen, "the fresh input should still be evaluated"
         assert all("ETHUSDT" not in available for available in seen)
+
+
+class TestOptionalSymbolAcrossWarmupCycles:
+    """The integration the unit tests cannot see: the readiness gate, the
+    warmup gate and the rolling cache all act on the same cycle. An optional
+    symbol that starts empty, then arrives short, then completes, must never
+    raise and must never reach the strategy under-warmed."""
+
+    @staticmethod
+    def _bars(n: int):
+        import pandas as pd
+
+        return pd.DataFrame(
+            {
+                "ts": pd.date_range("2025-01-01T00:00Z", periods=n, freq="h", tz="UTC"),
+                "open": [100.0] * n,
+                "high": [101.0] * n,
+                "low": [99.0] * n,
+                "close": [100.0] * n,
+                "volume": [1_000.0] * n,
+            }
+        )
+
+    def test_optional_symbol_joins_only_once_it_is_warm(self) -> None:
+        from librae.core.strategy import Strategy
+
+        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+
+        # BTC starts short of warmup so the first cycle reports incomplete
+        # warmup; the "warmup ready" summary on the next cycle is what used to
+        # raise KeyError for a symbol the cache never got a key for.
+        state = {"btc": 1, "eth": 0}
+        seen: list[tuple[str, ...]] = []
+
+        class RecordEvaluations(Strategy):
+            def on_bar(self, ctx):
+                seen.append(ctx.available_symbols)
+                return []
+
+        runner = TestLiveTrader()._make_runner(
+            strategy=RecordEvaluations(),
+            fetcher={
+                "BTCUSDT": lambda *a, **k: self._bars(state["btc"]),
+                "ETHUSDT": lambda *a, **k: self._bars(state["eth"]),
+            },
+            config=_test_cfg(
+                mode="sim",
+                symbols=["BTCUSDT", "ETHUSDT"],
+                warmup_periods=3,
+                optional_symbols=("ETHUSDT",),
+            ),
+        )
+
+        # Cycle 1: the required feed is short of warmup, so incomplete warmup
+        # is reported and the next cycle will print the "warmup ready" summary.
+        runner._poll_cycle()
+        # Cycle 2: the required feed completes while the optional one still has
+        # nothing. This is the cycle that used to raise KeyError, because that
+        # summary indexed the cache for every symbol and the optional one never
+        # got a key.
+        state["btc"] = 6
+        runner._poll_cycle()
+        # Cycle 3: the optional feed arrives, but short of the requirement.
+        state["btc"], state["eth"] = 7, 2
+        runner._poll_cycle()
+        under_warmed = list(seen)
+        # Cycle 4: it completes.
+        state["btc"], state["eth"] = 8, 8
+        runner._poll_cycle()
+
+        assert under_warmed, "the required symbol must keep evaluating throughout"
+        assert all("ETHUSDT" not in available for available in under_warmed), (
+            "an under-warmed optional symbol must not reach the strategy"
+        )
+        assert any("ETHUSDT" in available for available in seen[len(under_warmed) :]), (
+            "it must join once its warmup gap closes"
+        )

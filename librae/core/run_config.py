@@ -445,13 +445,21 @@ class RunConfig:
         if len(self.symbols) != len(set(self.symbols)):
             raise ValueError("symbols must not contain duplicates")
         object.__setattr__(self, "optional_symbols", tuple(self.optional_symbols))
-        unknown_optional = set(self.optional_symbols) - set(self.symbols)
+        optional = set(self.optional_symbols)
+        if len(optional) != len(self.optional_symbols):
+            raise ValueError("optional_symbols must not contain duplicates")
+        unknown_optional = optional - set(self.symbols)
         if unknown_optional:
             raise ValueError(
                 f"optional_symbols must be configured symbols; got {sorted(unknown_optional)}"
             )
-        if len(self.optional_symbols) == len(self.symbols) and self.symbols:
-            raise ValueError("optional_symbols cannot cover every symbol: a run needs one input")
+        if self.symbols and self.symbols[0] in optional:
+            # symbols[0] is the default symbol for bare intents and the run's
+            # cadence anchor, so it cannot be an input the run may proceed
+            # without.
+            raise ValueError(
+                f"optional_symbols cannot contain the primary symbol {self.symbols[0]!r}"
+            )
         for field_name in ("strategy_name", "timeframe", "market", "data_source"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value:
@@ -534,8 +542,13 @@ class RunConfig:
                     "symbols": self.symbols,
                     # Result-affecting: a run that may proceed without an input
                     # sees different data than one that blocks on it.
+                    # Sorted: unlike ``symbols``, optional membership has no
+                    # observable order, so declaration order must not change
+                    # the run identity.
                     **(
-                        {"optional_symbols": self.optional_symbols} if self.optional_symbols else {}
+                        {"optional_symbols": tuple(sorted(self.optional_symbols))}
+                        if self.optional_symbols
+                        else {}
                     ),
                     "timeframe": self.timeframe,
                     "market": self.market,

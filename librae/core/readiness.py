@@ -13,12 +13,20 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from librae.core.trading_calendar import (
-    next_session_open,
+    next_session_open_after,
     period_close,
     period_start,
-    session_label,
 )
 from librae.core.utils import interval_to_timedelta
+
+
+def _period_close_at_or_after(
+    start: datetime,
+    *,
+    timeframe: str,
+    calendar_id: str,
+) -> datetime:
+    return period_close(start, timeframe, calendar_id).to_pydatetime()
 
 
 def next_expected_close(
@@ -29,19 +37,43 @@ def next_expected_close(
 ) -> datetime:
     """When the observation after ``last_ts`` is expected to complete.
 
-    The bar starting at ``last_ts`` completes at its own period close. The
-    next one starts there when the session still has room, and at the next
-    session's open when it does not — which is what keeps a Friday daily bar
-    from looking late all weekend.
+    The bar starting at ``last_ts`` completes at its own period close, and the
+    next one begins where the calendar says trading resumes. That is what keeps
+    a Friday daily bar from looking late all weekend.
+
+    The boundary is never inferred from an exception, because calendars
+    disagree about it: XNYS treats a session close as exclusive, so asking for
+    its period raises, while TAIFEX treats it as inclusive and answers with the
+    period that just ended. The invariant that actually holds everywhere is
+    that the next close must be *strictly later* than this one; when the first
+    candidate is not, the session ended at this boundary and the next
+    observation belongs to the following session.
+
+    An observation outside every session — an extended-hours feed under the
+    default ``session_mode="extended"`` — anchors on the next session directly.
+    The result is a deadline rather than a prediction, so resolving a
+    post-market bar to the next regular session is deliberately lenient: it
+    cannot make a healthy feed look dead.
     """
-    current_close = period_close(last_ts, timeframe, calendar_id)
     try:
-        next_start = period_start(current_close, timeframe, calendar_id)
+        current_close = period_close(last_ts, timeframe, calendar_id).to_pydatetime()
     except ValueError:
-        # The session ended on this boundary, so the next observation belongs
-        # to the following session rather than to a gap in this one.
-        next_start = next_session_open(session_label(last_ts, calendar_id), calendar_id)
-    return period_close(next_start, timeframe, calendar_id).to_pydatetime()
+        start = next_session_open_after(last_ts, calendar_id).to_pydatetime()
+        return _period_close_at_or_after(start, timeframe=timeframe, calendar_id=calendar_id)
+
+    try:
+        candidate_start = period_start(current_close, timeframe, calendar_id).to_pydatetime()
+    except ValueError:
+        candidate_start = None
+    if candidate_start is not None:
+        expected = _period_close_at_or_after(
+            candidate_start, timeframe=timeframe, calendar_id=calendar_id
+        )
+        if expected > current_close:
+            return expected
+
+    start = next_session_open_after(current_close, calendar_id).to_pydatetime()
+    return _period_close_at_or_after(start, timeframe=timeframe, calendar_id=calendar_id)
 
 
 @dataclass(frozen=True, slots=True)
