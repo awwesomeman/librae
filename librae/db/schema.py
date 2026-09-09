@@ -28,7 +28,7 @@ _LEGACY_REQUIRED_COLUMNS = {
     "execution_runtime_state": {"state_key", "run_id", "config_hash", "state"},
     "broker_orders": {"state_key", "client_order_id", "run_id", "request"},
     "position_events": {"event_id", "run_id", "account_id"},
-    "runtime_events": {"event_id", "run_id", "event_type"},
+    "runtime_events": {"ts", "run_id", "event_type"},
 }
 
 
@@ -179,9 +179,11 @@ def apply_migrations(cur: _Cursor) -> tuple[int, ...]:
 
 
 def _run_cli(command: str) -> int:
-    from librae.db import get_conn
+    from librae.db import admin_conn
 
-    with get_conn() as conn:
+    # Both actions use the admin connection: preflight that ran as a different
+    # role would not prove the migration it precedes can run.
+    with admin_conn() as conn:
         cur = conn.cursor()
         if command == "migrate":
             applied = apply_migrations(cur)

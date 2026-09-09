@@ -152,6 +152,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("TS_AUTHKEY", Where.SECRETS, secret=True),
     EnvVar("TIMESCALE_DSN", Where.SECRETS, secret=True),
     EnvVar("TRADE_TIMESCALE_DSN", Where.SECRETS, secret=True),
+    EnvVar("TIMESCALE_ADMIN_DSN", Where.SECRETS, secret=True),
 )
 
 DECLARED: Mapping[str, EnvVar] = {v.name: v for v in ENV_VARS}
@@ -172,9 +173,16 @@ PAIRED_NAMES: tuple[tuple[str, str], ...] = (
 )
 
 # DSNs must name the application role and carry its password.
-DSN_NAMES: tuple[str, ...] = ("TIMESCALE_DSN", "TRADE_TIMESCALE_DSN")
-DSN_ROLE = "quant_app"
-DSN_PASSWORD_NAME = "POSTGRES_APP_PASSWORD"
+# Each connection string names one role and carries that role's password.
+# The split is a privilege boundary, not a convention: quant owns the tables,
+# so only it can ALTER them or write librae_schema_revision, and quant_app is
+# granted DML alone. One variable serving both would hand the engine the
+# ability to change the schema it runs against.
+DSN_ROLES: Mapping[str, tuple[str, str]] = {
+    "TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
+    "TRADE_TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
+    "TIMESCALE_ADMIN_DSN": ("quant", "POSTGRES_PASSWORD"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -297,25 +305,29 @@ def doctor(project_root: Path) -> list[Finding]:
                 Finding("error", f"{first} and {second} must be set together or both left empty")
             )
 
-    # quant_app and its password exist only in the Compose-managed layout;
-    # a pip user's own database may use any role, so skip when it is absent.
-    app_password = merged.get(DSN_PASSWORD_NAME, "")
-    for name in DSN_NAMES if app_password else ():
+    # These roles exist only in the Compose-managed layout; a pip user's own
+    # database may use any role, so each check waits for its password variable.
+    for name, (role, password_name) in DSN_ROLES.items():
         dsn = merged.get(name)
-        if not dsn:
+        password = merged.get(password_name, "")
+        if not dsn or not password:
             continue
         parts = urlsplit(dsn)
-        if parts.username != DSN_ROLE:
+        if parts.username != role:
             findings.append(
                 Finding(
                     "error",
-                    f"{name} connects as {parts.username or '<none>'}; the application "
-                    f"role is {DSN_ROLE} (the admin role is for migrations only)",
+                    f"{name} connects as {parts.username or '<none>'}, not {role}"
+                    + (
+                        " — the engine must not hold schema-changing rights"
+                        if role == "quant_app"
+                        else " — migrations need the role that owns the tables"
+                    ),
                 )
             )
-        if parts.password != app_password:
+        if parts.password != password:
             findings.append(
-                Finding("error", f"{name} carries a password that differs from {DSN_PASSWORD_NAME}")
+                Finding("error", f"{name} carries a password that differs from {password_name}")
             )
     return findings
 
