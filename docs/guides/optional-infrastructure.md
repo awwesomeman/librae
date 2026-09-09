@@ -605,11 +605,13 @@ migration:
 4. Start the new revision with fresh state only after the broker account is
    confirmed flat, and retain the old checkpoint for audit.
 
-A pre-v25 checkpoint requires explicit external migration or removal before
+A pre-v26 checkpoint requires explicit external migration or removal before
 this version can run. Revision 25 adds the execution identity and changes the
-live state key. Stop flat and start a new checkpoint, or externally migrate
-the JSON document and key only after reconciling its positions and active
-orders to the same authenticated broker account. Re-running database
+live state key; revision 26 records the bar each pending intent was submitted
+on, so a restored simulation still expires a resting `day` limit against the
+session that submitted it. Stop flat and start a new checkpoint, or externally
+migrate the JSON document and key only after reconciling its positions and
+active orders to the same authenticated broker account. Re-running database
 initialization or schema migration does not transform stored checkpoint JSON.
 
 A configuration, broker environment, endpoint, or authenticated account change

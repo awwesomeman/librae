@@ -110,6 +110,7 @@ from librae.core.strategy import (
 from librae.core.trading_calendar import (
     ALWAYS_OPEN_CALENDAR,
     period_start,
+    session_label,
     session_labels,
     session_ordinals,
     validate_calendar_id,
@@ -131,6 +132,10 @@ class _DecisionEnvelope:
 
     decision: StrategyDecision
     decision_at: pd.Timestamp | None
+    # Bar timestamp the strategy emitted this on. Distinct from decision_at,
+    # which is the information frontier and is None for single-frequency runs;
+    # a resting "day" order expires against the session that submitted it.
+    submitted_at: pd.Timestamp | None = None
 
 
 def _enveloped_decision(envelopes: Sequence[_DecisionEnvelope]) -> StrategyDecision:
@@ -150,6 +155,7 @@ def _merge_enveloped_decision(
     new_decision: StrategyDecision,
     *,
     decision_at: pd.Timestamp | None,
+    submitted_at: pd.Timestamp | None = None,
     primary_symbol: str,
 ) -> list[_DecisionEnvelope]:
     """Apply legacy pending-decision merge rules while preserving causal time."""
@@ -177,6 +183,7 @@ def _merge_enveloped_decision(
         if not isinstance(new_decision, PortfolioWeights)
         else new_decision,
         decision_at=decision_at,
+        submitted_at=submitted_at,
     )
     if isinstance(pending, PortfolioWeights):
         return [envelope]
@@ -205,10 +212,85 @@ def _partition_enveloped_decisions(
             primary_symbol=primary_symbol,
         )
         if executable:
-            ready.append(_DecisionEnvelope(executable, envelope.decision_at))
+            ready.append(_DecisionEnvelope(executable, envelope.decision_at, envelope.submitted_at))
         if data_waiting:
-            waiting.append(_DecisionEnvelope(data_waiting, envelope.decision_at))
+            waiting.append(
+                _DecisionEnvelope(data_waiting, envelope.decision_at, envelope.submitted_at)
+            )
     return _enveloped_decision(ready), waiting, ready
+
+
+def _expire_day_intents(
+    envelopes: Sequence[_DecisionEnvelope],
+    ts: pd.Timestamp,
+    *,
+    primary_symbol: str,
+    session_of: Callable[[str, pd.Timestamp], object],
+) -> tuple[list[_DecisionEnvelope], list[str]]:
+    """Drop resting ``day`` intents once their submitting session has ended.
+
+    The boundary is the instrument's own trading session, not a wall-clock
+    day, so a venue whose session spans midnight keeps its orders alive
+    across it. Only a limit order can outlive an event, so ``session_of`` is
+    never consulted for a market order and a run that rests nothing pays no
+    calendar cost.
+    """
+
+    def rests(intent: OrderIntent) -> bool:
+        return intent.time_in_force == "day" and intent.limit_price is not None
+
+    kept: list[_DecisionEnvelope] = []
+    expired: list[str] = []
+    for envelope in envelopes:
+        if (
+            isinstance(envelope.decision, PortfolioWeights)
+            or envelope.submitted_at is None
+            or not any(rests(intent) for intent in envelope.decision)
+        ):
+            kept.append(envelope)
+            continue
+        live: list[OrderIntent] = []
+        for intent in envelope.decision:
+            symbol = intent.symbol or primary_symbol
+            if rests(intent) and session_of(symbol, ts) != session_of(
+                symbol, envelope.submitted_at
+            ):
+                expired.append(symbol)
+                continue
+            live.append(intent)
+        if live:
+            kept.append(_DecisionEnvelope(live, envelope.decision_at, envelope.submitted_at))
+    return kept, expired
+
+
+def _resting_envelopes(
+    ready_envelopes: Sequence[_DecisionEnvelope],
+    resting_intents: Sequence[OrderIntent],
+    *,
+    primary_symbol: str,
+) -> list[_DecisionEnvelope]:
+    """Re-queue intents whose lifetime outlived the event that just ran.
+
+    Each one keeps the causal ``decision_at`` that first made it eligible, so
+    a resting order never gains a later information frontier than the strategy
+    emission that created it, and ``day`` can still tell which session it was
+    submitted in.
+    """
+    if not resting_intents:
+        return []
+    still_resting = {intent.symbol or primary_symbol: intent for intent in resting_intents}
+    envelopes: list[_DecisionEnvelope] = []
+    for envelope in ready_envelopes:
+        if isinstance(envelope.decision, PortfolioWeights):
+            continue
+        kept = [
+            still_resting[symbol]
+            for intent in envelope.decision
+            if (symbol := intent.symbol or primary_symbol) in still_resting
+        ]
+        if kept:
+            envelopes.append(_DecisionEnvelope(kept, envelope.decision_at, envelope.submitted_at))
+    return envelopes
 
 
 class _MarketDataReplay:
@@ -1396,6 +1478,21 @@ class Backtest:
 
             if halted:
                 pending_envelopes = []
+            pending_envelopes, expired_day_symbols = _expire_day_intents(
+                pending_envelopes,
+                ts,
+                primary_symbol=primary_symbol,
+                session_of=self._session_of,
+            )
+            runtime_events.extend(
+                RuntimeEvent(
+                    ts=ts.to_pydatetime(),
+                    event_type="decision_skipped",
+                    symbol=symbol,
+                    detail={"reason": "day_order_expired"},
+                )
+                for symbol in expired_day_symbols
+            )
             decision_to_execute, pending_envelopes, ready_envelopes = (
                 _partition_enveloped_decisions(
                     pending_envelopes,
@@ -1498,6 +1595,14 @@ class Backtest:
                 elif was_rebalance:
                     rebalance_delay_bars = 0
                     unavailable_rebalance_symbols = ()
+            pending_envelopes = [
+                *_resting_envelopes(
+                    ready_envelopes,
+                    step_result.resting_intents,
+                    primary_symbol=primary_symbol,
+                ),
+                *pending_envelopes,
+            ]
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
             runtime_events.extend(step_result.runtime_events)
@@ -1689,6 +1794,7 @@ class Backtest:
                     pending_envelopes,
                     new_decision,
                     decision_at=decision_at,
+                    submitted_at=ts,
                     primary_symbol=primary_symbol,
                 )
                 decision_index += 1
@@ -2135,6 +2241,20 @@ class Backtest:
             for ts, value in lagged.dropna().items():
                 result.setdefault(ts, {})[symbol] = float(value)
         return result
+
+    def _session_of(self, symbol: str, ts: pd.Timestamp) -> object:
+        """Session label a resting ``day`` order expires against."""
+        if self._timeframe == "D1":
+            # One daily bar is one session, so a day order lives for exactly
+            # the single event it was already eligible on.
+            return ts
+        calendar_id = self._calendar_ids.get(symbol)
+        if calendar_id is None:
+            raise ValueError(
+                f"time_in_force='day' on intraday {symbol} data requires a calendar_id: "
+                "the session boundary is what makes the order expire"
+            )
+        return session_label(ts, calendar_id)
 
     def _precompute_session_labels(self) -> dict[pd.Timestamp, dict[str, object]]:
         """Map every bar to its instrument session for cumulative ADV usage."""

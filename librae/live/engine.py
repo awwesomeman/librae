@@ -769,6 +769,9 @@ class LiveTrader:
         self._cash = config.account.initial_cash
         self._halted: bool = False
         self._pending_decision: StrategyDecision = []
+        # Bar timestamp each pending intent was submitted on, keyed by symbol.
+        # A resting "day" limit expires against its submitting session.
+        self._pending_submitted_at: dict[str, datetime] = {}
         self._active_orders: list[TrackedOrder] = []
         self._live_rebalance: LiveRebalance | None = None
         self._equity_peak = self._cash
@@ -854,6 +857,74 @@ class LiveTrader:
     def _cash_for_symbol(self, symbol: str) -> float:
         return self._cash
 
+    def _record_pending_submissions(
+        self,
+        decision: StrategyDecision,
+        ts: datetime,
+        *,
+        primary_symbol: str,
+    ) -> None:
+        """Remember which bar submitted each newly pending intent."""
+        if isinstance(decision, PortfolioWeights):
+            return
+        for intent in decision:
+            self._pending_submitted_at[intent.symbol or primary_symbol] = ts
+
+    def _prune_pending_submissions(self, *, primary_symbol: str) -> None:
+        """Forget submissions whose intent is no longer pending."""
+        if isinstance(self._pending_decision, PortfolioWeights):
+            self._pending_submitted_at = {}
+            return
+        still_pending = {intent.symbol or primary_symbol for intent in self._pending_decision}
+        self._pending_submitted_at = {
+            symbol: submitted_at
+            for symbol, submitted_at in self._pending_submitted_at.items()
+            if symbol in still_pending
+        }
+
+    def _session_of(self, symbol: str, ts: datetime) -> object:
+        """Session label a resting ``day`` order expires against."""
+        calendar_id = self._instruments[symbol].calendar_id
+        if calendar_id is None:
+            raise ValueError(
+                f"time_in_force='day' on {symbol} requires a calendar_id: "
+                "the session boundary is what makes the order expire"
+            )
+        return session_label(ts, calendar_id)
+
+    def _expire_resting_day_intents(self, ts: datetime, *, primary_symbol: str) -> None:
+        """Drop resting ``day`` limits once their submitting session has ended.
+
+        Mirrors the backtest so a deterministic runtime cannot drift on this
+        sequence. Only a limit order can outlive an event, so a market order
+        never consults the calendar.
+        """
+        if isinstance(self._pending_decision, PortfolioWeights) or not self._pending_decision:
+            return
+        live: list[OrderIntent] = []
+        for intent in self._pending_decision:
+            symbol = intent.symbol or primary_symbol
+            submitted_at = self._pending_submitted_at.get(symbol)
+            if (
+                intent.time_in_force == "day"
+                and intent.limit_price is not None
+                and submitted_at is not None
+                and self._session_of(symbol, ts) != self._session_of(symbol, submitted_at)
+            ):
+                self._pending_submitted_at.pop(symbol, None)
+                if self._on_runtime_event:
+                    self._on_runtime_event(
+                        RuntimeEvent(
+                            ts=ts,
+                            event_type="decision_skipped",
+                            symbol=symbol,
+                            detail={"reason": "day_order_expired"},
+                        )
+                    )
+                continue
+            live.append(intent)
+        self._pending_decision = live
+
     def _without_halted_account(self, decision: StrategyDecision) -> StrategyDecision:
         return [] if self._halted else decision
 
@@ -876,6 +947,7 @@ class LiveTrader:
             last_bar_ts=dict(self._last_bar_ts),
             last_financing_ts=dict(self._last_financing_ts),
             pending_decision=deepcopy(self._pending_decision),
+            pending_submitted_at=dict(self._pending_submitted_at),
             active_orders=deepcopy(self._active_orders),
             live_rebalance=deepcopy(self._live_rebalance),
             equity_peak=self._equity_peak,
@@ -919,6 +991,7 @@ class LiveTrader:
         self._last_bar_ts = state.last_bar_ts
         self._last_financing_ts = state.last_financing_ts
         self._pending_decision = state.pending_decision
+        self._pending_submitted_at = dict(state.pending_submitted_at)
         self._active_orders = state.active_orders
         self._live_rebalance = state.live_rebalance
         self._equity_peak = state.equity_peak
@@ -1497,6 +1570,7 @@ class LiveTrader:
         """Fail closed and cancel every tracked order that may still execute."""
         self._halted = True
         self._pending_decision = []
+        self._pending_submitted_at = {}
         self._live_rebalance = None
         if not self._executor.simulation:
             self._cancel_active_orders()
@@ -3644,6 +3718,7 @@ class LiveTrader:
         ready_decision: StrategyDecision = []
         if not execution_already_committed:
             self._pending_decision = self._without_halted_account(self._pending_decision)
+            self._expire_resting_day_intents(ts, primary_symbol=primary_symbol)
             if not live_rebalance_blocks_decisions:
                 ready_decision, waiting_decision = partition_pending_decision(
                     self._pending_decision,
@@ -3719,6 +3794,13 @@ class LiveTrader:
                 positions=self._positions,
                 result=step_result,
             )
+            if step_result.resting_intents:
+                self._pending_decision = merge_pending_decisions(
+                    self._pending_decision,
+                    list(step_result.resting_intents),
+                    primary_symbol=primary_symbol,
+                )
+            self._prune_pending_submissions(primary_symbol=primary_symbol)
             self._apply_financing_cash_flows(ts, raw_bars)
         elif ready_decision and not self._execute_live_decision(
             ready_decision,
@@ -3886,6 +3968,7 @@ class LiveTrader:
                 intent,
                 primary_symbol=primary_symbol,
             )
+            self._record_pending_submissions(intent, ts, primary_symbol=primary_symbol)
         else:
             ready_decision, waiting_decision = partition_pending_decision(
                 intent,
@@ -4156,6 +4239,7 @@ class LiveTrader:
             )
         self._halted = True
         self._pending_decision = []
+        self._pending_submitted_at = {}
         self._persist_state()
         if flattened:
             outcome = "flattened account positions"
