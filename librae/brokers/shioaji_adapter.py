@@ -445,9 +445,11 @@ class ShioajiAdapter:
         ``time_in_force`` (``"day"``/``"ioc"``/``"fok"`` — no ``"gtc"``),
         and optionally ``price`` for limit orders.
 
-        Shioaji caps ``custom_field`` at six characters, so a deterministic
-        base32 digest of ``client_order_id`` is used for restart lookup.
-        Duplicate digest matches fail closed instead of guessing ownership.
+        ``custom_field`` is assumed to hold six characters (unverified against
+        the venue: the SDK declares it ``Optional[str]`` with no length bound),
+        so a deterministic base32 digest of ``client_order_id`` is used for
+        restart lookup. Duplicate digest matches fail closed instead of
+        guessing ownership.
         """
         self._require_auth()
         validate_order_signal(signal)
@@ -572,7 +574,7 @@ class ShioajiAdapter:
         ]
 
     def broker_client_order_id(self, client_order_id: str) -> str:
-        """Map Librae's durable id to Shioaji's six-character custom field."""
+        """Map Librae's durable id to the six-character custom field this adapter assumes."""
         digest = hashlib.sha256(client_order_id.encode()).digest()
         return base64.b32encode(digest).decode("ascii")[:6]
 

@@ -58,3 +58,12 @@ Applies to every doc in this repo except `plans/`, `research/`, and `spikes/`
    no padding.
 3. **One canonical home per concept.** If two docs would describe the same
    thing, pick one and link from the other instead of restating it.
+4. **External facts carry a source.** A claim about what a venue, broker
+   SDK, or third-party service accepts or rejects must cite one of: a live
+   observation (date plus the verbatim error or response), the official
+   document, or an explicit "unverified". A library exposing a name is not
+   evidence the venue supports it. Unsourced claims are assumptions, and
+   should read as such.
+
+Rules 1 and 4 apply to docstrings and code comments too. A comment states
+why the code is the way it is; what it currently does is stated by the code.
