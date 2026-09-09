@@ -1167,9 +1167,18 @@ its failure is logged, and nothing is queued. The engine cannot acknowledge on
 a caller's behalf, and queueing would grow the checkpoint for work it can
 never retire.
 
-The queue is bounded. Reaching the bound is terminal runtime health — the run
-halts rather than discarding audit rows, because a silent drop leaves the
-table diverged with nothing recording that it happened.
+A durable sink must let its failure propagate. A sink that declares durability
+and then swallows its own errors returns normally, which the engine reads as
+acknowledgement — the row is dropped and the queue never engages.
+
+The queue is bounded, and reaching the bound drops loudly rather than halting.
+Each dropped row is recorded as a `decision_skipped` runtime event with reason
+`ohlcv_audit_delivery_failed` and its full identity, an alert fires once, and
+`LiveTrader.ohlcv_audit_degraded` reports the condition until delivery catches
+up. Trading continues: these are OHLCV bars, the most recoverable data in the
+system — a gap is closed by re-fetching from the source and nothing in the
+book depends on it, so stopping the book to protect it would cost more than it
+saves.
 
 Both the stale alert and the not-ready alert are edge-triggered: one
 diagnostic when the condition starts and one when it clears, not one per poll

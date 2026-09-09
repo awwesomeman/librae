@@ -897,7 +897,15 @@ def test_live_ohlcv_write_preserves_session_identity() -> None:
     assert write.call_args.args[0]["available_at"].iloc[0] == datetime(2025, 1, 1, 1, tzinfo=UTC)
 
 
-def test_live_ohlcv_analytics_write_remains_best_effort() -> None:
+def test_live_ohlcv_analytics_write_records_and_propagates() -> None:
+    """This write is no longer best-effort (#198).
+
+    The sink declares durable delivery, and the engine reads a normal return
+    as acknowledgement, so swallowing here dropped the row the queue exists to
+    protect. Failure recording is unchanged — it still counts toward the alert
+    threshold — but the exception now reaches the engine, which keeps the row
+    queued and retries it.
+    """
     config = make_test_cfg(mode="sim")
     callbacks = _TimescaleCallbacks(
         config,
@@ -905,11 +913,14 @@ def test_live_ohlcv_analytics_write_remains_best_effort() -> None:
         None,
     )
 
-    with patch(
-        "librae.db.timescale_writer.write_ohlcv",
-        autospec=True,
-        side_effect=RuntimeError("database unavailable"),
-    ) as write:
+    with (
+        patch(
+            "librae.db.timescale_writer.write_ohlcv",
+            autospec=True,
+            side_effect=RuntimeError("database unavailable"),
+        ) as write,
+        pytest.raises(RuntimeError, match="database unavailable"),
+    ):
         callbacks.on_ohlcv(
             "BTCUSDT",
             "H1",

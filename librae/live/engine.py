@@ -858,6 +858,7 @@ class LiveTrader:
         sink_owner = getattr(on_ohlcv, "__self__", on_ohlcv)
         self._durable_ohlcv_delivery = getattr(sink_owner, "durable_ohlcv_delivery", False) is True
         self._pending_ohlcv: list[PendingOhlcvDelivery] = []
+        self._ohlcv_audit_degraded = False
         self._on_heartbeat = on_heartbeat
         self._on_signal_outcome = on_signal_outcome
         self._on_financing_cash_flow = on_financing_cash_flow
@@ -1435,10 +1436,20 @@ class LiveTrader:
                 except Exception:
                     logger.exception("Best-effort OHLCV callback failed for %s at %s", symbol, ts)
             return
+        self._flush_pending_ohlcv()
+
+    def _queue_ohlcv(self, audit_bars: Mapping[str, dict[str, object]], ts: datetime) -> None:
+        """Accept this event's audit rows, before the checkpoint that lands
+        the watermark they belong to.
+
+        Called immediately before that checkpoint rather than after it, so one
+        write carries both. Landing them separately would double the
+        round-trips per bar for no extra guarantee.
+        """
+        if self._on_ohlcv is None or not self._durable_ohlcv_delivery:
+            return
         for symbol, bar in audit_bars.items():
             self._enqueue_ohlcv(symbol, bar, ts)
-        self._persist_state()
-        self._flush_pending_ohlcv()
 
     def _enqueue_ohlcv(self, symbol: str, bar: Mapping[str, object], ts: datetime) -> None:
         """Record an accepted row before the watermark can forget it."""
@@ -1459,18 +1470,55 @@ class LiveTrader:
             },
         )
         if len(self._pending_ohlcv) >= MAX_PENDING_OHLCV:
-            # Dropping the row would leave the audit table diverged with
-            # nothing recording that it happened, so this is terminal.
-            self._halt_live(
-                title="OHLCV Audit Backlog",
-                message=(
-                    f"{len(self._pending_ohlcv)} unacknowledged audit rows reached the "
-                    f"durable bound of {MAX_PENDING_OHLCV}; persistence cannot catch up "
-                    "and rows would otherwise be dropped silently."
-                ),
-            )
+            self._drop_ohlcv_audit_row(pending)
             return
         self._pending_ohlcv.append(pending)
+
+    def _drop_ohlcv_audit_row(self, pending: PendingOhlcvDelivery) -> None:
+        """Drop one audit row loudly, without stopping the book.
+
+        This queue holds OHLCV bars, the most recoverable data in the system:
+        a gap is closed by re-fetching from the source, and nothing in the
+        book depends on it. Halting cancels live orders and stops trading,
+        which has real market cost, to protect data that can be rebuilt.
+
+        Reaching the bound is not an outage either. The checkpoint and these
+        rows share one database, so a database refusing this many OHLCV writes
+        while still accepting checkpoints is a schema or constraint problem.
+        It surfaces as terminal health and a recorded identity, so a backfill
+        knows what to close.
+        """
+        if self._on_runtime_event:
+            self._on_runtime_event(
+                RuntimeEvent(
+                    ts=self._utc_now(),
+                    event_type="decision_skipped",
+                    symbol=pending.subscription.symbol,
+                    detail={
+                        "reason": "ohlcv_audit_delivery_failed",
+                        "timeframe": pending.subscription.timeframe,
+                        "ts": pending.ts.isoformat(),
+                        "available_at": pending.available_at.isoformat(),
+                        "pending_bound": MAX_PENDING_OHLCV,
+                    },
+                )
+            )
+        if not self._ohlcv_audit_degraded:
+            self._ohlcv_audit_degraded = True
+            logger.error(
+                "OHLCV audit backlog reached %d unacknowledged rows; further rows are "
+                "dropped and must be backfilled from the data source",
+                MAX_PENDING_OHLCV,
+            )
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] OHLCV Audit Backlog",
+                message=(
+                    f"{MAX_PENDING_OHLCV} unacknowledged audit rows; further rows are "
+                    "dropped and recorded individually. Trading continues — these bars "
+                    "are re-fetchable and the book does not depend on them."
+                ),
+            )
 
     def _flush_pending_ohlcv(self) -> None:
         """Offer queued rows in order, keeping whatever is not acknowledged.
@@ -1505,6 +1553,9 @@ class LiveTrader:
         if delivered:
             self._pending_ohlcv = self._pending_ohlcv[delivered:]
             self._persist_state()
+        if self._ohlcv_audit_degraded and not self._pending_ohlcv:
+            self._ohlcv_audit_degraded = False
+            logger.info("OHLCV audit backlog cleared; delivery has caught up")
 
     def _staleness_grace(self, subscription: MarketDataSubscription) -> timedelta:
         """Bounded publication slack allowed after an expected close.
@@ -2180,6 +2231,15 @@ class LiveTrader:
         )
 
     @property
+    def ohlcv_audit_degraded(self) -> bool:
+        """Whether audit rows are being dropped because delivery cannot catch up.
+
+        Terminal for the audit trail, not for trading: the dropped identities
+        are recorded individually and the bars are re-fetchable.
+        """
+        return self._ohlcv_audit_degraded
+
+    @property
     def run_id(self) -> str:
         """Stable id used by callbacks and persisted runtime facts."""
         return self._run_id
@@ -2303,6 +2363,10 @@ class LiveTrader:
         """Process completed market-data events without live catch-up orders."""
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
+        # Retry unacknowledged audit rows every cycle, not only when a new bar
+        # arrives: a stalled feed would otherwise leave them queued
+        # indefinitely while the database recovers.
+        self._flush_pending_ohlcv()
         self._maybe_reconcile_runtime()
         fetch_results = self._fetch_runtime_frames()
         if any(result.outcome != "success" for result in fetch_results.values()):
@@ -4428,6 +4492,7 @@ class LiveTrader:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
                     position.periods_held += 1
+            self._queue_ohlcv(audit_bars, ts)
             self._persist_state()
             self._deliver_ohlcv(audit_bars, ts)
             return feature_batch.as_of if feature_batch is not None else None
@@ -4566,6 +4631,7 @@ class LiveTrader:
         for symbol, position in self._positions.items():
             if symbol in raw_bars:
                 position.periods_held += 1
+        self._queue_ohlcv(audit_bars, ts)
         self._persist_state()
 
         # Record OHLCV after processing (equity already recorded in Step 1.5)

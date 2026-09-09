@@ -338,20 +338,76 @@ class TestBestEffortStaysBestEffort:
         assert runner._last_bar_ts, "the cycle completed"
 
 
-class TestOverflowIsTerminal:
-    def test_crossing_the_bound_halts_rather_than_dropping(self) -> None:
-        """Silently discarding audit rows would leave the table diverged with
-        nothing to show for it."""
+class TestOverflowDropsLoudly:
+    """Terminal health, not a halt.
+
+    This queue holds OHLCV bars, the most recoverable data in the system: a
+    gap is closed by re-fetching from the source, and nothing in the book
+    depends on it. Halting cancels live orders and stops trading, which has
+    real market cost, to protect data that can be rebuilt. Given that the
+    checkpoint and these rows share one database, reaching the bound means the
+    database is accepting checkpoints while rejecting OHLCV writes — a schema
+    or constraint problem, not an outage.
+    """
+
+    @staticmethod
+    def _overflowing():
         from librae.live.state import MAX_PENDING_OHLCV
 
         sink = _DurableSink()
         sink.fail = True
         runner = _runner(sink)
         runner._pending_ohlcv = _pending_sequence(MAX_PENDING_OHLCV)
+        return runner
+
+    def test_trading_continues(self) -> None:
+        runner = self._overflowing()
 
         runner._poll_cycle()
 
-        assert runner._halted
+        assert not runner._halted
+
+    def test_the_dropped_row_is_recorded(self) -> None:
+        """Never silently: the identity that was lost has to be recoverable
+        from the audit trail so a backfill knows what to close."""
+        runner = self._overflowing()
+        events: list = []
+        runner._on_runtime_event = events.append
+
+        runner._poll_cycle()
+
+        dropped = [e for e in events if e.detail.get("reason") == "ohlcv_audit_delivery_failed"]
+        assert dropped
+        assert dropped[0].detail["ts"]
+        assert dropped[0].detail["timeframe"]
+
+    def test_health_reports_the_degradation(self) -> None:
+        runner = self._overflowing()
+
+        runner._poll_cycle()
+
+        assert runner.ohlcv_audit_degraded is True
+
+    def test_the_alert_fires_once_not_per_row(self) -> None:
+        runner = self._overflowing()
+        alerts: list = []
+        runner._notify = lambda method, **kwargs: alerts.append(kwargs)
+
+        runner._poll_cycle()
+        runner._poll_cycle()
+
+        titles = [a.get("title", "") for a in alerts]
+        assert sum("Audit Backlog" in title for title in titles) == 1
+
+    def test_recovery_clears_the_degraded_flag(self) -> None:
+        runner = self._overflowing()
+        runner._poll_cycle()
+        assert runner.ohlcv_audit_degraded is True
+
+        runner._on_ohlcv.fail = False
+        runner._poll_cycle()
+
+        assert runner.ohlcv_audit_degraded is False
 
 
 def test_the_reference_persistence_path_opts_in() -> None:
@@ -360,3 +416,94 @@ def test_the_reference_persistence_path_opts_in() -> None:
     from librae.orchestration.live import _TimescaleCallbacks
 
     assert _TimescaleCallbacks.durable_ohlcv_delivery is True
+
+
+class TestTheReferencePathActuallyRetries:
+    """The declaration is not the contract; propagating failure is.
+
+    The first-party callback routed its write through a wrapper that logs and
+    swallows every exception, so it returned normally after a failed write.
+    The engine read that as acknowledgement and dropped the row — the durable
+    protocol was declared and never engaged, and the only observable effect
+    was extra checkpoint writes.
+    """
+
+    @staticmethod
+    def _callbacks():
+        from librae.config.symbols import resolve_symbol
+        from librae.orchestration.live import _TimescaleCallbacks
+
+        from tests.engine.test_live_runner import _test_cfg
+
+        config = _test_cfg(mode="sim", warmup_periods=1)
+        callbacks = _TimescaleCallbacks(
+            config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None
+        )
+        callbacks._run_id = "r1"
+        return config, callbacks
+
+    def test_a_failed_write_propagates_out_of_the_reference_callback(self) -> None:
+        from unittest.mock import patch
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("timescale unavailable")
+
+        _, callbacks = self._callbacks()
+        bar = {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1_000.0}
+
+        with (
+            patch("librae.db.timescale_writer.write_ohlcv", boom),
+            pytest.raises(RuntimeError, match="timescale unavailable"),
+        ):
+            callbacks.on_ohlcv("BTCUSDT", "H1", bar, datetime(2025, 1, 1, tzinfo=UTC))
+
+    def test_other_reference_writes_stay_best_effort(self) -> None:
+        """Only the durable path changes. A heartbeat is a recoverable
+        next-bar snapshot and must keep swallowing."""
+        from unittest.mock import patch
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("timescale unavailable")
+
+        _, callbacks = self._callbacks()
+
+        with patch("librae.db.timescale_writer.update_heartbeat", boom):
+            callbacks.on_heartbeat("r1")
+
+    def test_the_engine_replays_through_the_real_reference_callback(self) -> None:
+        """End to end on the path the feature exists for, rather than a test
+        double that raises where the real one does not."""
+        from unittest.mock import patch
+
+        from librae.live.state import MemoryLiveStateStore
+
+        from tests.engine.test_live_runner import TestLiveTrader
+
+        config, callbacks = self._callbacks()
+        accepted: list = []
+
+        def record(df, subscription, *_args, **_kwargs):
+            accepted.append((subscription.symbol, len(df)))
+            return len(df)
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("timescale unavailable")
+
+        bars = {"n": 6}
+        runner = TestLiveTrader()._make_runner(
+            config=config,
+            state_store=MemoryLiveStateStore(),
+            fetcher=lambda *a, **k: _frame(bars["n"]),
+            on_ohlcv=callbacks.on_ohlcv,
+        )
+
+        with patch("librae.db.timescale_writer.write_ohlcv", boom):
+            runner._poll_cycle()
+        assert runner._pending_ohlcv, "a failed reference write must stay pending"
+
+        bars["n"] = 7
+        with patch("librae.db.timescale_writer.write_ohlcv", record):
+            runner._poll_cycle()
+
+        assert accepted, "the row the failed write dropped must reach the writer"
+        assert runner._pending_ohlcv == []

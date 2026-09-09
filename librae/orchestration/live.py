@@ -226,9 +226,14 @@ class _TimescaleCallbacks:
         callback: Callable[..., object],
         *args: object,
         critical: bool = False,
+        propagate: bool = False,
         **kwargs: object,
     ) -> None:
         """Run one best-effort DB write.
+
+        ``propagate=True`` re-raises after recording, for a caller that owns
+        retry. Swallowing there would be read as acknowledgement and the work
+        would be dropped, which is worse than the failure itself.
 
         ``critical=True`` alerts on the first failure instead of after
         ``_DB_FAILURE_ALERT_THRESHOLD`` consecutive ones — for per-event,
@@ -255,6 +260,8 @@ class _TimescaleCallbacks:
                     title=f"[{self._config.strategy_name}] DB Write Failing",
                     message=(f"{failures} consecutive {name} failures; trading continues."),
                 )
+            if propagate:
+                raise
 
     def _alert(self, *, title: str, message: str) -> None:
         notifier = self._notifier
@@ -462,10 +469,14 @@ class _TimescaleCallbacks:
             timeframe=timeframe,
             session_mode=self._config.session_mode,
         )
+        # Propagates on purpose: this sink declares durable delivery, and the
+        # engine reads a normal return as acknowledgement. Swallowing here
+        # would drop the row the queue exists to protect.
         self._write(
             write_ohlcv,
             frame,
             subscription,
+            propagate=True,
         )
 
     def on_heartbeat(self, run_id: str) -> None:
