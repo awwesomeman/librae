@@ -1009,6 +1009,62 @@ class TestInit:
         mock_api.activate_ca.assert_not_called()
         assert adapter._read_only is True
 
+    def _adapter_with_accounts(self, futopt: object, stock: object, *, simulation: bool = True):
+        from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+
+        mock_api = MagicMock()
+        mock_api.futopt_account = futopt
+        mock_api.stock_account = stock
+        with patch(
+            "librae.brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
+        ):
+            return ShioajiAdapter(
+                credentials=ShioajiCredentials(api_key="k", secret_key="s"),
+                simulation=simulation,
+            )
+
+    def test_execution_identity_uses_login_accounts_and_simulation(self):
+        from librae.live.execution_identity import account_fingerprint
+
+        adapter = self._adapter_with_accounts(
+            SimpleNamespace(account_id="F123456789"),
+            SimpleNamespace(account_id="S987654321"),
+        )
+
+        identity = adapter.execution_identity()
+        assert identity.environment == "paper"
+        assert identity.endpoint == "sinopac"
+        assert identity.account_fingerprint == account_fingerprint(
+            "shioaji", "F123456789", "S987654321"
+        )
+        assert "F123456789" not in identity.summary
+        assert "S987654321" not in identity.summary
+
+    def test_execution_identity_covers_a_stock_only_login(self):
+        """A Sinopac login without futures permission still trades stocks, so
+        it must report an identity rather than blocking live startup."""
+        from librae.live.execution_identity import account_fingerprint
+
+        adapter = self._adapter_with_accounts(None, SimpleNamespace(account_id="S987654321"))
+
+        identity = adapter.execution_identity()
+        assert identity.account_fingerprint == account_fingerprint("shioaji", "S987654321")
+
+    def test_execution_identity_distinguishes_two_stock_accounts(self):
+        first = self._adapter_with_accounts(None, SimpleNamespace(account_id="S111"))
+        second = self._adapter_with_accounts(None, SimpleNamespace(account_id="S222"))
+
+        assert (
+            first.execution_identity().account_fingerprint
+            != second.execution_identity().account_fingerprint
+        )
+
+    def test_execution_identity_fails_closed_without_any_account(self):
+        adapter = self._adapter_with_accounts(None, None)
+
+        with pytest.raises(ValueError, match="authenticated account identity"):
+            adapter.execution_identity()
+
     def test_login_with_ca_path_enables_trading(self):
         from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
 

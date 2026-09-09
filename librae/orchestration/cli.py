@@ -137,8 +137,9 @@ def base_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument(
         "--reset-state",
         action="store_true",
-        help="delete this config's sim/live checkpoint instead of running "
-        "(next start begins a fresh run_id); does not touch trade/equity history",
+        help="delete this config's simulation checkpoint instead of running "
+        "(next start begins a fresh run_id); does not touch trade/equity history, "
+        "and never clears a live checkpoint",
     )
     return p
 
@@ -396,6 +397,11 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
 
     # 3. dry_run -> no_db
     dry_run = args.dry_run
+    if args.mode == "live" and dry_run:
+        raise ValueError(
+            "--mode live --dry-run is unsafe: dry-run only disables persistence and "
+            "notifications; use --mode sim for no-order execution"
+        )
     no_db = args.no_db or dry_run
 
     # poll_seconds has no implicit default in sim/live: it is an API polling
@@ -535,7 +541,7 @@ def check_existing_run(
 
 
 def reset_realtime_state(config: RunConfig) -> None:
-    """Delete this config's sim/live checkpoint so the next start begins a
+    """Delete this config's simulation checkpoint so the next start begins a
     fresh run_id. Does not touch position_events/equity_curve/etc — those are
     real execution history, not derivable from the checkpoint, and require
     a separate, explicit decision to discard.
@@ -544,15 +550,29 @@ def reset_realtime_state(config: RunConfig) -> None:
     most often sends an operator here: after a _STATE_SCHEMA_VERSION bump the
     engine refuses to start, and the only way forward is to clear the old
     checkpoint.
+
+    Live checkpoints are deliberately out of reach. Their state key includes an
+    adapter-observed execution identity, so a config hash alone cannot tell a
+    paper checkpoint from a production one, and clearing the wrong one restarts
+    a funded account with an empty book while the broker still holds the
+    positions. See the live-migration procedure in
+    docs/guides/optional-infrastructure.md.
     """
     if config.mode == "backtest":
         raise ValueError("--reset-state applies to sim/live only; backtest has no checkpoint")
+    if config.mode == "live":
+        raise ValueError(
+            "--reset-state does not clear live checkpoints: the live state key includes "
+            "the adapter-observed execution identity, so a config hash alone cannot "
+            "select between a paper and a production checkpoint. Follow the live "
+            "migration procedure in docs/guides/optional-infrastructure.md — stop flat, "
+            "then start a new checkpoint or migrate the stored document explicitly."
+        )
 
     from librae.db.timescale_state import TimescaleLiveStateStore
+    from librae.live.execution_identity import runtime_state_key
 
-    # Must match LiveTrader._state_key (librae/live/engine.py) exactly, or
-    # this looks up the wrong (or no) checkpoint.
-    state_key = f"{config.mode}:{config.config_hash}"
+    state_key = runtime_state_key(config.mode, config.config_hash)
     store = TimescaleLiveStateStore()
 
     if not store.acquire_lease(state_key):

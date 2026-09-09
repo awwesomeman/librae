@@ -24,6 +24,7 @@ from librae.live.engine import (
     _resolve_market_data_subscription_snapshot,
     _validate_market_data_calendar_preconditions,
 )
+from librae.live.execution_identity import ExecutionIdentity, resolve_execution_identity
 from librae.live.interfaces import Notifier
 from librae.live.state import normalize_runtime_revision
 
@@ -210,11 +211,13 @@ class _TimescaleCallbacks:
         instruments: dict[str, SymbolInfo],
         notifier: Notifier | None,
         subscriptions: Mapping[str, MarketDataSubscription] | None = None,
+        execution_identity: ExecutionIdentity | None = None,
     ) -> None:
         self._config = config
         self._instruments = instruments
         self._notifier = notifier
         self._subscriptions = dict(subscriptions or {})
+        self._execution_identity = execution_identity
         self._run_id = ""
         self._failures: dict[str, int] = {}
 
@@ -323,6 +326,9 @@ class _TimescaleCallbacks:
             execution_policy=asdict(self._config.execution),
             risk_policy=asdict(self._config.risk),
             config_hash=self._config.config_hash,
+            execution_identity=(
+                self._execution_identity.to_dict() if self._execution_identity else None
+            ),
         )
         # Seed a $0/0.0% baseline row up front — otherwise strategy_performance
         # has no row at all until the first close/reduce (on_performance is
@@ -622,6 +628,7 @@ def build_live_trader(
     )
 
     order_adapters: dict[str, object] | None = None
+    execution_identity: ExecutionIdentity | None = None
     if config.mode == "live":
         route_instances: dict[_ExecutionRoute, object] = {}
         order_adapters = {}
@@ -643,6 +650,7 @@ def build_live_trader(
                 )
                 route_instances[execution_route] = instance
             order_adapters[symbol] = instance
+        execution_identity = resolve_execution_identity(next(iter(order_adapters.values())))
 
     resolved_state_store = state_store
     if resolved_state_store is None and database_enabled:
@@ -653,6 +661,7 @@ def build_live_trader(
             instruments,
             resolved_notifier,
             market_data_snapshot.subscriptions,
+            execution_identity,
         )
         if database_enabled
         else None
@@ -669,6 +678,7 @@ def build_live_trader(
         status_interval_periods=resolved_status_interval,
         state_store=resolved_state_store,
         runtime_revision=resolved_runtime_revision,
+        execution_identity=execution_identity,
         on_bar=callbacks.on_bar if callbacks else None,
         on_position_event=callbacks.on_position_event if callbacks else None,
         on_ohlcv=callbacks.on_ohlcv if callbacks else None,

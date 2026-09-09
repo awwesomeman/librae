@@ -19,7 +19,7 @@ def validate_order_adapter(adapter: object) -> None:
     """Raise when an object lacks a required live-order capability."""
     missing = [
         name
-        for name in REQUIRED_ORDER_ADAPTER_METHODS
+        for name in (*REQUIRED_ORDER_ADAPTER_METHODS, "execution_identity")
         if not callable(getattr(adapter, name, None))
     ]
     if missing:

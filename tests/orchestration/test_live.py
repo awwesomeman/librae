@@ -14,6 +14,7 @@ import pytest
 from librae.config.symbols import resolve_symbol
 from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import PortfolioWeights
+from librae.live.execution_identity import ExecutionIdentity
 from librae.live.state import LiveRuntimeState, MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import (
     _build_adapter,
@@ -24,6 +25,14 @@ from librae.orchestration.live import (
 )
 
 from tests.conftest import make_test_cfg
+
+
+def _execution_adapter() -> MagicMock:
+    adapter = MagicMock()
+    adapter.execution_identity.return_value = ExecutionIdentity(
+        "fixture", "paper", "fixture", "a" * 24
+    )
+    return adapter
 
 
 def test_disabled_notifier_does_not_load_optional_integration() -> None:
@@ -525,7 +534,7 @@ def test_factory_keys_binance_order_adapter_by_execution_venue() -> None:
         },
     )
     data_adapter = MagicMock()
-    order_adapter = MagicMock()
+    order_adapter = _execution_adapter()
 
     with patch(
         "librae.orchestration.live._build_adapter",
@@ -578,7 +587,7 @@ def test_live_execution_allows_independent_market_data_sources() -> None:
     )
     first_feed = MagicMock()
     second_feed = MagicMock()
-    order_adapter = MagicMock()
+    order_adapter = _execution_adapter()
     factories = {
         "feed_a": MagicMock(return_value=first_feed),
         "feed_b": MagicMock(return_value=second_feed),
@@ -615,7 +624,7 @@ def test_factory_reuses_external_adapter_for_live_orders() -> None:
             }
         },
     )
-    adapter = MagicMock()
+    adapter = _execution_adapter()
     factory = MagicMock(return_value=adapter)
 
     trader = build_live_trader(

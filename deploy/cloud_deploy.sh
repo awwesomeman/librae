@@ -90,9 +90,10 @@ fi
 
 STAGE="file transfer"
 echo "[1/6] Syncing deployment files to ${TARGET}:~/${REMOTE_DIR}/ (not the whole repo)..."
-ssh "${TARGET}" "mkdir -p ${REMOTE_DIR}/deploy ${REMOTE_DIR}/librae/db ${REMOTE_DIR}/librae/app/grafana"
+ssh "${TARGET}" "mkdir -p ${REMOTE_DIR}/deploy ${REMOTE_DIR}/librae/db/migrations ${REMOTE_DIR}/librae/app/grafana"
 rsync -az "${SCRIPT_DIR}/" "${TARGET}:${REMOTE_DIR}/deploy/"
 rsync -az "${PROJECT_ROOT}/librae/db/timescale_init.sql" "${TARGET}:${REMOTE_DIR}/librae/db/timescale_init.sql"
+rsync -az "${PROJECT_ROOT}/librae/db/migrations/" "${TARGET}:${REMOTE_DIR}/librae/db/migrations/"
 # --delete: provisioning/ is fully repo-managed (dashboards + datasources),
 # so a removed/renamed file here (e.g. a dashboard uid rename) must remove
 # the stale file on the VM too — otherwise Grafana keeps provisioning an

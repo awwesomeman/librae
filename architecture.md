@@ -150,6 +150,16 @@ requires it, persists it in the checkpoint, and rejects a missing or different
 identity before broker reconciliation or order work. The engine does not
 inspect Git, package metadata, or container images to derive it.
 
+Live mode also requires the selected order adapter to report a sanitized
+`ExecutionIdentity` before checkpoint lookup or run registration. Broker,
+paper/sandbox/production class, endpoint/venue label, and an opaque hash of
+the authenticated account form this identity; credentials and raw account IDs
+never enter logs or persistence. The live state key is
+`live:<config_hash>:<execution-identity-digest>`, so coincidentally flat paper
+and production accounts cannot resolve the same checkpoint. Account ownership
+leases use the observed broker identity rather than the caller's display
+`account_id`.
+
 Backtest callers may use `librae.normalize_bars()` to explicitly map common
 DataFrame layouts into the canonical `(symbol, datetime)` UTC index. The
 helper preserves feature columns; `Backtest` itself does not infer column
@@ -181,7 +191,8 @@ Grafana dashboards consume the same multiplier.
   signatures include `fetch_ohlcv` and `info`; the public live
   `OrderAdapter` contract includes `get_position(PositionRequest)` plus
   `prepare_order`, `place_order`, `find_order`, `get_order`,
-  `list_open_orders`, and `cancel_order`.
+  `list_open_orders`, `cancel_order`, and the pre-start
+  `execution_identity()` capability.
 - `data_source` and `data_adapter` describe where bars come from; `broker` describes where orders go. Live execution never infers a broker from a symbol, market, or data source. Supply `RunConfig.broker`, compatible per-symbol `instrument_overrides[symbol]["broker"]` values, or an injected `order_adapter`; an unresolved or incompatible route fails before adapters are constructed. An explicitly selected broker may reuse the same adapter session as market data.
 - Cross-broker behavior is generalized only at an observed engine boundary. `LiveExecutor` builds one broker-neutral `PositionRequest` from the configured canonical/venue identity, currency, security type, exchange, `contract_month`/`continuous_alias`, and `CostModel.multiplier`; every adapter accepts that request and returns the same position shape. Contract lookup, broker-native symbol syntax, CCXT balance conventions, Shioaji direction enums, and IBKR `conId`/`avgCost` handling stay inside the concrete adapter. Add a shared field or helper only when more than one real adapter needs the same semantic; do not create broker hierarchies or speculative capability abstractions.
 - `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero. A prepared limit price may not differ from the strategy's validated limit. Fixed `price_increment` metadata is authoritative when present; price-band rules remain adapter/venue-owned rather than treating a cost-model tick or IBKR's minimum possible tick as a universal grid.
@@ -610,6 +621,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_performance` | `on_performance(run_id, account_id)` after a close/reduce/funding event and the current equity callback |
 | `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
 | `order_adapter` | `prepare_order(signal)`, `place_order(signal)`, `find_order(client_order_id, symbol)`, `get_order(order_id, symbol)`, `list_open_orders(symbol)`, `cancel_order(order_id, symbol)`, plus mandatory live reconciliation `get_position(PositionRequest)`; all order results follow the cumulative execution-report contract above |
+| `execution_identity` | adapter-observed `ExecutionIdentity`; live-only, compared with the order adapter before checkpoint lookup |
 | `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts |
 | `runtime_revision` | caller-owned opaque code/image identity; required in live mode and checked against restored state before broker access |
 | `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
@@ -768,6 +780,7 @@ flowchart TD
 | `external_factor_coverage_ranges` | tracks `get_factor()`'s cache coverage ranges, same mechanism as `ohlcv_coverage_ranges` | no FK | no |
 | `factor_registry` | one row per `factor_name` — the frequency + data source it is registered at, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
 | `symbols` | instrument master: what a fact table's bare `symbol` string means (market, multiplier, tick size, venue symbol, calendar, ...) | PK `(symbol, data_source, instrument_type)`; deliberately no FK from the fact tables | no |
+| `librae_schema_revision` | authoritative reference-schema revision; writable only by the migration owner | singleton PK | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
 | `broker_orders` | durable broker order lifecycle records | PK `state_key` + `client_order_id` | no |
 
@@ -782,7 +795,8 @@ assumptions, and portfolio limits cannot drift into one untyped bag.
 `config_hash` remains a non-unique configuration identity for analysis.
 `backtest_revision` records the caller-owned code/data fingerprint, and the
 nullable unique `backtest_cache_key` is the only backtest deduplication
-identity. Sim/live state continues to use `mode:config_hash`.
+identity. Sim state uses `sim:config_hash`; live state additionally binds the
+adapter-observed execution-identity digest.
 
 `signal_events` and `ohlcv` are the source facts for signal-quality analysis.
 Forward return, MFE, and MAE are derived on demand: local callers use

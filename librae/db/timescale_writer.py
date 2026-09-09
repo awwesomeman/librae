@@ -44,6 +44,8 @@ from librae.core.market_data import (
 )
 from librae.core.utils import to_canonical
 from librae.db import get_conn
+from librae.db.schema import require_current_schema
+from librae.live.execution_identity import ExecutionIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +184,7 @@ def write_run_metadata(
     config_hash: str | None = None,
     backtest_revision: str | None = None,
     backtest_cache_key: str | None = None,
+    execution_identity: dict[str, str] | None = None,
     cur: PgCursor | None = None,
     dsn: str | None = None,
 ) -> None:
@@ -190,6 +193,12 @@ def write_run_metadata(
     If ``cur`` is provided, executes on that cursor (caller owns the
     transaction).  Otherwise opens its own connection and commits.
     """
+    if mode == "live" and execution_identity is None:
+        raise ValueError("live run metadata requires an execution_identity")
+    if mode != "live" and execution_identity is not None:
+        raise ValueError("execution_identity is only valid for live run metadata")
+    if execution_identity is not None:
+        execution_identity = ExecutionIdentity.from_dict(execution_identity).to_dict()
     timeframe = to_canonical(timeframe)
     if session_mode not in ("regular", "extended"):
         raise ValueError(f"invalid market-data session mode: {session_mode!r}")
@@ -213,8 +222,8 @@ def write_run_metadata(
                 data_source_by_symbol, primary_subscriptions, session_mode,
                 started_at, ended_at, run_at, mode, poll_seconds,
                 params, execution_policy, risk_policy, config_hash,
-                backtest_revision, backtest_cache_key)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                backtest_revision, backtest_cache_key, execution_identity)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (run_id) DO UPDATE SET
                  strategy_name=EXCLUDED.strategy_name,
                  run_at=EXCLUDED.run_at,
@@ -225,13 +234,15 @@ def write_run_metadata(
                  risk_policy=EXCLUDED.risk_policy,
                  config_hash=EXCLUDED.config_hash,
                  backtest_revision=EXCLUDED.backtest_revision,
-                 backtest_cache_key=EXCLUDED.backtest_cache_key
+                 backtest_cache_key=EXCLUDED.backtest_cache_key,
+                 execution_identity=EXCLUDED.execution_identity
                WHERE backtest_runs.symbols = EXCLUDED.symbols
                  AND backtest_runs.timeframe = EXCLUDED.timeframe
                  AND backtest_runs.data_source IS NOT DISTINCT FROM EXCLUDED.data_source
                  AND backtest_runs.data_source_by_symbol = EXCLUDED.data_source_by_symbol
                  AND backtest_runs.primary_subscriptions = EXCLUDED.primary_subscriptions
-                 AND backtest_runs.session_mode = EXCLUDED.session_mode"""
+                 AND backtest_runs.session_mode = EXCLUDED.session_mode
+                 AND backtest_runs.execution_identity IS NOT DISTINCT FROM EXCLUDED.execution_identity"""
     params_val = json.dumps(params) if params is not None else None
     execution_policy_val = json.dumps(execution_policy) if execution_policy is not None else None
     risk_policy_val = json.dumps(risk_policy) if risk_policy is not None else None
@@ -255,14 +266,17 @@ def write_run_metadata(
         config_hash,
         backtest_revision,
         backtest_cache_key,
+        json.dumps(execution_identity) if execution_identity is not None else None,
     )
     if cur is not None:
+        require_current_schema(cur)
         cur.execute(sql, values)
         if cur.rowcount == 0:
             raise ValueError(f"run_id={run_id!r} already has a different immutable identity")
     else:
         with get_conn(dsn) as conn:
             c = conn.cursor()
+            require_current_schema(c)
             c.execute(sql, values)
             if c.rowcount == 0:
                 raise ValueError(f"run_id={run_id!r} already has a different immutable identity")

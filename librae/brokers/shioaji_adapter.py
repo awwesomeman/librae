@@ -42,6 +42,7 @@ from librae.core.trading_calendar import (
     resample_session_ohlcv,
 )
 from librae.core.utils import floor_to_step, validate_contract_month
+from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import PositionRequest
 
 from .base import (
@@ -139,6 +140,7 @@ class ShioajiAdapter:
         # accounts tied to api_key instead); person_id is still needed by
         # activate_ca() below to pick which account's CA to activate.
         self._api.login(api_key=creds.api_key.reveal(), secret_key=creds.secret_key.reveal())
+        self._execution_environment = "paper" if simulation else "production"
         logger.info("Shioaji login successful (simulation=%s)", simulation)
 
         self._read_only = True
@@ -156,6 +158,29 @@ class ShioajiAdapter:
             adapter_id="shioaji",
             venue="SINOPAC",
             market_type="tw_futures",
+        )
+
+    def execution_identity(self) -> ExecutionIdentity:
+        # login() returns whichever accounts the api_key owns — futures/options,
+        # stock, or both — and this adapter trades all of them (place_order and
+        # get_position both branch on security_type). Fingerprint every account
+        # the login actually exposed instead of assuming a futures account:
+        # a stock-only login has futopt_account=None and would otherwise be
+        # unable to report an identity at all.
+        return ExecutionIdentity(
+            broker="shioaji",
+            environment=self._execution_environment,
+            endpoint="sinopac",
+            account_fingerprint=account_fingerprint(
+                "shioaji",
+                *(
+                    str(getattr(account, "account_id", "") or "")
+                    for account in (
+                        getattr(self._api, "futopt_account", None),
+                        getattr(self._api, "stock_account", None),
+                    )
+                ),
+            ),
         )
 
     def available_symbols(

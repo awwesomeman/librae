@@ -41,16 +41,41 @@ pip install "librae[db] @ git+https://github.com/awwesomeman/librae.git@<tag-or-
 ```
 
 The reference Compose service initializes an empty database automatically.
-`timescale_init.sql` defines the current schema and does not migrate an older
-one. Re-running it is supported only when the database already matches the
-current revision, for example when refreshing role grants:
+`timescale_init.sql` records the current revision in
+`librae_schema_revision`; it refuses to stamp or migrate an older database.
+Before deploying a build against an existing database, run the read-only
+preflight with the application DSN:
+
+```bash
+librae db preflight
+```
+
+A non-current result prevents run registration and live checkpoint restore.
+For the supported legacy revision, first stop writers, take and verify a
+backup, then run the ordered SQL migration with a database-owner DSN:
+
+```bash
+TIMESCALE_DSN='postgresql://quant:<password>@<host>:<port>/quant' librae db migrate
+librae db preflight
+```
+
+Each migration runs in the same transaction as an advisory schema lock. A
+failed statement rolls the revision and DDL back together; fix the reported
+cause and rerun. A repeated successful run is a no-op. Newer, unsupported-old,
+unknown, and partially applied schemas fail closed instead of being guessed.
+Database backups remain the rollback boundary: migrations are forward-only,
+so restore the pre-upgrade dump together with the matching application image.
+
+Re-running the bootstrap is supported only when the database already matches
+the current revision, for example when refreshing role grants:
 
 ```bash
 docker exec -i quant_timescaledb psql -U quant -d quant < librae/db/timescale_init.sql
 ```
 
-When a revision changes the schema, recreate disposable development data or
-perform an explicit operator-owned migration before running the new revision.
+For an unversioned schema older than the one recognized by the migration
+command, recreate disposable development data or write an operator-reviewed
+migration before running the new revision.
 The subscription-identity schema adds `backtest_runs.primary_subscriptions`,
 `ohlcv.calendar_id`, `ohlcv.available_at`, and the calendar dimension on
 `ohlcv_coverage_ranges`; it also replaces the OHLCV unique/index keys. Those
@@ -134,8 +159,9 @@ hashes another way after it — including one written only in ccxt timeframe
 form. A backtest cache entry keyed on the old hash simply stops matching and
 the run recomputes.
 
-A live or sim deployment needs an operator decision before the upgrade,
-because its checkpoint key is `mode:config_hash`. Under the new hash the
+A live or sim deployment needs an operator decision before a configuration
+identity change. Sim uses `sim:config_hash`; live additionally includes the
+adapter-observed execution identity. Under a new key the
 runner finds no checkpoint at the new key and starts from an empty book
 rather than refusing, so a restart mid-position would lose its positions,
 in-flight orders and halted flag while the venue still holds them. Stop each
@@ -235,8 +261,11 @@ For an IBKR gateway on the Docker host, set `IBKR_HOST` to
 `host.docker.internal`; the reference trade script adds the Linux host-gateway
 mapping. For a gateway container on `quant_network`, use its service name.
 Container loopback is rejected because it would address the trade container
-itself. These settings establish routing only and do not certify an IBKR
-session or order lifecycle.
+itself. Standard IBKR ports identify paper (7497/4002) or production
+(7496/4001). When a proxy or container publishes a custom port, set
+`IBKR_ENVIRONMENT=paper` or `production` explicitly; an ambiguous environment
+fails before state lookup. These settings establish routing only and do not
+certify an IBKR session or order lifecycle.
 
 Adapters and credentials can be imported from `librae.brokers` for
 caller-owned research or custom wiring. See
@@ -284,9 +313,19 @@ normalized = normalize_broker_report(sample_request, sample_broker_report)
 Pass `adapter=` to `normalize_broker_report` when the adapter declares a compact
 `broker_client_order_id` form, so the client id check matches live execution.
 
-Paper trading uses `mode=live` with a broker's paper endpoint. `mode=sim` is a
-local shadow simulation and does not exercise acknowledgements, partial fills,
-rejections, or broker fees.
+Every live order adapter must expose `execution_identity() ->
+ExecutionIdentity`. The value identifies the broker, environment class
+(`sandbox`, `paper`, or `production`), a sanitized endpoint/venue label, and an
+opaque account fingerprint derived from authenticated adapter facts. A custom
+adapter that cannot determine those facts fails before checkpoint restore or
+run registration. Do not return credentials, URLs containing user info, or a
+raw account number.
+
+Paper trading uses `mode=live` with a broker's paper endpoint and therefore
+still permits broker-confirmed orders. `mode=sim` is the supported no-order
+path and does not exercise acknowledgements, partial fills, rejections, or
+broker fees. `--mode live --dry-run` is rejected because `--dry-run` only
+suppresses persistence and notifications; it was never an order kill switch.
 
 ## Notifications and custom sinks
 
@@ -371,8 +410,8 @@ version control. The repository does not embed an index URL, credentials, or
 TLS exceptions.
 
 Infrastructure-only deployment via `cloud_deploy.sh` does not copy either
-application repository; it syncs the compose file, `librae/db/timescale_init.sql`,
-Grafana provisioning, and `.env`.
+application repository; it syncs the compose file, the schema bootstrap and
+ordered migration SQL under `librae/db/`, Grafana provisioning, and `.env`.
 
 This combined-source builder is optional. A caller-owned image may instead
 install a pinned Librae distribution and copy its own strategy package, as
@@ -542,13 +581,15 @@ The relevant identities are intentionally not interchangeable:
 | Identity | Purpose |
 |---|---|
 | `config_hash` | Resolved engine configuration |
+| `execution_identity` | Adapter-observed broker, environment, endpoint/venue, and opaque account fingerprint |
 | `runtime_revision` | Caller-owned code or image identity stored in a live checkpoint |
 | Image digest or image ID | Selected deployment artifact; `trade.sh` uses the actual image ID as `runtime_revision` |
 | `deployment_id` | Stable container/process slot |
 | `run_id` | Engine run restored from the checkpoint |
 
-The live runtime requires a non-empty `runtime_revision`. It accepts only the
-current checkpoint schema and an exact revision match; it does not convert,
+The live runtime requires a non-empty `runtime_revision` and execution
+identity. It accepts only the current checkpoint schema and exact revision and
+execution-identity matches; it does not convert,
 discard, adopt, or overwrite incompatible state. The compatibility check runs
 before broker reconciliation, order lookup, or submission. A
 shadow-simulation checkpoint may be discarded and recreated.
@@ -564,14 +605,23 @@ migration:
 4. Start the new revision with fresh state only after the broker account is
    confirmed flat, and retain the old checkpoint for audit.
 
-A pre-v16 checkpoint requires explicit external migration or removal before
-this version can run. Re-running database initialization does not transform a
-stored JSON checkpoint.
+A pre-v25 checkpoint requires explicit external migration or removal before
+this version can run. Revision 25 adds the execution identity and changes the
+live state key. Stop flat and start a new checkpoint, or externally migrate
+the JSON document and key only after reconciling its positions and active
+orders to the same authenticated broker account. Re-running database
+initialization or schema migration does not transform stored checkpoint JSON.
 
-A configuration-shape change may also produce a different `config_hash` and
-therefore a different `state_key`, making the new runner appear to have no
-matching checkpoint. Startup reconciliation remains a safety check, not a
-replacement for the operator procedure above.
+A configuration, broker environment, endpoint, or authenticated account change
+produces a different `state_key`, making the new runner appear to have no
+matching checkpoint. On CCXT venues, which expose no portable account
+identifier, the account fingerprint is derived from the API key, so **rotating
+an exchange API key also changes the live `state_key`** even though the account
+is unchanged; rotate only against a flat book, using the same procedure. Startup
+position/open-order reconciliation remains a separate safety check, not a
+replacement for the operator procedure above. `--reset-state` clears simulation
+checkpoints only and refuses live ones outright, because a `config_hash` alone
+cannot select between paper and production state.
 
 For a direct non-container launch, the caller must provide an equivalent
 immutable identity:

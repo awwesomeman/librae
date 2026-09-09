@@ -92,7 +92,7 @@ include = ["librae*"]
 
 [tool.setuptools.package-data]
 librae = ["_scaffold/env.example"]
-"librae.db" = ["*.sql"]
+"librae.db" = ["*.sql", "migrations/*.sql"]
 "librae.app" = [
   "grafana/provisioning/dashboards/*.yaml",
   "grafana/provisioning/dashboards/json/*.json",

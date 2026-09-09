@@ -256,6 +256,34 @@ class TestBuildRun:
         with pytest.raises(ValueError, match="--runtime-revision is required"):
             build_run("test_strat", str(tmp_path / "run.py"))
 
+    def test_live_rejects_misleading_dry_run(self, tmp_path, monkeypatch):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: MU
+                  timeframe: 1d
+                """
+            )
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "test",
+                "--mode",
+                "live",
+                "--poll-seconds",
+                "60",
+                "--runtime-revision",
+                "revision-a",
+                "--dry-run",
+            ],
+        )
+
+        with pytest.raises(ValueError, match="use --mode sim"):
+            build_run("test_strat", str(tmp_path / "run.py"))
+
     def test_force_requires_backtest_revision(self):
         with pytest.raises(ValueError, match="requires backtest_revision"):
             RunOptions(replace_existing=True)
@@ -734,6 +762,12 @@ class TestResetRealtimeState:
     def test_rejects_backtest_mode(self):
         with pytest.raises(ValueError, match="applies to sim/live only"):
             reset_realtime_state(_make_cfg(mode="backtest"))
+
+    def test_rejects_live_mode(self):
+        """The live state key includes an execution identity, so a config hash
+        cannot select between a paper and a production checkpoint."""
+        with pytest.raises(ValueError, match="does not clear live checkpoints"):
+            reset_realtime_state(_make_cfg(mode="live"))
 
     def test_noop_when_no_checkpoint_exists(self):
         config = _make_cfg(mode="sim")
