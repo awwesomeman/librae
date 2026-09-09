@@ -18,6 +18,7 @@ from librae.core.utils import interval_to_timedelta
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from backfill_ohlcv_identity import (
     BackfillReport,
+    _unfilled_batches,
     fixed_interval_timeframe,
     resolve_calendars,
 )
@@ -106,3 +107,54 @@ class TestAvailabilityMatchesTheWriter:
     @pytest.mark.parametrize("timeframe", ["5m", "1h", "4h"])
     def test_fixed_width_periods_take_it(self, timeframe: str) -> None:
         assert fixed_interval_timeframe(timeframe)
+
+
+class FakeTable:
+    """A cursor over a fixed set of bar starts, recording how it was asked.
+
+    Simulates the one property that matters: rows already filled stop matching
+    `calendar_id IS NULL`, so a walk that forgets its watermark would keep
+    re-reading the same head of a nine-year table.
+    """
+
+    # Bounded on purpose: a walk that lost its watermark would ask forever,
+    # and a hanging test says less than a failing one.
+    MAX_QUERIES = 50
+
+    def __init__(self, timestamps: list[int]) -> None:
+        self.remaining = sorted(timestamps)
+        self.watermarks: list[int | None] = []
+        self._result: list[tuple[int]] = []
+
+    def execute(self, query: str, params: tuple) -> None:
+        _, _, watermark, _, limit = params
+        self.watermarks.append(watermark)
+        if len(self.watermarks) > self.MAX_QUERIES:
+            raise AssertionError("the walk is not advancing; it re-read the same head")
+        after = [t for t in self.remaining if watermark is None or t > watermark]
+        self._result = [(t,) for t in after[:limit]]
+
+    def fetchall(self) -> list[tuple[int]]:
+        return self._result
+
+
+class TestTheWalkAdvances:
+    def test_it_yields_bounded_batches_and_terminates(self) -> None:
+        table = FakeTable(list(range(10)))
+
+        batches = list(_unfilled_batches(table, "src", "H1", 3))
+
+        assert [len(b) for b in batches] == [3, 3, 3, 1]
+        assert [t for batch in batches for t in batch] == list(range(10))
+
+    def test_each_query_starts_after_the_previous_batch(self) -> None:
+        # Without this the walk rescans from the start every time, so it costs
+        # more the further it gets.
+        table = FakeTable(list(range(10)))
+
+        list(_unfilled_batches(table, "src", "H1", 3))
+
+        assert table.watermarks == [None, 2, 5, 8, 9]
+
+    def test_an_empty_table_yields_nothing(self) -> None:
+        assert list(_unfilled_batches(FakeTable([]), "src", "H1", 3)) == []

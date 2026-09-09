@@ -15,7 +15,6 @@ from `period_close`, the same function the writer's completion floor uses.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from librae.core.trading_calendar import ALWAYS_OPEN_CALENDAR, period_close
@@ -23,7 +22,11 @@ from librae.core.utils import interval_to_timedelta, to_canonical
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BATCH_SIZE = 50_000
+# Bar starts per batch, not rows: one timestamp carries every symbol that
+# shares it, so 500 starts is roughly 270k rows on a 547-symbol hourly feed.
+# Sized so a batch commits in seconds rather than holding a multi-million-row
+# transaction open.
+DEFAULT_BATCH_SIZE = 500
 
 
 @dataclass
@@ -90,68 +93,65 @@ def fixed_interval_timeframe(timeframe: str) -> bool:
     return canonical.startswith(("M", "H")) and not canonical.startswith("MN")
 
 
-def _fill_always_open(cur, data_source: str, timeframe: str, calendar_id: str) -> int:
-    """Fill a fixed-width 24/7 period in SQL, where the close is exact.
+def _unfilled_batches(cur, data_source: str, timeframe: str, bar_starts: int):
+    """Walk unfilled bar starts oldest first, carrying a watermark.
 
-    Row by row in Python would mean millions of round trips for a value the
-    database can compute in place. Only reached when
-    `fixed_interval_timeframe` holds, so the shortcut cannot drift from
-    `period_close`.
+    The watermark matters: without it every batch rescans from the beginning
+    of a nine-year table looking for the next null, so the walk costs more the
+    further it gets.
     """
-    seconds = int(interval_to_timedelta(timeframe).total_seconds())
-    cur.execute(
-        """UPDATE ohlcv
-              SET calendar_id = %s,
-                  available_at = ts + make_interval(secs => %s)
-            WHERE calendar_id IS NULL AND data_source = %s AND timeframe = %s""",
-        (calendar_id, seconds, data_source, timeframe),
-    )
-    return cur.rowcount
-
-
-def _fill_by_session(
-    cur, data_source: str, timeframe: str, calendar_id: str, batch_size: int
-) -> Iterator[int]:
-    """Anything the SQL shortcut cannot express, through the engine's own rule.
-
-    `period_close`, not `bar_close`: the writer's completion floor calls the
-    former, and they part company on calendar-sized periods. A close computed
-    early would make a bar readable before it finished — look-ahead, and
-    silent.
-    """
+    watermark = None
     while True:
         cur.execute(
             """SELECT DISTINCT ts FROM ohlcv
                 WHERE calendar_id IS NULL AND data_source = %s AND timeframe = %s
+                  AND (%s::timestamptz IS NULL OR ts > %s::timestamptz)
                 ORDER BY ts LIMIT %s""",
-            (data_source, timeframe, batch_size),
+            (data_source, timeframe, watermark, watermark, bar_starts),
         )
         timestamps = [row[0] for row in cur.fetchall()]
         if not timestamps:
             return
-        pairs = [
-            (ts, period_close(ts, timeframe, calendar_id).to_pydatetime()) for ts in timestamps
-        ]
+        yield timestamps
+        watermark = timestamps[-1]
+
+
+def _fill(cur, data_source: str, timeframe: str, calendar_id: str, timestamps: list) -> int:
+    """Fill one batch, computing availability the way the writer would.
+
+    A fixed-width period on a 24/7 calendar closes exactly one interval on, so
+    the database computes it in place. Everything else goes through
+    `period_close` itself: it and `bar_close` part company on calendar-sized
+    periods, and a close computed early would make a bar readable before it
+    finished — look-ahead, and silent.
+    """
+    if calendar_id == ALWAYS_OPEN_CALENDAR and fixed_interval_timeframe(timeframe):
+        seconds = int(interval_to_timedelta(timeframe).total_seconds())
         cur.execute(
-            """UPDATE ohlcv AS o
-                  SET calendar_id = %s, available_at = v.closed_at
-                 FROM (SELECT * FROM unnest(%s::timestamptz[], %s::timestamptz[])
-                         AS t(bar_ts, closed_at)) AS v
-                WHERE o.calendar_id IS NULL AND o.data_source = %s
-                  AND o.timeframe = %s AND o.ts = v.bar_ts""",
-            (
-                calendar_id,
-                [ts for ts, _ in pairs],
-                [closed for _, closed in pairs],
-                data_source,
-                timeframe,
-            ),
+            """UPDATE ohlcv
+                  SET calendar_id = %s,
+                      available_at = ts + make_interval(secs => %s)
+                WHERE calendar_id IS NULL AND data_source = %s
+                  AND timeframe = %s AND ts = ANY(%s)""",
+            (calendar_id, seconds, data_source, timeframe, timestamps),
         )
-        yield cur.rowcount
+        return cur.rowcount
+
+    closes = [period_close(ts, timeframe, calendar_id).to_pydatetime() for ts in timestamps]
+    cur.execute(
+        """UPDATE ohlcv AS o
+              SET calendar_id = %s, available_at = v.closed_at
+             FROM (SELECT * FROM unnest(%s::timestamptz[], %s::timestamptz[])
+                     AS t(bar_ts, closed_at)) AS v
+            WHERE o.calendar_id IS NULL AND o.data_source = %s
+              AND o.timeframe = %s AND o.ts = v.bar_ts""",
+        (calendar_id, timestamps, closes, data_source, timeframe),
+    )
+    return cur.rowcount
 
 
 def backfill_ohlcv_identity(conn, *, batch_size: int = DEFAULT_BATCH_SIZE) -> BackfillReport:
-    """Fill calendar_id and available_at, committing as it goes.
+    """Fill calendar_id and available_at, committing each batch.
 
     Resumable by construction: every statement selects on ``calendar_id IS
     NULL``, so an interrupted run leaves committed work in place and repeats
@@ -171,14 +171,8 @@ def backfill_ohlcv_identity(conn, *, batch_size: int = DEFAULT_BATCH_SIZE) -> Ba
             report.skipped_sources[data_source] = int(cur.fetchone()[0])
             continue
 
-        if calendar_id == ALWAYS_OPEN_CALENDAR and fixed_interval_timeframe(timeframe):
-            filled = _fill_always_open(cur, data_source, timeframe, calendar_id)
-            conn.commit()
-            report.updated += filled
-            logger.info("backfilled %d %s %s rows", filled, data_source, timeframe)
-            continue
-
-        for filled in _fill_by_session(cur, data_source, timeframe, calendar_id, batch_size):
+        for timestamps in _unfilled_batches(cur, data_source, timeframe, batch_size):
+            filled = _fill(cur, data_source, timeframe, calendar_id, timestamps)
             conn.commit()
             report.updated += filled
             logger.info("backfilled %d %s %s rows", filled, data_source, timeframe)
