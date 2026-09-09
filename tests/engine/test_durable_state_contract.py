@@ -68,6 +68,17 @@ class TestLiveRejectsNonDurableState:
         with pytest.raises(ValueError, match="restart-durable"):
             self._live(state_store=_UndeclaredStore())
 
+    @pytest.mark.parametrize("declared", ["yes", 1, [1], object()])
+    def test_a_truthy_non_bool_is_not_a_durability_claim(self, declared: object) -> None:
+        """The Protocol types this as bool. A store that declares something
+        merely truthy has not made the claim, and accepting it would let a
+        typo or a stray attribute pass for durable storage."""
+        store = MemoryLiveStateStore()
+        store.restart_durable = declared
+
+        with pytest.raises(ValueError, match="restart-durable"):
+            self._live(state_store=store)
+
     def test_a_declared_durable_store_is_accepted(self) -> None:
         trader = self._live(state_store=MemoryLiveStateStore(restart_durable_for_tests=True))
 

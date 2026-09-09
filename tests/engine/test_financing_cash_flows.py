@@ -543,7 +543,7 @@ def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
         for index in range(3)
     ]
     responses = iter(frames)
-    store = MemoryLiveStateStore(restart_durable_for_tests=True)
+    store = MemoryLiveStateStore()
     recorded = []
     config = make_test_cfg(
         symbols=["PERP"],

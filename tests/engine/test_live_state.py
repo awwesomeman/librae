@@ -184,7 +184,7 @@ def test_live_rebalance_round_trip_and_memory_store_isolation():
     separate, still-PortfolioWeights-typed state for an in-flight leg-by-leg
     rebalance.
     """
-    store = MemoryLiveStateStore(restart_durable_for_tests=True)
+    store = MemoryLiveStateStore()
     targets = PortfolioWeights(weights={"AAA": 0.6, "BBB": 0.4})
     state = LiveRuntimeState(
         state_key="sim:abc",
@@ -338,7 +338,7 @@ def test_runtime_state_rejects_malformed_pending_decision(
 
 
 def test_memory_store_lease_is_exclusive_until_release():
-    store = MemoryLiveStateStore(restart_durable_for_tests=True)
+    store = MemoryLiveStateStore()
 
     assert store.acquire_lease("live:abc") is True
     assert store.acquire_lease("live:abc") is False

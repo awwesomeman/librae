@@ -571,8 +571,8 @@ class TestLiveTrader:
         **kwargs,
     ) -> LiveTrader:
         test_config = config or _test_cfg()
-        # Live now requires a store that declares restart durability. Tests
-        # exercise that path without a database by saying so explicitly.
+        # Only the live path requires a store that declares restart durability,
+        # so the flag reads as a live marker rather than boilerplate.
         kwargs.setdefault(
             "state_store",
             MemoryLiveStateStore(restart_durable_for_tests=test_config.mode == "live"),
@@ -1282,7 +1282,7 @@ class TestLiveTrader:
                 _simple_feature_fn,
                 config=config,
                 data_adapter_overrides={"AAPL": adapter},
-                state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
+                state_store=MemoryLiveStateStore(),
             )
 
         persisted_subscription = build.call_args.args[3]["AAPL"]
@@ -1346,7 +1346,7 @@ class TestLiveTrader:
                 _simple_feature_fn,
                 config=config,
                 adapter_factories={"vendor_plugin": factory},
-                state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
+                state_store=MemoryLiveStateStore(),
             )
 
         persisted_subscription = build.call_args.args[3]["AAPL"]
@@ -1659,7 +1659,7 @@ class TestLiveTrader:
         first["available_at"] = [pd.Timestamp("2025-01-01T10:00Z")]
         second = _make_ohlcv_at([second_ts])
         second["available_at"] = [pd.Timestamp("2025-01-01T03:00Z")]
-        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        store = MemoryLiveStateStore()
         config = _test_cfg(warmup_periods=1)
 
         def passthrough(batch: FeatureBatch):
@@ -1777,7 +1777,7 @@ class TestLiveTrader:
         event_ts = datetime(2025, 1, 1, tzinfo=UTC)
         frame = _make_ohlcv_at([event_ts])
         frame["available_at"] = [pd.Timestamp("2025-01-01T01:00Z")]
-        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        store = MemoryLiveStateStore()
 
         class FailingStrategy(Strategy):
             def on_bar(self, ctx: Context) -> list[OrderIntent]:
@@ -1897,7 +1897,7 @@ class TestLiveTrader:
         event_ts = pd.Timestamp(frame["ts"].iloc[-1]).to_pydatetime()
         attempts = 0
         fills: list[float] = []
-        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        store = MemoryLiveStateStore()
         config = _test_cfg(
             execution=ExecutionPolicy(
                 max_bar_volume_participation_rate=0.1,
@@ -2325,7 +2325,7 @@ class TestLiveTrader:
         history = _make_ohlcv_at([t0, t1])
         history.loc[0, "close"] = 101.0
         history["available_at"] = pd.to_datetime(["2025-01-01T01:30:00Z", "2025-01-01T02:00:00Z"])
-        state_store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        state_store = MemoryLiveStateStore()
         config = _test_cfg(warmup_periods=2)
         original = self._make_runner(config=config, state_store=state_store)
         original._last_bar_ts["BTCUSDT"] = t0
@@ -2484,7 +2484,7 @@ class TestLiveTrader:
         assert strategy.on_bar.call_count == 1
 
     def test_sim_pending_decision_resumes_on_next_bar_after_restart(self):
-        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        store = MemoryLiveStateStore()
 
         class BuyOnce(Strategy):
             def on_bar(self, ctx):
@@ -2539,7 +2539,7 @@ class TestLiveTrader:
         assert runner._positions["BTCUSDT"].quantity == pytest.approx(10.0)
 
     def test_failed_sim_cycle_is_not_checkpointed_as_processed(self):
-        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        store = MemoryLiveStateStore()
         failing = self._make_runner(
             feature_fn=MagicMock(side_effect=RuntimeError("bad feature")),
             state_store=store,
@@ -2577,7 +2577,7 @@ class TestLiveTrader:
         assert runner._period_index == 1
 
     def test_restart_restores_engine_index_but_not_strategy_instance_state(self):
-        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        store = MemoryLiveStateStore()
         config = _test_cfg()
 
         class StatefulCounter(Strategy):
@@ -3843,7 +3843,7 @@ class TestLiveTrader:
         feature_calls = 0
         strategy_calls = 0
         opened = []
-        state_store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        state_store = MemoryLiveStateStore()
 
         def feature_fn(history: pd.DataFrame) -> pd.DataFrame:
             nonlocal feature_calls
@@ -6786,7 +6786,7 @@ class TestMultiAdapterRouting:
             on_heartbeat=None,
             on_signal_outcome=None,
             warmup_fetcher=None,
-            state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
+            state_store=MemoryLiveStateStore(),
         )
 
         assert trader._get_cost_model("BTCUSDT").commission_rate == 0.001

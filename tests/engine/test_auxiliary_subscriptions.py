@@ -694,7 +694,7 @@ class TestAuxiliaryRestartParity:
     def test_a_restart_reads_the_same_auxiliary_context(self) -> None:
         from librae.live.state import MemoryLiveStateStore
 
-        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        store = MemoryLiveStateStore()
         _, before = self._cycle(store)
         second, after = self._cycle(store, primary_bars=7)
 
@@ -713,7 +713,7 @@ class TestAuxiliaryRestartParity:
         one — history() is keyed by exact identity."""
         from librae.live.state import MemoryLiveStateStore
 
-        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        store = MemoryLiveStateStore()
         first, _ = self._cycle(store)
         second, _ = self._cycle(store, primary_bars=7)
 
@@ -727,7 +727,7 @@ class TestAuxiliaryRestartParity:
 
         from librae.live.state import MemoryLiveStateStore
 
-        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        store = MemoryLiveStateStore()
         runner, _ = self._cycle(store)
         document = json.dumps(store.load(runner._state_key).to_dict())
 

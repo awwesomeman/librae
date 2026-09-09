@@ -114,7 +114,7 @@ def test_factory_registers_timescale_callbacks() -> None:
         patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
         patch(
             "librae.orchestration.live._build_state_store",
-            return_value=MemoryLiveStateStore(restart_durable_for_tests=True),
+            return_value=MemoryLiveStateStore(),
         ),
         patch("librae.orchestration.live._build_notifier", return_value=None),
         patch("librae.orchestration.live._TimescaleCallbacks", return_value=callbacks),
@@ -252,7 +252,7 @@ def test_restored_run_also_calls_register_run() -> None:
     key (caught by _write's best-effort try/except) — invisible short of
     reading warning logs."""
     config = make_test_cfg(mode="sim")
-    store = MemoryLiveStateStore(restart_durable_for_tests=True)
+    store = MemoryLiveStateStore()
 
     first_callbacks = MagicMock()
     with (
@@ -286,7 +286,7 @@ def test_restored_run_registers_before_state_recovered_event() -> None:
     late: _TimescaleCallbacks.on_runtime_event would still read the stale
     cached run_id and hit a foreign-key violation on every restart."""
     config = make_test_cfg(mode="sim")
-    store = MemoryLiveStateStore(restart_durable_for_tests=True)
+    store = MemoryLiveStateStore()
     call_order: list[str] = []
 
     first_callbacks = MagicMock()
@@ -479,7 +479,7 @@ def test_factory_rejects_different_live_brokers_before_building_adapters() -> No
             lambda frame: frame,
             config=config,
             database_enabled=False,
-            state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
+            state_store=MemoryLiveStateStore(),
             runtime_revision="test-runtime",
         )
 
@@ -512,7 +512,7 @@ def test_factory_rejects_mixed_binance_products_before_building_adapters() -> No
             lambda frame: frame,
             config=config,
             database_enabled=False,
-            state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
+            state_store=MemoryLiveStateStore(),
             runtime_revision="test-runtime",
         )
 
@@ -697,7 +697,7 @@ def test_factory_rejects_missing_live_revision_before_building_adapters() -> Non
             MagicMock(),
             lambda frame: frame,
             config=config,
-            state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
+            state_store=MemoryLiveStateStore(),
         )
 
     build_adapter.assert_not_called()
@@ -707,7 +707,7 @@ def test_factory_accepts_injected_notifier_and_state_store() -> None:
     config = make_test_cfg(mode="sim")
     adapter = MagicMock()
     notifier = MagicMock(enabled=True)
-    state_store = MemoryLiveStateStore(restart_durable_for_tests=True)
+    state_store = MemoryLiveStateStore()
 
     trader = build_live_trader(
         MagicMock(),
@@ -1089,7 +1089,7 @@ def test_reference_factory_does_not_return_when_run_metadata_parent_is_missing()
             MagicMock(),
             lambda frame: frame,
             config=config,
-            state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
+            state_store=MemoryLiveStateStore(),
         )
 
     write_perf.assert_not_called()
