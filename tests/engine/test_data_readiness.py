@@ -288,3 +288,72 @@ class TestOptionalSymbolsReleaseTheWarmupGate:
 
         assert seen, "the strategy should run on the inputs that did arrive"
         assert all("ETHUSDT" not in available for available in seen)
+
+
+class TestSimulationHoldsOnStaleRequiredData:
+    """Simulation runs against a live feed, so wall-clock staleness means the
+    same thing it does in live. It used to skip the stale check and evaluate
+    on the last known bars; live and sim now fail closed identically.
+
+    (Backtest is unaffected: it replays history, where staleness relative to
+    wall clock has no meaning, and never reaches the poll cycle.)
+    """
+
+    CLOCK = datetime(2025, 1, 2, 0, 0, tzinfo=UTC)
+
+    @classmethod
+    def _run(cls, optional_symbols: tuple[str, ...]):
+        import pandas as pd
+        from librae.core.strategy import Strategy
+
+        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+
+        def frame(end: datetime, n: int = 6) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "ts": pd.date_range(end=end, periods=n, freq="h", tz="UTC"),
+                    "open": [100.0] * n,
+                    "high": [101.0] * n,
+                    "low": [99.0] * n,
+                    "close": [100.0] * n,
+                    "volume": [1_000.0] * n,
+                }
+            )
+
+        seen: list[tuple[str, ...]] = []
+
+        class RecordEvaluations(Strategy):
+            def on_bar(self, ctx):
+                seen.append(ctx.available_symbols)
+                return []
+
+        runner = TestLiveTrader()._make_runner(
+            strategy=RecordEvaluations(),
+            fetcher={
+                # One interval behind the clock: fresh.
+                "BTCUSDT": lambda *a, **k: frame(cls.CLOCK - timedelta(hours=1)),
+                # Ten intervals behind: past its expected close plus grace.
+                "ETHUSDT": lambda *a, **k: frame(cls.CLOCK - timedelta(hours=10)),
+            },
+            config=_test_cfg(
+                mode="sim",
+                symbols=["BTCUSDT", "ETHUSDT"],
+                warmup_periods=1,
+                optional_symbols=optional_symbols,
+            ),
+            clock=lambda: cls.CLOCK,
+        )
+        # The shared test runner relaxes this to 100 so fixtures far from wall
+        # clock never trip staleness; this suite is about staleness itself.
+        runner.STALE_DATA_TOLERANCE_BARS = 2
+        runner._poll_cycle()
+        return seen
+
+    def test_a_stale_required_input_holds_evaluation(self) -> None:
+        assert self._run(optional_symbols=()) == []
+
+    def test_a_stale_optional_input_is_stepped_over(self) -> None:
+        seen = self._run(optional_symbols=("ETHUSDT",))
+
+        assert seen, "the fresh input should still be evaluated"
+        assert all("ETHUSDT" not in available for available in seen)

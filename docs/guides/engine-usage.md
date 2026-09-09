@@ -1036,16 +1036,46 @@ fails before broker reconciliation or order submission. Custom durable stores
 provide the equivalent `acquire_lease` / `release_lease` contract for both
 namespaced keys.
 
-## Data staleness detection (live only)
+## Data readiness and staleness (live and sim)
 
 Checked on every poll cycle, including while an order is active, not just at
-startup. `_check_staleness`
-compares the latest completed bar timestamp with the UTC clock. A frame is
-stale after `(STALE_DATA_TOLERANCE_BARS + 1) * timeframe` (three intervals by
-default); the extra interval accounts for the normal age of a completed bar.
-The alert is edge-triggered and re-arms after recovery. Sim keeps processing
-for deterministic shadow/replay workflows, while live fails closed for that
-poll: the stale frame never reaches the strategy or broker.
+startup.
+
+Freshness is judged against the **next observation's expected close** for that
+subscription's own timeframe and calendar, not a fixed wall-clock age. So a
+Friday XNYS daily bar is not late until Monday's session closes, a holiday
+does not make a feed look dead, and DST moves the boundary with the venue.
+`STALE_DATA_TOLERANCE_BARS` is now bounded publication slack applied *after*
+that boundary — wall-clock on purpose, because it models a feed publishing a
+completed bar late rather than extra market time. `librae/core/readiness.py`
+holds the evaluator; it is pure, so backtest and live reach the same verdict
+on the same fixture.
+
+An observation the calendar has no session for (an extended-session feed, or
+simply odd data) degrades to the bare interval instead of raising: staleness
+monitoring exists to catch a dead feed and must not itself become a way for a
+poll cycle to die. `ObservationStatus.calendar_anchored` reports when that
+happened, so the lost weekend awareness stays visible.
+
+Both live and sim fail closed on a stale frame: it never reaches the strategy
+or the broker. Simulation runs against a live feed too, so an observation past
+its expected close means the same thing there. Backtest is unaffected — it
+replays history, where staleness relative to wall clock has no meaning, and
+never reaches the poll cycle.
+
+`RunConfig.optional_symbols` names the subscriptions a strategy can run
+without. Everything else is required and blocks strategy evaluation until it
+has a usable observation, which is the default and the historical behaviour;
+reconciliation, order monitoring and heartbeat keep running while it is held.
+An optional subscription is stepped over with a diagnostic and cannot hold the
+warmup gate either. It is a run policy rather than instrument or subscription
+identity — the same instrument can be load-bearing for one strategy and a
+nice-to-have for another — and it affects results, so it is part of
+`config_hash`. It cannot cover every symbol: a run needs at least one input.
+
+Both the stale alert and the not-ready alert are edge-triggered: one
+diagnostic when the condition starts and one when it clears, not one per poll
+cycle.
 
 Live also does not replay an outage backlog into the market. If a fetch returns
 multiple bars newer than the durable watermark, only the latest completed bar

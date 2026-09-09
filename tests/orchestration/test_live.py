@@ -184,6 +184,12 @@ def test_database_enabled_sim_checkpoints_portfolio_weights_decision() -> None:
             data_adapter_overrides={"BTCUSDT": adapter},
         )
 
+    # Fixture bars sit at a fixed 2025-01-01, and simulation now fails closed
+    # on an observation past its expected close. Give the run a clock its own
+    # data is current against: this test is about checkpointing the decision,
+    # not about staleness.
+    trader._clock = lambda: datetime(2025, 1, 1, 5, 0, tzinfo=UTC)
+
     trader._poll_cycle()
 
     assert store.raw is not None

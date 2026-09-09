@@ -1977,9 +1977,13 @@ class LiveTrader:
             if latest.tzinfo is None:
                 raise ValueError(f"{symbol} latest completed bar timestamp must be timezone-aware")
             latest_ts = latest.to_pydatetime().astimezone(UTC)
-            is_stale = self._check_staleness(symbol, latest_ts)
-            if is_stale and not self._executor.simulation:
-                logger.warning("Skipping stale live frame for %s at %s", symbol, latest_ts)
+            # Simulation runs against a live feed too, so an observation past
+            # its expected close means the same thing there as in live: this
+            # cycle has no usable market event for that subscription. Backtest
+            # replays history and never reaches here, where wall-clock
+            # staleness would be meaningless.
+            if self._check_staleness(symbol, latest_ts):
+                logger.warning("Skipping stale frame for %s at %s", symbol, latest_ts)
                 continue
             frames[symbol] = df
 
