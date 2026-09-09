@@ -893,14 +893,14 @@ class IBKRAdapter:
             continuous_alias=signal.get("continuous_alias", False),
             contract_month=signal.get("contract_month"),
         )
+        validate_time_in_force(
+            "ibkr", SUPPORTED_TIME_IN_FORCE, signal["order_type"], signal["time_in_force"]
+        )
         action = "BUY" if signal["side"] == "buy" else "SELL"
         if signal["order_type"] == "limit":
             order = ib_async.LimitOrder(action, signal["quantity"], signal["price"])
         else:
             order = ib_async.MarketOrder(action, signal["quantity"])
-        validate_time_in_force(
-            "ibkr", SUPPORTED_TIME_IN_FORCE, signal["order_type"], signal["time_in_force"]
-        )
         order.tif = {"day": "DAY", "gtc": "GTC", "ioc": "IOC", "fok": "FOK"}[
             signal["time_in_force"]
         ]

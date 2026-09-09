@@ -22,7 +22,6 @@ from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from functools import lru_cache
 from math import isfinite
 from typing import Literal
 
@@ -3465,18 +3464,6 @@ def execute_portfolio_rebalance_slice(
 # ---------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=1)
-def _broker_time_in_force_validator():
-    """Resolve the venue capability check on first use.
-
-    Imported lazily because librae.brokers imports back into core; cached
-    because this runs per intent, on every decision, for the life of a run.
-    """
-    from librae.brokers.capabilities import validate_broker_time_in_force
-
-    return validate_broker_time_in_force
-
-
 def validate_strategy_decision(
     decision: StrategyDecision,
     universe: set[str],
@@ -3520,14 +3507,18 @@ def validate_strategy_decision(
             raise ValueError("strategy decision must contain at most one intent per symbol")
         symbols = set(resolved_symbols)
 
-        # WHY: these two rejections are about what this engine can express,
-        # not about what any one venue accepts — a backtest stays broker-
-        # neutral, and venue rules belong in the adapters (Shioaji already
-        # refuses ROD market orders and GTC outright). A market order is
-        # deliberately NOT rejected here: it resolves on its first eligible
-        # event, so every lifetime collapses to the same behavior rather than
-        # being unsupported, and IBKR accepts DAY market orders that TAIFEX
-        # and Binance do not.
+        # WHY: the rejections below are about what this engine can express,
+        # so a run with no configured broker stays venue-neutral. A market
+        # order is deliberately NOT rejected here: it resolves on its first
+        # eligible event, so every lifetime collapses to the same behavior.
+        # Venue rules are layered on top per symbol, via broker_for.
+        check_venue_lifetime = None
+        if broker_for is not None:
+            # Imported here because librae.brokers imports back into core.
+            from librae.brokers.capabilities import validate_broker_time_in_force
+
+            check_venue_lifetime = validate_broker_time_in_force
+
         for intent in decision:
             # WHY: an entry with no quantity sizes from available cash, so
             # there is no requested amount for "all or none" to be measured
@@ -3551,11 +3542,10 @@ def validate_strategy_decision(
             # elsewhere both misses violations and invents them. An unset
             # time_in_force is left alone: the engine's per-order-type
             # default is accepted everywhere.
-            if broker_for is not None and intent.time_in_force is not None:
+            if check_venue_lifetime is not None and intent.time_in_force is not None:
                 venue = broker_for(intent.symbol or primary_symbol)
                 if venue is not None:
-                    validate_broker_time_in_force = _broker_time_in_force_validator()
-                    validate_broker_time_in_force(
+                    check_venue_lifetime(
                         venue,
                         "limit" if intent.limit_price is not None else "market",
                         intent.time_in_force,

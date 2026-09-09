@@ -40,8 +40,9 @@ def admin_conn() -> Generator[psycopg2.extensions.connection, None, None]:
     if not dsn:
         raise RuntimeError(
             "TIMESCALE_ADMIN_DSN is not set. Schema commands connect as the role that "
-            "owns the tables (quant), which TIMESCALE_DSN deliberately is not — see "
-            ".env.secrets.example."
+            "owns the tables, which TIMESCALE_DSN deliberately is not: the application "
+            "role holds no schema rights. Set TIMESCALE_ADMIN_DSN to an owner "
+            "connection — see docs/guides/optional-infrastructure.md."
         )
     conn = psycopg2.connect(dsn)
     try:
