@@ -4,6 +4,12 @@ The examples are runnable tutorials for the strategy-to-engine boundary. Each
 uses deterministic synthetic data so you can inspect behavior without an API
 key, database, or external data service.
 
+Install the documented repository environment first:
+
+```bash
+uv sync --extra test --extra dev
+```
+
 > These examples demonstrate engine integration. They are not validated alpha,
 > investment advice, or production-ready portfolio research.
 
@@ -17,7 +23,7 @@ key, database, or external data service.
 | [`minimum_variance/`](minimum_variance/) | Keep a diagonal risk model and optimizer inside the strategy | `PortfolioWeights` | backtest |
 | [`multi_leg_spread/`](multi_leg_spread/) | Open and close an explicitly sized relative-value spread | `list[OrderIntent]` (shared `group_id`) | backtest |
 | [`custom_data_provider.py`](custom_data_provider.py) | Point-in-time third-party factor enrichment | data-provider callable | sim/live adapter boundary |
-| [`trade_report.py`](trade_report.py) | Chart/report on `BacktestOutput` (librae computes, you chart) | matplotlib PNG | compute → chart boundary |
+| [`trade_report.py`](trade_report.py) | Tabular report on `BacktestOutput` | CSV | compute → report boundary |
 
 Run the backtests from the repository root:
 
@@ -204,6 +210,10 @@ Before adapting any example to paper or live execution, complete the
 [strategy readiness checklist](../docs/guides/strategy-readiness.md). It
 covers point-in-time data, research validation, costs and capacity, risk,
 reconciliation, broker certification, and intentional engine non-goals.
+
+The US-equity examples use `calendar_id: XNYS` with regular sessions. Their
+synthetic timestamps are actual XNYS session opens, so weekends and exchange
+holidays are absent rather than inferred from missing rows.
 
 ## Add infrastructure only when needed
 

@@ -10,13 +10,19 @@ import pandas as pd
 from librae import Backtest, RunConfig
 from librae.orchestration.cli import RunOptions, run_dispatch
 
+from examples._synthetic import session_opens
+
 from .strategy import TopKSelectionStrategy, prepare_signals
 
 
-def _make_panel(symbols: list[str], periods: int = 240) -> pd.DataFrame:
+def _make_panel(
+    symbols: list[str],
+    calendar_id: str,
+    periods: int = 240,
+) -> pd.DataFrame:
     """Create deterministic data whose relative trends change halfway through."""
     rng = np.random.default_rng(11)
-    timestamps = pd.date_range("2024-01-01", periods=periods, freq="D", tz="UTC")
+    timestamps = session_opens(calendar_id, start="2024-01-01", periods=periods)
     first_half_drifts = np.linspace(0.0010, -0.0004, len(symbols))
     frames: dict[str, pd.DataFrame] = {}
 
@@ -45,8 +51,10 @@ def _make_panel(symbols: list[str], periods: int = 240) -> pd.DataFrame:
 
 def run_backtest(config: RunConfig, _options: RunOptions) -> None:
     params = config.params or {}
+    if config.calendar_id is None:
+        raise ValueError("Top-K example requires calendar_id")
     data = prepare_signals(
-        _make_panel(config.symbols),
+        _make_panel(config.symbols, config.calendar_id),
         lookback=int(params.get("lookback", 20)),
     )
     strategy = TopKSelectionStrategy(

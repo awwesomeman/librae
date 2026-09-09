@@ -6,13 +6,19 @@ on:
       - main
     paths:
       - "librae/**"
+      - "examples/**"
       - "tests/packaging/**"
+      - "tests/examples/**"
+      - "tests/deploy/test_deploy_contract.py"
       - "pyproject.toml"
       - ".github/workflows/package-smoke.yml"
   pull_request:
     paths:
       - "librae/**"
+      - "examples/**"
       - "tests/packaging/**"
+      - "tests/examples/**"
+      - "tests/deploy/test_deploy_contract.py"
       - "pyproject.toml"
       - ".github/workflows/package-smoke.yml"
 
@@ -47,7 +53,15 @@ jobs:
           python -m build --wheel
 
       - name: Install editable checkout
-        run: python -m pip install --editable .
+        run: python -m pip install --editable ".[test]"
+
+      - name: Smoke documented examples
+        run: python -m pytest -q tests/examples/test_runnable_examples.py
+
+      - name: Smoke UTF-8 deployment diagnostics
+        run: >-
+          python -m pytest -q tests/deploy/test_deploy_contract.py
+          -k cloud_deploy_refuses_to_sync_an_env_holding_secrets
 
       - name: Smoke editable install outside checkout
         run: >-

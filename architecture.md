@@ -313,8 +313,8 @@ librae/
 ├── backtest/                 backtest runtime
 │   ├── engine.py             Backtest — bar-by-bar execution + optional position snapshots + build_output()
 │   ├── result.py             raw side-effect-free backtest result models
-│   ├── schema.py             BacktestOutput, RunMetadata, StrategyMetrics, OrderEventRecord, PositionSnapshotPoint
-│   └── charts.py             plot_kbars — overlays order_events entries/exits via lightweight-charts (pure rendering, no recomputation, for local research; [extra: viz])
+│   ├── schema.py             BacktestOutput, RunMetadata, StrategyMetrics, PositionEventRecord, PositionSnapshotPoint
+│   └── charts.py             plot_kbars — overlays position_events entries/exits via lightweight-charts (pure rendering, no recomputation, for local research; [extra: viz])
 │
 ├── live/                     real-time / sim runtime
 │   ├── engine.py             LiveTrader — data-driven multi-symbol polling events
@@ -398,7 +398,7 @@ document scoped to layering, boundaries, and naming conventions.
 | `AccountPerformance` | one account's currency, initial cash, final equity, net PnL, equity curve, and metrics |
 | `RunMetadata` | run_id, strategy, symbols, timeframe, mode, data source, and start/end/run timestamps |
 | `StrategyMetrics` | generic period-return, trade, risk, cost, turnover, exposure, and concentration metrics |
-| `OrderEventRecord` | position lifecycle event (open/add/reduce/close); commission/slippage/tax belong only to that execution, while close/reduce records also persist their prorated entry costs for exact KPI refresh |
+| `PositionEventRecord` | position lifecycle event (open/add/reduce/close); commission/slippage/tax belong only to that execution, while close/reduce records also persist their prorated entry costs for exact KPI refresh |
 | `EquityCurvePoint` | per-event equity, return, drawdown, gross/net exposure, concentration, and turnover |
 | `PositionSnapshotPoint` | per-bar position quantity, signed market value, and realized weight |
 | `AllocationSnapshotPoint` | per-event target weight, achieved weight, and drift for one symbol |
