@@ -47,7 +47,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 25
+_STATE_SCHEMA_VERSION = 26
 
 
 def normalize_runtime_revision(
@@ -259,6 +259,13 @@ class LiveRuntimeState:
     last_bar_ts: dict[str, datetime] = field(default_factory=dict)
     last_financing_ts: dict[str, datetime] = field(default_factory=dict)
     pending_decision: StrategyDecision = field(default_factory=list)
+    # Bar timestamp each pending intent FIRST rested on, keyed by symbol
+    # (validate_strategy_decision allows at most one intent per symbol). A
+    # resting "day" limit expires against the session it first rested in, not
+    # the one that emitted it — a decision is emitted on one bar and first
+    # executable on the next. Only set once an intent has actually rested, and
+    # it has to survive a restart along with the intent itself.
+    pending_resting_since: dict[str, datetime] = field(default_factory=dict)
     active_orders: list[TrackedOrder] = field(default_factory=list)
     live_rebalance: LiveRebalance | None = None
     equity_peak: float = 0.0
@@ -327,6 +334,10 @@ class LiveRuntimeState:
                 for symbol, timestamp in self.last_financing_ts.items()
             },
             "pending_decision": _pending_decision_to_dict(self.pending_decision),
+            "pending_resting_since": {
+                symbol: timestamp.isoformat()
+                for symbol, timestamp in self.pending_resting_since.items()
+            },
             "active_orders": [order.to_dict() for order in self.active_orders],
             "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
             "equity_peak": self.equity_peak,
@@ -385,6 +396,9 @@ class LiveRuntimeState:
                 field="last_financing_ts",
             ),
             pending_decision=_pending_decision_from_dict(raw["pending_decision"]),
+            pending_resting_since=_timestamps_from_dict(
+                raw["pending_resting_since"], field="pending_resting_since"
+            ),
             active_orders=[TrackedOrder.from_dict(item) for item in raw["active_orders"]],
             live_rebalance=(
                 LiveRebalance.from_dict(raw["live_rebalance"])

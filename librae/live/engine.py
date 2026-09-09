@@ -11,7 +11,7 @@ import logging
 import signal
 import types
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Container, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -77,7 +77,12 @@ from librae.core.strategy import (
     Strategy,
     StrategyDecision,
 )
-from librae.core.trading_calendar import session_label, session_labels, validate_calendar_id
+from librae.core.trading_calendar import (
+    resting_session_label,
+    session_label,
+    session_labels,
+    validate_calendar_id,
+)
 
 from .execution_identity import (
     ExecutionIdentity,
@@ -769,6 +774,9 @@ class LiveTrader:
         self._cash = config.account.initial_cash
         self._halted: bool = False
         self._pending_decision: StrategyDecision = []
+        # Bar timestamp each pending intent first rested on, keyed by symbol.
+        # A resting "day" limit expires against the session it first rested in.
+        self._pending_resting_since: dict[str, datetime] = {}
         self._active_orders: list[TrackedOrder] = []
         self._live_rebalance: LiveRebalance | None = None
         self._equity_peak = self._cash
@@ -854,6 +862,138 @@ class LiveTrader:
     def _cash_for_symbol(self, symbol: str) -> float:
         return self._cash
 
+    def _record_resting_since(
+        self,
+        decision: StrategyDecision,
+        ts: datetime,
+        *,
+        primary_symbol: str,
+    ) -> None:
+        """Stamp the event an intent first rested on, once."""
+        if isinstance(decision, PortfolioWeights):
+            return
+        for intent in decision:
+            self._pending_resting_since.setdefault(intent.symbol or primary_symbol, ts)
+
+    def _replace_resting_intents(
+        self,
+        new_decision: StrategyDecision,
+        ts: datetime,
+        *,
+        primary_symbol: str,
+    ) -> None:
+        """Let a new decision cancel and replace an order still resting.
+
+        Mirrors the backtest: ``gtc`` commits an order until it fills, so the
+        strategy's next decision for that symbol is its way out. Only an intent
+        that has actually rested is replaceable — one waiting for its symbol's
+        first bar keeps the existing duplicate guard.
+        """
+        if not new_decision or isinstance(self._pending_decision, PortfolioWeights):
+            return
+        replacing = (
+            {intent.symbol or primary_symbol for intent in new_decision}
+            if not isinstance(new_decision, PortfolioWeights)
+            else None  # a whole-book target supersedes every resting order
+        )
+        live: list[OrderIntent] = []
+        for intent in self._pending_decision:
+            symbol = intent.symbol or primary_symbol
+            resting = symbol in self._pending_resting_since
+            if resting and (replacing is None or symbol in replacing):
+                self._pending_resting_since.pop(symbol, None)
+                if self._on_runtime_event:
+                    self._on_runtime_event(
+                        RuntimeEvent(
+                            ts=ts,
+                            event_type="decision_skipped",
+                            symbol=symbol,
+                            detail={"reason": "resting_order_replaced"},
+                        )
+                    )
+                continue
+            live.append(intent)
+        self._pending_decision = live
+
+    def _validate_resting_sessions(
+        self,
+        decision: StrategyDecision,
+        ts: datetime,
+        *,
+        primary_symbol: str,
+    ) -> None:
+        """Fail on the emitting event, not mid-run, when a day limit has no
+        session to expire against. This is engine expressibility, not a venue
+        rule, so it belongs with the decision that requested it."""
+        if isinstance(decision, PortfolioWeights):
+            return
+        for intent in decision:
+            if intent.time_in_force == "day" and intent.limit_price is not None:
+                self._session_of(intent.symbol or primary_symbol, ts)
+
+    def _prune_pending_submissions(self, *, primary_symbol: str) -> None:
+        """Forget submissions whose intent is no longer pending."""
+        if isinstance(self._pending_decision, PortfolioWeights):
+            self._pending_resting_since = {}
+            return
+        still_pending = {intent.symbol or primary_symbol for intent in self._pending_decision}
+        self._pending_resting_since = {
+            symbol: submitted_at
+            for symbol, submitted_at in self._pending_resting_since.items()
+            if symbol in still_pending
+        }
+
+    def _session_of(self, symbol: str, ts: datetime) -> object:
+        """Session label a resting ``day`` order expires against."""
+        try:
+            return resting_session_label(
+                ts,
+                calendar_id=self._instruments[symbol].calendar_id,
+                timeframe=self._config.timeframe,
+            )
+        except ValueError as exc:
+            raise ValueError(f"{symbol}: {exc}") from exc
+
+    def _expire_resting_day_intents(
+        self,
+        ts: datetime,
+        priced_symbols: Container[str],
+        *,
+        primary_symbol: str,
+    ) -> None:
+        """Drop resting ``day`` limits once their submitting session has ended.
+
+        Mirrors the backtest so a deterministic runtime cannot drift on this
+        sequence. Only a limit order can outlive an event, so a market order
+        never consults the calendar.
+        """
+        if isinstance(self._pending_decision, PortfolioWeights) or not self._pending_decision:
+            return
+        live: list[OrderIntent] = []
+        for intent in self._pending_decision:
+            symbol = intent.symbol or primary_symbol
+            submitted_at = self._pending_resting_since.get(symbol)
+            if (
+                intent.time_in_force == "day"
+                and intent.limit_price is not None
+                and submitted_at is not None
+                and symbol in priced_symbols
+                and self._session_of(symbol, ts) != self._session_of(symbol, submitted_at)
+            ):
+                self._pending_resting_since.pop(symbol, None)
+                if self._on_runtime_event:
+                    self._on_runtime_event(
+                        RuntimeEvent(
+                            ts=ts,
+                            event_type="decision_skipped",
+                            symbol=symbol,
+                            detail={"reason": "day_order_expired"},
+                        )
+                    )
+                continue
+            live.append(intent)
+        self._pending_decision = live
+
     def _without_halted_account(self, decision: StrategyDecision) -> StrategyDecision:
         return [] if self._halted else decision
 
@@ -876,6 +1016,7 @@ class LiveTrader:
             last_bar_ts=dict(self._last_bar_ts),
             last_financing_ts=dict(self._last_financing_ts),
             pending_decision=deepcopy(self._pending_decision),
+            pending_resting_since=dict(self._pending_resting_since),
             active_orders=deepcopy(self._active_orders),
             live_rebalance=deepcopy(self._live_rebalance),
             equity_peak=self._equity_peak,
@@ -919,6 +1060,7 @@ class LiveTrader:
         self._last_bar_ts = state.last_bar_ts
         self._last_financing_ts = state.last_financing_ts
         self._pending_decision = state.pending_decision
+        self._pending_resting_since = dict(state.pending_resting_since)
         self._active_orders = state.active_orders
         self._live_rebalance = state.live_rebalance
         self._equity_peak = state.equity_peak
@@ -1497,6 +1639,7 @@ class LiveTrader:
         """Fail closed and cancel every tracked order that may still execute."""
         self._halted = True
         self._pending_decision = []
+        self._pending_resting_since = {}
         self._live_rebalance = None
         if not self._executor.simulation:
             self._cancel_active_orders()
@@ -3644,6 +3787,7 @@ class LiveTrader:
         ready_decision: StrategyDecision = []
         if not execution_already_committed:
             self._pending_decision = self._without_halted_account(self._pending_decision)
+            self._expire_resting_day_intents(ts, raw_bars, primary_symbol=primary_symbol)
             if not live_rebalance_blocks_decisions:
                 ready_decision, waiting_decision = partition_pending_decision(
                     self._pending_decision,
@@ -3719,6 +3863,15 @@ class LiveTrader:
                 positions=self._positions,
                 result=step_result,
             )
+            if step_result.resting_intents:
+                resting = list(step_result.resting_intents)
+                self._pending_decision = merge_pending_decisions(
+                    self._pending_decision,
+                    resting,
+                    primary_symbol=primary_symbol,
+                )
+                self._record_resting_since(resting, ts, primary_symbol=primary_symbol)
+            self._prune_pending_submissions(primary_symbol=primary_symbol)
             self._apply_financing_cash_flows(ts, raw_bars)
         elif ready_decision and not self._execute_live_decision(
             ready_decision,
@@ -3881,6 +4034,8 @@ class LiveTrader:
         intent = self._without_halted_account(intent)
         self._period_index += 1
         if self._executor.simulation:
+            self._validate_resting_sessions(intent, ts, primary_symbol=primary_symbol)
+            self._replace_resting_intents(intent, ts, primary_symbol=primary_symbol)
             self._pending_decision = merge_pending_decisions(
                 self._pending_decision,
                 intent,
@@ -4156,6 +4311,7 @@ class LiveTrader:
             )
         self._halted = True
         self._pending_decision = []
+        self._pending_resting_since = {}
         self._persist_state()
         if flattened:
             outcome = "flattened account positions"

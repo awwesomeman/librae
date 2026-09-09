@@ -605,12 +605,23 @@ migration:
 4. Start the new revision with fresh state only after the broker account is
    confirmed flat, and retain the old checkpoint for audit.
 
-A pre-v25 checkpoint requires explicit external migration or removal before
-this version can run. Revision 25 adds the execution identity and changes the
-live state key. Stop flat and start a new checkpoint, or externally migrate
-the JSON document and key only after reconciling its positions and active
-orders to the same authenticated broker account. Re-running database
-initialization or schema migration does not transform stored checkpoint JSON.
+Two independently versioned things are easy to confuse here. The database
+schema revision lives in `librae_schema_revision` and is upgraded by `librae
+db migrate`. The **checkpoint document version** (`_STATE_SCHEMA_VERSION` in
+`librae/live/state.py`) is stored as `schema_version` inside the JSON in
+`execution_runtime_state.state`, is compared for exact equality on load, and
+**nothing migrates it automatically** — running database initialization or
+`librae db migrate` does not transform stored checkpoint JSON.
+
+The current checkpoint document version is 26. A checkpoint written at 25 or
+lower is rejected outright rather than silently defaulted, so it needs
+explicit external migration or removal before this build can run. Version 25
+added the execution identity and changed the live state key; version 26
+records the bar each pending intent was submitted on, so a restored
+simulation still expires a resting `day` limit against the session that
+submitted it. Stop flat and start a new checkpoint, or externally migrate the
+JSON document and key only after reconciling its positions and active orders
+to the same authenticated broker account.
 
 A configuration, broker environment, endpoint, or authenticated account change
 produces a different `state_key`, making the new runner appear to have no

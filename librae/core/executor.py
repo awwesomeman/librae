@@ -33,6 +33,7 @@ from .cost_model import CostModel
 from .market_data import CAN_BUY_COLUMN, CAN_SELL_COLUMN
 from .run_config import RebalanceResidualPolicy
 from .strategy import (
+    RESTING_TIME_IN_FORCE,
     Fill,
     OrderIntent,
     PortfolioWeights,
@@ -444,6 +445,10 @@ class ExecutionResult:
     cash_delta: float
     runtime_events: list[RuntimeEvent] = field(default_factory=list)
     pending_rebalance: PortfolioRebalanceState | None = None
+    # Intents whose "day"/"gtc" lifetime keeps them eligible on a later event.
+    # The engine owns re-queueing them; the executor only reports that this
+    # event did not resolve them.
+    resting_intents: list[OrderIntent] = field(default_factory=list)
 
 
 def coalesce_runtime_events(events: list[RuntimeEvent]) -> list[RuntimeEvent]:
@@ -1688,6 +1693,14 @@ def _try_fill(
         tolerance = max(EPSILON, min_notional * EPSILON)
         if notional < min_notional - tolerance:
             return None, 0.0, "notional_below_minimum"
+    # All-or-none is measured here, after every cap above, so a participation
+    # limit, a position-notional cap, or lot rounding cancels the order rather
+    # than booking a short fill the strategy never asked for. ``quantity`` is
+    # the post-normalization executable size, so venue lot rounding alone is
+    # not treated as a shortfall. Insufficient cash keeps its own reason
+    # below: it rejects the order outright rather than shortening it.
+    if _fok_falls_short(action.time_in_force, requested=action.quantity, fillable=fill.quantity):
+        return None, 0.0, "fok_not_fully_fillable"
     outlay = cost_model.estimate_entry_outlay(
         price,
         fill.quantity,
@@ -1697,6 +1710,52 @@ def _try_fill(
     if available_cash - outlay < -EPSILON:
         return None, 0.0, "insufficient_cash"
     return fill, outlay, None
+
+
+def _fok_falls_short(
+    time_in_force: TimeInForce | None,
+    *,
+    requested: float | None,
+    fillable: float,
+) -> bool:
+    """Whether all-or-none must cancel instead of booking a short fill.
+
+    Both the entry and the close path call this after every cap has been
+    applied, so a participation limit, a notional cap, or lot rounding cancels
+    the order rather than executing part of it.
+    """
+    return time_in_force == "fok" and requested is not None and fillable < requested - EPSILON
+
+
+def _ioc_remainder_event(
+    ts: datetime,
+    symbol: str,
+    time_in_force: TimeInForce | None,
+    *,
+    requested: float | None,
+    filled: float,
+) -> RuntimeEvent | None:
+    """Report the IOC remainder this event books nothing for.
+
+    An IOC order takes whatever the caps allow and cancels the rest, so the
+    shortfall is an operational outcome the audit trail should carry even
+    though part of the decision did execute. Every other value keeps a short
+    fill silently: without a requested lifetime there is no remainder to
+    cancel.
+    """
+    if time_in_force != "ioc" or requested is None:
+        return None
+    cancelled = requested - filled
+    if cancelled <= EPSILON:
+        return None
+    return _skipped(
+        ts,
+        "ioc_remainder_cancelled",
+        symbol=symbol,
+        requested_quantity=requested,
+        filled_quantity=filled,
+        cancelled_quantity=cancelled,
+    )
 
 
 def normalize_order_intents(
@@ -1857,6 +1916,7 @@ def execute_order_intents(
     trades: list[TradeResult] = []
     events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = normalization_events
+    resting_intents: list[OrderIntent] = []
     cash_delta = 0.0
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
     adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
@@ -1887,6 +1947,11 @@ def execute_order_intents(
     for action, price_raw in priced_actions:
         sym = action.symbol or primary_symbol
         if price_raw is None or price_raw <= 0:
+            # Not marketable on this event. A resting lifetime keeps the intent
+            # eligible for the next one; every other value expires here, which
+            # is the historical one-shot behavior.
+            if action.time_in_force in RESTING_TIME_IN_FORCE:
+                resting_intents.append(action)
             continue
         price = float(price_raw)
         cost_model = get_cost_model(sym)
@@ -1927,6 +1992,15 @@ def execute_order_intents(
                     min_notional=get_min_notional(sym) if get_min_notional else None,
                 )
                 if fill:
+                    remainder = _ioc_remainder_event(
+                        ts,
+                        sym,
+                        action.time_in_force,
+                        requested=action.quantity,
+                        filled=fill.quantity,
+                    )
+                    if remainder is not None:
+                        runtime_events.append(remainder)
                     _validate_entry_order_notional(
                         sym,
                         fill,
@@ -2007,6 +2081,15 @@ def execute_order_intents(
                     min_notional=get_min_notional(sym) if get_min_notional else None,
                 )
                 if fill:
+                    remainder = _ioc_remainder_event(
+                        ts,
+                        sym,
+                        action.time_in_force,
+                        requested=action.quantity,
+                        filled=fill.quantity,
+                    )
+                    if remainder is not None:
+                        runtime_events.append(remainder)
                     _validate_entry_order_notional(
                         sym,
                         fill,
@@ -2085,7 +2168,10 @@ def execute_order_intents(
                 used_bar_quantity=volume_consumed.get(sym, 0.0),
                 used_adv_quantity=adv_consumed.get(sym, 0.0),
             )
-            requested_qty = min(close_qty, pos.quantity) if close_qty is not None else pos.quantity
+            # A close with no explicit quantity means the whole position, which
+            # is a deterministic "all" for fill-or-kill to measure against.
+            intended_qty = min(close_qty, pos.quantity) if close_qty is not None else pos.quantity
+            requested_qty = intended_qty
             if max_volume_qty is not None:
                 requested_qty = min(requested_qty, max_volume_qty)
             if get_executable_quantity is not None and requested_qty > EPSILON:
@@ -2096,6 +2182,26 @@ def execute_order_intents(
                 )
                 runtime_events.append(_skipped(ts, reason, symbol=sym))
                 continue
+            if _fok_falls_short(time_in_force, requested=intended_qty, fillable=requested_qty):
+                runtime_events.append(
+                    _skipped(
+                        ts,
+                        "fok_not_fully_fillable",
+                        symbol=sym,
+                        requested_quantity=intended_qty,
+                        fillable_quantity=requested_qty,
+                    )
+                )
+                continue
+            remainder = _ioc_remainder_event(
+                ts,
+                sym,
+                time_in_force,
+                requested=intended_qty,
+                filled=requested_qty,
+            )
+            if remainder is not None:
+                runtime_events.append(remainder)
 
             trade, event, proceeds, fully_closed = build_close_event(
                 pos,
@@ -2119,7 +2225,11 @@ def execute_order_intents(
                 reduce_position(pos, trade.quantity)
 
     return ExecutionResult(
-        trades=trades, events=events, cash_delta=cash_delta, runtime_events=runtime_events
+        trades=trades,
+        events=events,
+        cash_delta=cash_delta,
+        runtime_events=runtime_events,
+        resting_intents=resting_intents,
     )
 
 
@@ -3396,6 +3506,40 @@ def validate_strategy_decision(
             raise ValueError("strategy decision must contain at most one intent per symbol")
         symbols = set(resolved_symbols)
 
+        # WHY: these two rejections are about what this engine can express,
+        # not about what any one venue accepts — a backtest stays broker-
+        # neutral, and venue rules belong in the adapters (Shioaji already
+        # refuses ROD market orders and GTC outright). A market order is
+        # deliberately NOT rejected here: it resolves on its first eligible
+        # event, so every lifetime collapses to the same behavior rather than
+        # being unsupported, and IBKR accepts DAY market orders that TAIFEX
+        # and Binance do not.
+        for intent in decision:
+            # WHY: an entry with no quantity sizes from available cash, so
+            # there is no requested amount for "all or none" to be measured
+            # against. A close with no quantity means the whole position,
+            # which is a deterministic "all" — the same carve-out groups make.
+            if (
+                intent.time_in_force == "fok"
+                and intent.quantity is None
+                and intent.action != "close"
+            ):
+                raise ValueError(
+                    f"{intent.symbol or primary_symbol} time_in_force='fok' requires an "
+                    "explicit quantity on an entry: a cash-sized order has no requested "
+                    "amount to fill in full"
+                )
+            if intent.time_in_force not in RESTING_TIME_IN_FORCE:
+                continue
+            symbol = intent.symbol or primary_symbol
+            if intent.group_id is not None:
+                raise ValueError(
+                    f"group {intent.group_id!r} leg {symbol} cannot use "
+                    f"time_in_force={intent.time_in_force!r}: a group executes atomically "
+                    "on one event, so a resting leg would break its all-or-none contract; "
+                    "use 'ioc' or 'fok'"
+                )
+
         groups: dict[str, list[OrderIntent]] = {}
         for intent in decision:
             if intent.group_id is not None:
@@ -3721,6 +3865,7 @@ def execute_pending_decision_and_stops(
     trades: list[TradeResult] = []
     events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = []
+    resting_intents: list[OrderIntent] = []
     cash_delta_total = 0.0
     next_rebalance_state: PortfolioRebalanceState | None = None
     if used_bar_quantity_by_symbol is None:
@@ -3904,6 +4049,7 @@ def execute_pending_decision_and_stops(
         trades.extend(fill_result.trades)
         events.extend(fill_result.events)
         runtime_events.extend(fill_result.runtime_events)
+        resting_intents.extend(fill_result.resting_intents)
         next_rebalance_state = fill_result.pending_rebalance
         cash_delta_total += fill_result.cash_delta
         cash += fill_result.cash_delta
@@ -3955,4 +4101,5 @@ def execute_pending_decision_and_stops(
         cash_delta=cash_delta_total,
         runtime_events=coalesce_runtime_events(runtime_events),
         pending_rebalance=next_rebalance_state,
+        resting_intents=resting_intents,
     )

@@ -28,6 +28,10 @@ PositionSide = Literal["long", "short"]
 OrderAction = Literal["long", "short", "close"]
 PositionEventType = Literal["open", "add", "reduce", "close"]
 TimeInForce = Literal["day", "gtc", "ioc", "fok"]
+# Values whose lifetime spans more than one execution event. Simulation keeps
+# these on the engine's pending decision until they fill or expire; every other
+# value resolves on its first eligible event.
+RESTING_TIME_IN_FORCE: tuple[TimeInForce, ...] = ("day", "gtc")
 
 
 @dataclass(frozen=True)
@@ -184,12 +188,33 @@ class OrderIntent:
             group_id does not claim broker or cross-venue atomicity.
             None means independent execution (the default): the intent may
             wait for its own symbol's next bar without blocking anything else.
-        time_in_force: Broker time-in-force hint — "day" (rest until session
-            end), "gtc" (rest until cancelled), "ioc" (fill immediately,
-            cancel the remainder), or "fok" (fill the entire quantity
-            immediately or cancel it all). Live-only: backtest/sim fills are
-            simulated and ignore it. None resolves per order type
-            (see LiveExecutor.OrderRequest) rather than any single default.
+        time_in_force: Order lifetime — "day" (rest until the instrument's
+            session ends), "gtc" (rest until cancelled), "ioc" (fill what is
+            available now, cancel the remainder), or "fok" (fill the entire
+            quantity now or cancel it all). None keeps the historical
+            one-event opportunity and resolves per order type at the broker
+            (see LiveExecutor.OrderRequest).
+
+            Backtest and simulation model these from bar data alone, which
+            answers exactly two questions: how many events the order stays
+            eligible on, and whether a short fill counts. "Available now"
+            means this engine's own participation/notional/cash limits, not
+            book depth — queue position is deliberately not modeled. A market
+            order resolves on its first eligible event, so its lifetime is
+            vacuous; only a limit order can rest. A lifetime is measured from
+            the order's first eligible event, not from the bar that emitted
+            it. A resting order that fills short does not keep a working
+            remainder, and only price eligibility persists: an event that
+            priced the order and then refused it for an operational reason has
+            resolved it and reports its own decision_skipped reason. Emitting a
+            new intent for a symbol that already has a resting order replaces
+            it, so "gtc" is never a commitment the strategy cannot escape.
+
+            Live sends the value to the broker, which owns the real lifetime;
+            the engine does not simulate resting orders there. Venue limits
+            stay in the adapters (Shioaji has no GTC and rejects ROD market
+            orders), so a combination this engine accepts may still be
+            refused at submission.
     """
 
     action: OrderAction

@@ -760,13 +760,66 @@ exceeded `RunConfig.runtime.poll_seconds`.
   backstop for cancelling a still-resting `day`/`gtc` order after N seconds
   regardless of its time-in-force.
 
-`OrderIntent.time_in_force` (`"day"` / `"gtc"` / `"ioc"` / `"fok"`) is a
-live-only broker instruction, ignored by backtest/sim fills. Leaving it unset
-(`None`) resolves per order type rather than to one fixed default: market
-orders resolve to `"ioc"` (a resting market order is nonsensical everywhere)
-and limit orders resolve to `"day"` (rests for the placing bar's duration,
-matching `OrderIntent.limit_price`'s "valid for one eligible bar" backtest
-contract). Each adapter maps the four values to its own SDK:
+`OrderIntent.time_in_force` (`"day"` / `"gtc"` / `"ioc"` / `"fok"`) sets the
+order's lifetime. Leaving it unset (`None`) keeps the historical one-event
+opportunity and resolves per order type at the broker rather than to one fixed
+default: market orders resolve to `"ioc"` (a resting market order is
+nonsensical everywhere) and limit orders resolve to `"day"`.
+
+Backtest and simulation model the four values from bar data, which answers two
+questions and no more — how many events the order stays eligible on, and
+whether a short fill counts:
+
+| `time_in_force` | Eligible for | Short fill on an eligible event |
+|---|---|---|
+| `"ioc"` | one event | kept; the remainder is cancelled and audited |
+| `"fok"` | one event | cancels the whole order, books nothing |
+| `"day"` | until the instrument's session ends | kept; no working remainder |
+| `"gtc"` | until filled or the run ends | kept; no working remainder |
+| unset | one event | kept silently — no lifetime was requested |
+
+"Enough to fill" means this engine's own participation, notional, and cash
+limits; book depth and queue position are deliberately not modeled, so this is
+not an exchange matching engine. Mainstream bar-based backtesters model order
+lifetime but not `ioc`/`fok` at all — librae defines them against the
+participation cap it already commits to for every fill.
+
+Two properties are worth stating outright. A market order resolves on its
+first eligible event, so its lifetime is vacuous and every value behaves
+alike; only a limit order can rest. And only *price* eligibility persists: an
+event that priced a resting order and then refused it for an operational
+reason (cash, a participation cap, a notional limit) has resolved that
+decision and reports its own `decision_skipped` reason, rather than silently
+retrying every bar and hiding a standing misconfiguration.
+
+`"day"` expires against the instrument's own trading session via its
+`calendar_id`, not a wall-clock day, so a venue whose session spans midnight
+keeps its orders alive across it. The lifetime is anchored to the order's
+**first eligible event**, not the bar that emitted it: a decision is emitted on
+one bar and first executable on the next, so anchoring to the emission would
+expire a `"day"` order before it was ever eligible — on daily data, always.
+This also matches a broker, which turns an order submitted after the close into
+a day order for the next session. An intraday `"day"` limit requires a
+`calendar_id` for its symbol, and that is checked on the bar that emits it.
+Resting is a simulation concept: in live mode the broker owns the real lifetime
+and the engine never rests an order itself.
+
+A resting order is not a commitment the strategy cannot escape. A new decision
+for a symbol that already has one **replaces** it — ordinary cancel/replace —
+and the superseded order is audited as `resting_order_replaced`. A
+`PortfolioWeights` target supersedes every resting order, since it restates the
+whole book.
+
+A `group_id` leg may not use `"day"` or `"gtc"`. A group executes atomically
+on one event, so a leg that outlived it would break the all-or-none contract;
+`"fok"` on an entry leg also needs an explicit quantity, because a cash-sized
+order has no requested amount to fill in full.
+
+Preflight rejects only what this engine cannot express, which keeps a backtest
+broker-neutral. Venue rules stay in the adapters, so a combination accepted
+here can still be refused at submission — Shioaji has no `"gtc"` and rejects
+market+ROD, while IBKR accepts `"day"` market orders. Each adapter maps the
+four values to its own SDK:
 
 | `time_in_force` | Shioaji (`sj.OrderType`) | IBKR (`order.tif`) | Crypto/ccxt (`params["timeInForce"]`) |
 |---|---|---|---|
