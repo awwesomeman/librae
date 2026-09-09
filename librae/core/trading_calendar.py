@@ -140,6 +140,30 @@ def session_lookback_days(value: object, periods: int, calendar_id: str) -> int:
     return max(1, ceil((timestamp - first_open).total_seconds() / 86_400))
 
 
+def resting_session_label(
+    value: object,
+    *,
+    calendar_id: str | None,
+    timeframe: str,
+) -> object:
+    """Session identity a resting order's ``day`` lifetime expires against.
+
+    One daily bar already is one session, so D1 data needs no calendar. Any
+    finer timeframe does: without one there is no boundary for the order to
+    expire at, and guessing a UTC date would silently mis-expire every venue
+    whose session spans midnight. Backtest and simulation share this so a
+    deterministic runtime cannot drift on order lifetime.
+    """
+    if timeframe == "D1":
+        return _timestamp(value)
+    if calendar_id is None:
+        raise ValueError(
+            "time_in_force='day' on intraday data requires a calendar_id: "
+            "the session boundary is what makes the order expire"
+        )
+    return session_label(value, calendar_id)
+
+
 def session_labels(index: pd.DatetimeIndex, calendar_id: str) -> pd.Index:
     """Vector-shaped session labels for a timezone-aware bar-start index."""
     if index.tz is None:

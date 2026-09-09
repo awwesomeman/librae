@@ -794,9 +794,21 @@ retrying every bar and hiding a standing misconfiguration.
 
 `"day"` expires against the instrument's own trading session via its
 `calendar_id`, not a wall-clock day, so a venue whose session spans midnight
-keeps its orders alive across it. An intraday `"day"` limit therefore requires
-a `calendar_id` for its symbol. Resting is a simulation concept: in live mode
-the broker owns the real lifetime and the engine never rests an order itself.
+keeps its orders alive across it. The lifetime is anchored to the order's
+**first eligible event**, not the bar that emitted it: a decision is emitted on
+one bar and first executable on the next, so anchoring to the emission would
+expire a `"day"` order before it was ever eligible — on daily data, always.
+This also matches a broker, which turns an order submitted after the close into
+a day order for the next session. An intraday `"day"` limit requires a
+`calendar_id` for its symbol, and that is checked on the bar that emits it.
+Resting is a simulation concept: in live mode the broker owns the real lifetime
+and the engine never rests an order itself.
+
+A resting order is not a commitment the strategy cannot escape. A new decision
+for a symbol that already has one **replaces** it — ordinary cancel/replace —
+and the superseded order is audited as `resting_order_replaced`. A
+`PortfolioWeights` target supersedes every resting order, since it restates the
+whole book.
 
 A `group_id` leg may not use `"day"` or `"gtc"`. A group executes atomically
 on one event, so a leg that outlived it would break the all-or-none contract;

@@ -1699,11 +1699,7 @@ def _try_fill(
     # the post-normalization executable size, so venue lot rounding alone is
     # not treated as a shortfall. Insufficient cash keeps its own reason
     # below: it rejects the order outright rather than shortening it.
-    if (
-        action.time_in_force == "fok"
-        and action.quantity is not None
-        and fill.quantity < action.quantity - EPSILON
-    ):
+    if _fok_falls_short(action.time_in_force, requested=action.quantity, fillable=fill.quantity):
         return None, 0.0, "fok_not_fully_fillable"
     outlay = cost_model.estimate_entry_outlay(
         price,
@@ -1716,31 +1712,48 @@ def _try_fill(
     return fill, outlay, None
 
 
+def _fok_falls_short(
+    time_in_force: TimeInForce | None,
+    *,
+    requested: float | None,
+    fillable: float,
+) -> bool:
+    """Whether all-or-none must cancel instead of booking a short fill.
+
+    Both the entry and the close path call this after every cap has been
+    applied, so a participation limit, a notional cap, or lot rounding cancels
+    the order rather than executing part of it.
+    """
+    return time_in_force == "fok" and requested is not None and fillable < requested - EPSILON
+
+
 def _ioc_remainder_event(
     ts: datetime,
     symbol: str,
-    intent: OrderIntent,
-    fill: Fill,
+    time_in_force: TimeInForce | None,
+    *,
+    requested: float | None,
+    filled: float,
 ) -> RuntimeEvent | None:
     """Report the IOC remainder this event books nothing for.
 
-    An IOC order takes whatever the caps above allow and cancels the rest,
-    so the shortfall is an operational outcome the audit trail should carry
-    even though part of the decision did execute. Every other value keeps a
-    short fill silently: without a requested lifetime there is no remainder
-    to cancel.
+    An IOC order takes whatever the caps allow and cancels the rest, so the
+    shortfall is an operational outcome the audit trail should carry even
+    though part of the decision did execute. Every other value keeps a short
+    fill silently: without a requested lifetime there is no remainder to
+    cancel.
     """
-    if intent.time_in_force != "ioc" or intent.quantity is None:
+    if time_in_force != "ioc" or requested is None:
         return None
-    cancelled = intent.quantity - fill.quantity
+    cancelled = requested - filled
     if cancelled <= EPSILON:
         return None
     return _skipped(
         ts,
         "ioc_remainder_cancelled",
         symbol=symbol,
-        requested_quantity=intent.quantity,
-        filled_quantity=fill.quantity,
+        requested_quantity=requested,
+        filled_quantity=filled,
         cancelled_quantity=cancelled,
     )
 
@@ -1979,7 +1992,13 @@ def execute_order_intents(
                     min_notional=get_min_notional(sym) if get_min_notional else None,
                 )
                 if fill:
-                    remainder = _ioc_remainder_event(ts, sym, action, fill)
+                    remainder = _ioc_remainder_event(
+                        ts,
+                        sym,
+                        action.time_in_force,
+                        requested=action.quantity,
+                        filled=fill.quantity,
+                    )
                     if remainder is not None:
                         runtime_events.append(remainder)
                     _validate_entry_order_notional(
@@ -2062,7 +2081,13 @@ def execute_order_intents(
                     min_notional=get_min_notional(sym) if get_min_notional else None,
                 )
                 if fill:
-                    remainder = _ioc_remainder_event(ts, sym, action, fill)
+                    remainder = _ioc_remainder_event(
+                        ts,
+                        sym,
+                        action.time_in_force,
+                        requested=action.quantity,
+                        filled=fill.quantity,
+                    )
                     if remainder is not None:
                         runtime_events.append(remainder)
                     _validate_entry_order_notional(
@@ -2143,7 +2168,10 @@ def execute_order_intents(
                 used_bar_quantity=volume_consumed.get(sym, 0.0),
                 used_adv_quantity=adv_consumed.get(sym, 0.0),
             )
-            requested_qty = min(close_qty, pos.quantity) if close_qty is not None else pos.quantity
+            # A close with no explicit quantity means the whole position, which
+            # is a deterministic "all" for fill-or-kill to measure against.
+            intended_qty = min(close_qty, pos.quantity) if close_qty is not None else pos.quantity
+            requested_qty = intended_qty
             if max_volume_qty is not None:
                 requested_qty = min(requested_qty, max_volume_qty)
             if get_executable_quantity is not None and requested_qty > EPSILON:
@@ -2154,6 +2182,26 @@ def execute_order_intents(
                 )
                 runtime_events.append(_skipped(ts, reason, symbol=sym))
                 continue
+            if _fok_falls_short(time_in_force, requested=intended_qty, fillable=requested_qty):
+                runtime_events.append(
+                    _skipped(
+                        ts,
+                        "fok_not_fully_fillable",
+                        symbol=sym,
+                        requested_quantity=intended_qty,
+                        fillable_quantity=requested_qty,
+                    )
+                )
+                continue
+            remainder = _ioc_remainder_event(
+                ts,
+                sym,
+                time_in_force,
+                requested=intended_qty,
+                filled=requested_qty,
+            )
+            if remainder is not None:
+                runtime_events.append(remainder)
 
             trade, event, proceeds, fully_closed = build_close_event(
                 pos,

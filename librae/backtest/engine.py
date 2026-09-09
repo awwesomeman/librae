@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from numbers import Real
@@ -110,7 +110,7 @@ from librae.core.strategy import (
 from librae.core.trading_calendar import (
     ALWAYS_OPEN_CALENDAR,
     period_start,
-    session_label,
+    resting_session_label,
     session_labels,
     session_ordinals,
     validate_calendar_id,
@@ -132,10 +132,12 @@ class _DecisionEnvelope:
 
     decision: StrategyDecision
     decision_at: pd.Timestamp | None
-    # Bar timestamp the strategy emitted this on. Distinct from decision_at,
-    # which is the information frontier and is None for single-frequency runs;
-    # a resting "day" order expires against the session that submitted it.
-    submitted_at: pd.Timestamp | None = None
+    # Bar timestamp this decision FIRST rested on, set only once the executor
+    # reports it unresolved. A decision is emitted on one bar and first
+    # executable on the next, so anchoring a "day" lifetime to the emitting bar
+    # would expire it before it was ever eligible — on daily data, always.
+    # None until the decision has actually rested.
+    resting_since: pd.Timestamp | None = None
 
 
 def _enveloped_decision(envelopes: Sequence[_DecisionEnvelope]) -> StrategyDecision:
@@ -155,7 +157,6 @@ def _merge_enveloped_decision(
     new_decision: StrategyDecision,
     *,
     decision_at: pd.Timestamp | None,
-    submitted_at: pd.Timestamp | None = None,
     primary_symbol: str,
 ) -> list[_DecisionEnvelope]:
     """Apply legacy pending-decision merge rules while preserving causal time."""
@@ -183,7 +184,6 @@ def _merge_enveloped_decision(
         if not isinstance(new_decision, PortfolioWeights)
         else new_decision,
         decision_at=decision_at,
-        submitted_at=submitted_at,
     )
     if isinstance(pending, PortfolioWeights):
         return [envelope]
@@ -212,10 +212,12 @@ def _partition_enveloped_decisions(
             primary_symbol=primary_symbol,
         )
         if executable:
-            ready.append(_DecisionEnvelope(executable, envelope.decision_at, envelope.submitted_at))
+            ready.append(
+                _DecisionEnvelope(executable, envelope.decision_at, envelope.resting_since)
+            )
         if data_waiting:
             waiting.append(
-                _DecisionEnvelope(data_waiting, envelope.decision_at, envelope.submitted_at)
+                _DecisionEnvelope(data_waiting, envelope.decision_at, envelope.resting_since)
             )
     return _enveloped_decision(ready), waiting, ready
 
@@ -223,6 +225,7 @@ def _partition_enveloped_decisions(
 def _expire_day_intents(
     envelopes: Sequence[_DecisionEnvelope],
     ts: pd.Timestamp,
+    priced_symbols: Container[str],
     *,
     primary_symbol: str,
     session_of: Callable[[str, pd.Timestamp], object],
@@ -233,7 +236,9 @@ def _expire_day_intents(
     day, so a venue whose session spans midnight keeps its orders alive
     across it. Only a limit order can outlive an event, so ``session_of`` is
     never consulted for a market order and a run that rests nothing pays no
-    calendar cost.
+    calendar cost. Expiry is judged only on a bar the symbol itself has: on a
+    union timeline another instrument's bar can fall outside this one's
+    session entirely, which is not a boundary its orders crossed.
     """
 
     def rests(intent: OrderIntent) -> bool:
@@ -244,7 +249,7 @@ def _expire_day_intents(
     for envelope in envelopes:
         if (
             isinstance(envelope.decision, PortfolioWeights)
-            or envelope.submitted_at is None
+            or envelope.resting_since is None
             or not any(rests(intent) for intent in envelope.decision)
         ):
             kept.append(envelope)
@@ -252,20 +257,62 @@ def _expire_day_intents(
         live: list[OrderIntent] = []
         for intent in envelope.decision:
             symbol = intent.symbol or primary_symbol
-            if rests(intent) and session_of(symbol, ts) != session_of(
-                symbol, envelope.submitted_at
+            if (
+                rests(intent)
+                and symbol in priced_symbols
+                and session_of(symbol, ts) != session_of(symbol, envelope.resting_since)
             ):
                 expired.append(symbol)
                 continue
             live.append(intent)
         if live:
-            kept.append(_DecisionEnvelope(live, envelope.decision_at, envelope.submitted_at))
+            kept.append(_DecisionEnvelope(live, envelope.decision_at, envelope.resting_since))
     return kept, expired
+
+
+def _replace_resting_intents(
+    envelopes: Sequence[_DecisionEnvelope],
+    new_decision: StrategyDecision,
+    *,
+    primary_symbol: str,
+) -> tuple[list[_DecisionEnvelope], list[str]]:
+    """Let a new decision cancel and replace an order still resting.
+
+    ``gtc`` commits an order until it fills or the run ends, so without this
+    the strategy has no way out and its next decision for that symbol would
+    collide with the resting one. Standard cancel/replace: the newer decision
+    wins and the replaced order is audited. Only genuinely resting envelopes
+    are replaceable — one waiting for its symbol's first bar has not been
+    offered to the market yet and keeps the existing duplicate guard.
+    """
+    replacing = (
+        {intent.symbol or primary_symbol for intent in new_decision}
+        if not isinstance(new_decision, PortfolioWeights)
+        else None  # a whole-book target supersedes every resting order
+    )
+    kept: list[_DecisionEnvelope] = []
+    replaced: list[str] = []
+    for envelope in envelopes:
+        if envelope.resting_since is None or isinstance(envelope.decision, PortfolioWeights):
+            kept.append(envelope)
+            continue
+        live = [
+            intent
+            for intent in envelope.decision
+            if replacing is not None and (intent.symbol or primary_symbol) not in replacing
+        ]
+        replaced.extend(
+            intent.symbol or primary_symbol for intent in envelope.decision if intent not in live
+        )
+        if live:
+            kept.append(_DecisionEnvelope(live, envelope.decision_at, envelope.resting_since))
+    return kept, replaced
 
 
 def _resting_envelopes(
     ready_envelopes: Sequence[_DecisionEnvelope],
     resting_intents: Sequence[OrderIntent],
+    ts: pd.Timestamp,
     *,
     primary_symbol: str,
 ) -> list[_DecisionEnvelope]:
@@ -289,7 +336,13 @@ def _resting_envelopes(
             if (symbol := intent.symbol or primary_symbol) in still_resting
         ]
         if kept:
-            envelopes.append(_DecisionEnvelope(kept, envelope.decision_at, envelope.submitted_at))
+            envelopes.append(
+                _DecisionEnvelope(
+                    kept,
+                    envelope.decision_at,
+                    envelope.resting_since if envelope.resting_since is not None else ts,
+                )
+            )
     return envelopes
 
 
@@ -1481,6 +1534,7 @@ class Backtest:
             pending_envelopes, expired_day_symbols = _expire_day_intents(
                 pending_envelopes,
                 ts,
+                bars,
                 primary_symbol=primary_symbol,
                 session_of=self._session_of,
             )
@@ -1599,6 +1653,7 @@ class Backtest:
                 *_resting_envelopes(
                     ready_envelopes,
                     step_result.resting_intents,
+                    ts,
                     primary_symbol=primary_symbol,
                 ),
                 *pending_envelopes,
@@ -1769,6 +1824,13 @@ class Backtest:
                     positions=positions,
                 )
                 new_decision = self._without_halted_account(new_decision, halted)
+                # Fail on the emitting bar, not mid-run: a day limit with no
+                # session to expire against is engine expressibility, not a
+                # venue rule, so it belongs with the decision that asked for it.
+                if not isinstance(new_decision, PortfolioWeights):
+                    for candidate in new_decision:
+                        if candidate.time_in_force == "day" and candidate.limit_price is not None:
+                            self._session_of(candidate.symbol or primary_symbol, ts)
                 if pending_rebalance is not None:
                     if isinstance(new_decision, PortfolioWeights):
                         runtime_events.extend(_superseded_rebalance_events(ts, pending_rebalance))
@@ -1790,11 +1852,25 @@ class Backtest:
                             detail={"reason": "rebalance_superseded"},
                         )
                     )
+                if new_decision:
+                    pending_envelopes, replaced_symbols = _replace_resting_intents(
+                        pending_envelopes,
+                        new_decision,
+                        primary_symbol=primary_symbol,
+                    )
+                    runtime_events.extend(
+                        RuntimeEvent(
+                            ts=ts.to_pydatetime(),
+                            event_type="decision_skipped",
+                            symbol=symbol,
+                            detail={"reason": "resting_order_replaced"},
+                        )
+                        for symbol in replaced_symbols
+                    )
                 pending_envelopes = _merge_enveloped_decision(
                     pending_envelopes,
                     new_decision,
                     decision_at=decision_at,
-                    submitted_at=ts,
                     primary_symbol=primary_symbol,
                 )
                 decision_index += 1
@@ -2244,17 +2320,14 @@ class Backtest:
 
     def _session_of(self, symbol: str, ts: pd.Timestamp) -> object:
         """Session label a resting ``day`` order expires against."""
-        if self._timeframe == "D1":
-            # One daily bar is one session, so a day order lives for exactly
-            # the single event it was already eligible on.
-            return ts
-        calendar_id = self._calendar_ids.get(symbol)
-        if calendar_id is None:
-            raise ValueError(
-                f"time_in_force='day' on intraday {symbol} data requires a calendar_id: "
-                "the session boundary is what makes the order expire"
+        try:
+            return resting_session_label(
+                ts,
+                calendar_id=self._calendar_ids.get(symbol),
+                timeframe=self._timeframe,
             )
-        return session_label(ts, calendar_id)
+        except ValueError as exc:
+            raise ValueError(f"{symbol}: {exc}") from exc
 
     def _precompute_session_labels(self) -> dict[pd.Timestamp, dict[str, object]]:
         """Map every bar to its instrument session for cumulative ADV usage."""

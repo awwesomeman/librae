@@ -54,11 +54,18 @@ def _run(intent: OrderIntent, *, participation: float | None = 0.1, periods: int
 
 
 def _skip_reasons(result) -> list[str]:
-    return [
-        str(event.detail.get("reason"))
-        for event in result.runtime_events
-        if event.event_type == "decision_skipped"
-    ]
+    """Every decision_skipped reason, including ones coalesce_runtime_events
+    demoted into related_events when another reason shared the same ts and
+    symbol — the audit trail keeps them, so assertions must see them too."""
+    reasons: list[str] = []
+    for event in result.runtime_events:
+        if event.event_type != "decision_skipped":
+            continue
+        reasons.append(str(event.detail.get("reason")))
+        for related in event.detail.get("related_events", []):
+            if isinstance(related, dict) and "reason" in related:
+                reasons.append(str(related["reason"]))
+    return reasons
 
 
 def _validate(decision: list[OrderIntent], *, bars: dict | None = None) -> None:
@@ -445,3 +452,275 @@ class TestSimulationMatchesBacktest:
         runner = self._run_sim(None)
 
         assert not runner._positions
+
+
+def _panel_for(symbol: str, lows: list[float], *, freq: str = "h", volumes=None) -> pd.DataFrame:
+    n = len(lows)
+    index = pd.MultiIndex.from_product(
+        [[symbol], pd.date_range("2025-01-01", periods=n, freq=freq, tz="UTC")],
+        names=["symbol", "datetime"],
+    )
+    return pd.DataFrame(
+        {
+            "open": [100.0] * n,
+            "high": [101.0] * n,
+            "low": lows,
+            "close": [100.0] * n,
+            "volume": list(volumes) if volumes else [1_000.0] * n,
+        },
+        index=index,
+    )
+
+
+class TestRestingLifetimeStartsAtTheFirstEligibleEvent:
+    """A decision is emitted on one bar and first executable on the next, so a
+    lifetime anchored to the emitting bar would expire before the order was
+    ever eligible — on daily data it could never fill at all."""
+
+    def test_day_limit_fills_on_its_first_eligible_daily_bar(self) -> None:
+        panel = _panel_for("X", [99.0, 94.0, 99.0, 99.0, 99.0, 99.0], freq="D")
+
+        result = _run_panel(
+            panel,
+            OrderIntent(
+                action="long", symbol="X", quantity=1.0, limit_price=95.0, time_in_force="day"
+            ),
+        )
+
+        opened = [event for event in result.position_events if event.event_type == "open"]
+        assert len(opened) == 1, "a day limit must be eligible on the bar that executes it"
+        assert "day_order_expired" not in _skip_reasons(result)
+
+    def test_day_limit_emitted_on_the_last_bar_of_a_session_survives_into_the_next(self) -> None:
+        """A broker treats an order submitted after the close as a day order
+        for the following session rather than expiring it unfilled."""
+        panel = _hourly_btc("2025-01-01T23:00Z", [99.0, 94.0, 99.0, 99.0, 99.0, 99.0])
+
+        result = _run_panel(
+            panel,
+            OrderIntent(
+                action="long",
+                symbol="BTCUSDT",
+                quantity=1.0,
+                limit_price=95.0,
+                time_in_force="day",
+            ),
+        )
+
+        opened = [event for event in result.position_events if event.event_type == "open"]
+        assert len(opened) == 1
+
+
+class TestReEmissionReplacesARestingOrder:
+    """ "gtc" commits an order until it fills or the run ends, so a strategy
+    needs a way out. A new decision for the symbol is that way out."""
+
+    def test_a_new_intent_replaces_the_resting_one(self) -> None:
+        panel = _panel_for("X", [99.0] * 6)
+
+        class ReplaceOnBarTwo(Strategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return [
+                        OrderIntent(
+                            action="long",
+                            symbol="X",
+                            quantity=1.0,
+                            limit_price=95.0,
+                            time_in_force="gtc",
+                        )
+                    ]
+                if ctx.period_index == 2:
+                    return [OrderIntent(action="long", symbol="X", quantity=1.0)]
+                return []
+
+        result = Backtest(
+            panel,
+            ReplaceOnBarTwo(),
+            initial_balance=100_000.0,
+            cost_model=CostModel.zero(),
+            data_source="test",
+        ).run()
+
+        opened = [event for event in result.position_events if event.event_type == "open"]
+        assert len(opened) == 1, "the replacing market order should fill"
+        assert "resting_order_replaced" in _skip_reasons(result)
+
+
+class TestCloseHonoursTimeInForce:
+    """The close branch never reached _try_fill, so a fok close could book a
+    partial reduce — the exact outcome fok exists to prevent."""
+
+    @staticmethod
+    def _close_with(tif: str | None):
+        volumes = [1_000.0, 1_000.0, 100.0, 1_000.0, 1_000.0, 1_000.0]
+        panel = _panel_for("X", [99.0] * 6, volumes=volumes)
+
+        class OpenThenClose(Strategy):
+            def on_bar(self, ctx):
+                if ctx.period_index == 0:
+                    return [OrderIntent(action="long", symbol="X", quantity=10.0)]
+                if ctx.period_index == 2:
+                    return [
+                        OrderIntent(action="close", symbol="X", quantity=10.0, time_in_force=tif)
+                    ]
+                return []
+
+        return Backtest(
+            panel,
+            OpenThenClose(),
+            initial_balance=100_000.0,
+            cost_model=CostModel.zero(),
+            data_source="test",
+            execution=ExecutionPolicy(max_bar_volume_participation_rate=0.05),
+        ).run()
+
+    def test_fok_close_cancels_instead_of_booking_a_partial_reduce(self) -> None:
+        result = self._close_with("fok")
+
+        # The run's own end-of-data liquidation is not the decision under test.
+        strategy_driven = [
+            event.event_type for event in result.position_events if event.reason != "force_close"
+        ]
+        assert strategy_driven == ["open"]
+        assert "fok_not_fully_fillable" in _skip_reasons(result)
+
+    def test_ioc_close_keeps_the_partial_and_reports_the_remainder(self) -> None:
+        result = self._close_with("ioc")
+
+        reduced = [event for event in result.position_events if event.event_type == "reduce"]
+        assert len(reduced) == 1
+        assert reduced[0].fill_quantity == pytest.approx(5.0)
+        assert "ioc_remainder_cancelled" in _skip_reasons(result)
+
+    def test_unset_close_keeps_the_partial_silently(self) -> None:
+        result = self._close_with(None)
+
+        reduced = [event for event in result.position_events if event.event_type == "reduce"]
+        assert len(reduced) == 1
+        assert _skip_reasons(result) == []
+
+
+def test_day_expiry_skips_symbols_without_a_bar_on_this_event() -> None:
+    """On a union timeline another instrument's bar can fall outside this
+    symbol's session entirely. That is not a boundary its order crossed, and
+    asking for a session label there raises."""
+    from librae.backtest.engine import _DecisionEnvelope, _expire_day_intents
+
+    resting = OrderIntent(
+        action="long", symbol="TW", quantity=1.0, limit_price=95.0, time_in_force="day"
+    )
+    ts = pd.Timestamp("2025-01-01T02:00Z")
+    envelope = _DecisionEnvelope([resting], None, pd.Timestamp("2025-01-01T01:00Z"))
+
+    def exploding_session_of(symbol: str, when: pd.Timestamp) -> object:
+        raise ValueError(f"{when} is outside the XTAI trading session")
+
+    kept, expired = _expire_day_intents(
+        [envelope],
+        ts,
+        {"BTCUSDT"},
+        primary_symbol="BTCUSDT",
+        session_of=exploding_session_of,
+    )
+
+    assert expired == []
+    assert kept[0].decision == [resting]
+
+
+def test_intraday_day_limit_without_a_calendar_fails_on_the_emitting_bar() -> None:
+    """Engine expressibility, not a venue rule — so it surfaces with the
+    decision that asked for it rather than one bar later."""
+    panel = _panel_for("X", [99.0] * 6)
+
+    with pytest.raises(ValueError, match="calendar_id"):
+        _run_panel(
+            panel,
+            OrderIntent(
+                action="long", symbol="X", quantity=1.0, limit_price=95.0, time_in_force="day"
+            ),
+        )
+
+
+class TestSimulationMirrorsTheFixedBacktest:
+    def _run_sim(self, strategy):
+        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+
+        visible = {"bars": 2}
+        # The decision is emitted on the newest visible bar and first executable
+        # on the next one, so the reaching bar must come after the submission.
+        lows = [99.0, 99.0, 99.0, 99.0, 94.0, 99.0]
+
+        def fetcher(*_args, **_kwargs):
+            n = visible["bars"]
+            return pd.DataFrame(
+                {
+                    "ts": pd.date_range("2025-01-01T00:00Z", periods=n, freq="h", tz="UTC"),
+                    "open": [100.0] * n,
+                    "high": [101.0] * n,
+                    "low": lows[:n],
+                    "close": [100.0] * n,
+                    "volume": [1_000.0] * n,
+                }
+            )
+
+        runner = TestLiveTrader()._make_runner(
+            strategy=strategy,
+            fetcher=fetcher,
+            config=_test_cfg(mode="sim", warmup_periods=1),
+        )
+        events: list = []
+        runner._on_runtime_event = events.append
+        for bars in range(2, 7):
+            visible["bars"] = bars
+            runner._poll_cycle()
+        return runner, events
+
+    def test_day_limit_is_eligible_on_the_event_that_executes_it(self) -> None:
+        class SubmitOnce(Strategy):
+            def __init__(self) -> None:
+                self.done = False
+
+            def on_bar(self, ctx):
+                if self.done:
+                    return []
+                self.done = True
+                return [
+                    OrderIntent(
+                        action="long",
+                        symbol=ctx.symbol,
+                        quantity=1.0,
+                        limit_price=95.0,
+                        time_in_force="day",
+                    )
+                ]
+
+        runner, _ = self._run_sim(SubmitOnce())
+
+        assert runner._positions
+
+    def test_a_new_intent_replaces_a_resting_one(self) -> None:
+        class ReplaceLater(Strategy):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def on_bar(self, ctx):
+                self.calls += 1
+                if self.calls == 1:
+                    return [
+                        OrderIntent(
+                            action="long",
+                            symbol=ctx.symbol,
+                            quantity=1.0,
+                            limit_price=1.0,
+                            time_in_force="gtc",
+                        )
+                    ]
+                if self.calls == 3:
+                    return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+                return []
+
+        runner, events = self._run_sim(ReplaceLater())
+
+        assert runner._positions, "the replacing market order should fill"
+        assert any(e.detail.get("reason") == "resting_order_replaced" for e in events)
