@@ -270,6 +270,34 @@ def _resolve_market_and_data_source(
 # ---------------------------------------------------------------------------
 
 
+def _parse_auxiliary_subscriptions(raw: object) -> tuple[AuxiliarySubscription, ...]:
+    """Read auxiliary declarations with the same care as every other key.
+
+    Indexing the entries directly turned a bare string or a missing timeframe
+    into a TypeError or a bare KeyError that named neither the key nor the
+    file — the list of plain strings one line above in optional_symbols makes
+    the string form the natural mistake.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError("strategy.auxiliary_subscriptions must be a list of entries")
+    parsed: list[AuxiliarySubscription] = []
+    for position, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"strategy.auxiliary_subscriptions[{position}] must be a mapping with "
+                "'symbol' and 'timeframe'"
+            )
+        missing = sorted({"symbol", "timeframe"} - set(entry))
+        if missing:
+            raise ValueError(f"strategy.auxiliary_subscriptions[{position}] is missing {missing}")
+        parsed.append(
+            AuxiliarySubscription(symbol=str(entry["symbol"]), timeframe=str(entry["timeframe"]))
+        )
+    return tuple(parsed)
+
+
 def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]:
     """Build engine config and orchestration options from CLI + YAML.
 
@@ -437,14 +465,7 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         broker=scfg.get("broker"),
         session_mode=scfg.get("session_mode", "extended"),
         optional_symbols=tuple(scfg.get("optional_symbols", ()) or ()),
-        auxiliary_subscriptions=tuple(
-            AuxiliarySubscription(
-                symbol=str(entry["symbol"]),
-                timeframe=str(entry["timeframe"]),
-                session_mode=entry.get("session_mode"),
-            )
-            for entry in (scfg.get("auxiliary_subscriptions") or ())
-        ),
+        auxiliary_subscriptions=_parse_auxiliary_subscriptions(scfg.get("auxiliary_subscriptions")),
         calendar_id=scfg.get("calendar_id"),
         start=start,
         end=end,

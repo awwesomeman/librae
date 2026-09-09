@@ -1110,15 +1110,30 @@ strategy:
 The symbol must already be in the run, so the input reuses its resolved
 instrument, calendar and data route rather than introducing one the run never
 resolved; a different instrument as context is not this feature. An auxiliary
-may not repeat the primary cadence, and naming a `session_mode` makes the same
-cadence under a different session a distinct input. Auxiliary inputs are part
-of `config_hash` — the strategy sees different data, so it is a different run.
+may not repeat the primary cadence, and it inherits the run's `session_mode` —
+declaring a different one would be a claim the wire cannot keep, since the
+fetcher is bound once per symbol to the run's mode. Auxiliary inputs are part
+of `config_hash`: the strategy sees different data, so it is a different run.
+
+Backtest is handed its auxiliary frames through `auxiliary_data`; live fetches
+them. When a `RunConfig` declares auxiliaries, `auxiliary_data` must supply
+exactly those identities, so the same config cannot mean different things in
+the two modes. Passing frames without declaring them remains supported — that
+is the Python-API mixed-frequency path, which never claimed live parity.
 
 Availability still governs visibility: a daily bar opening this morning is not
 in the view until it completes, exactly as in backtest replay. Auxiliaries
 produce no execution events, so they carry no durable watermark and a restart
 simply refetches them; they also cannot hold the readiness gate, which is about
 the inputs a run executes on.
+
+Nothing about an auxiliary's health may stop the primary from executing. A
+failed fetch, or rows that fail normalization, log and keep the previous frame;
+a declared identity stays visible to the strategy with an empty history rather
+than disappearing from `ctx.market_data`. A stalled auxiliary feed is alerted
+with the same edge-triggered diagnostic as the primary, but never holds the
+run. Refetching is skipped until the calendar says a new observation could
+exist, so a daily auxiliary is not pulled once per hourly poll.
 
 Both the stale alert and the not-ready alert are edge-triggered: one
 diagnostic when the condition starts and one when it clears, not one per poll

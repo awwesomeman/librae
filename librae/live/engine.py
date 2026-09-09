@@ -66,7 +66,7 @@ from librae.core.market_data import (
     validate_feature_frame,
     validate_ohlcv_values,
 )
-from librae.core.readiness import evaluate_observation
+from librae.core.readiness import evaluate_observation, next_expected_close
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -679,7 +679,7 @@ class LiveTrader:
             subscription = subscription_from_instrument(
                 self._instruments[auxiliary.symbol],
                 timeframe=auxiliary.timeframe,
-                session_mode=auxiliary.resolved_session_mode(config.session_mode),
+                session_mode=config.session_mode,
                 calendar_id=snapshot.subscriptions[auxiliary.symbol].calendar_id,
             )
             self._auxiliary_subscriptions[subscription] = auxiliary.symbol
@@ -1266,12 +1266,16 @@ class LiveTrader:
         """Refresh every auxiliary input through its symbol's own source.
 
         Auxiliaries produce no execution events, so they carry no durable
-        watermark and no fill dedup: a restart simply refetches them. A failed
-        or empty fetch leaves the previous frame in place — the readiness gate
-        already decides whether the run may proceed, and an auxiliary is by
-        definition not what it gates on.
+        watermark and no fill dedup: a restart simply refetches them. Nothing
+        here may abort the cycle — the primary still has to execute — so a
+        failed fetch, or a frame that fails normalization, logs and keeps the
+        previous frame. Freshness is still evaluated and alerted; it just never
+        holds the run, because an auxiliary is not an input the run executes on.
         """
+        now = self._utc_now()
         for subscription, owner in self._auxiliary_subscriptions.items():
+            if not self._auxiliary_fetch_due(subscription, now):
+                continue
             try:
                 fetched = self._fetchers[owner](
                     owner,
@@ -1279,18 +1283,91 @@ class LiveTrader:
                     self._feature_history_limit + 1,
                     drop_incomplete=True,
                 )
+                if fetched is None or fetched.empty:
+                    continue
+                normalized = self._normalize_runtime_rows(owner, fetched, subscription=subscription)
             except Exception:
                 logger.exception(
-                    "Failed to fetch auxiliary market data for %s %s",
+                    "Failed to refresh auxiliary %s %s; keeping the previous frame",
                     owner,
                     subscription.timeframe,
                 )
                 continue
-            if fetched is None or fetched.empty:
-                continue
-            self._auxiliary_cache[subscription] = self._normalize_runtime_rows(
-                owner, fetched, subscription=subscription
+            self._auxiliary_cache[subscription] = normalized
+            self._check_auxiliary_freshness(subscription, owner, normalized, as_of=now)
+
+    def _auxiliary_fetch_due(
+        self,
+        subscription: MarketDataSubscription,
+        now: datetime,
+    ) -> bool:
+        """Skip a refetch until a new observation could exist.
+
+        A daily auxiliary on an hourly run would otherwise be pulled once per
+        poll for a bar that cannot change. The calendar already knows when the
+        next one is due.
+        """
+        cached = self._auxiliary_cache.get(subscription)
+        if cached is None or cached.empty:
+            return True
+        last_ts = pd.Timestamp(cached["ts"].iloc[-1]).to_pydatetime()
+        try:
+            return now >= next_expected_close(
+                last_ts,
+                timeframe=subscription.timeframe,
+                calendar_id=subscription.calendar_id,
             )
+        except ValueError:
+            return True
+
+    def _check_auxiliary_freshness(
+        self,
+        subscription: MarketDataSubscription,
+        owner: str,
+        frame: pd.DataFrame,
+        *,
+        as_of: datetime,
+    ) -> None:
+        """Alert on a stalled auxiliary feed without ever holding the run.
+
+        A dead auxiliary that keeps serving yesterday's frame is the silent
+        failure this work exists to close; it just is not grounds to stop
+        executing on the primary.
+        """
+        if frame.empty:
+            return
+        last_ts = pd.Timestamp(frame["ts"].iloc[-1]).to_pydatetime()
+        status = evaluate_observation(
+            last_ts,
+            as_of=as_of,
+            timeframe=subscription.timeframe,
+            calendar_id=subscription.calendar_id,
+            grace=self._staleness_grace(subscription),
+        )
+        was_stale = self._stale_alerted.get(subscription, False)
+        if not status.fresh and not was_stale:
+            self._stale_alerted[subscription] = True
+            logger.warning(
+                "Stale auxiliary data: %s %s latest bar %s, next observation was due %s",
+                owner,
+                subscription.timeframe,
+                last_ts,
+                status.due_at,
+            )
+            self._notify(
+                "send_alert",
+                title=(
+                    f"[{self._executor.strategy_name}] Stale Auxiliary Data: "
+                    f"{owner} {subscription.timeframe}"
+                ),
+                message=(
+                    f"Latest {subscription.timeframe} bar is {last_ts}; the next was due "
+                    f"{status.due_at}. Strategy execution continues on the primary cadence."
+                ),
+            )
+        elif status.fresh and was_stale:
+            self._stale_alerted[subscription] = False
+            logger.info("Auxiliary data recovered: %s %s", owner, subscription.timeframe)
 
     def _staleness_grace(self, subscription: MarketDataSubscription) -> timedelta:
         """Bounded publication slack allowed after an expected close.
@@ -3777,7 +3854,10 @@ class LiveTrader:
             if raw_frame is None:
                 raw_frame = self._ohlcv_cache.get(symbol)
             if raw_frame is None:
-                raise ValueError(f"batch_feature_fn requires market-data history for {symbol}")
+                # An optional symbol may never have delivered. Whether the run
+                # may proceed is the readiness gate's decision, already made
+                # above; here it is simply a symbol with no visible history.
+                raw_frame = pd.DataFrame(columns=["ts", AVAILABLE_AT_COLUMN])
             normalized = self._normalize_runtime_rows(symbol, raw_frame)
             normalized_frames[symbol] = normalized
             cutoff = ts if symbol in active_set else self._last_bar_ts.get(symbol)
@@ -3802,11 +3882,15 @@ class LiveTrader:
         histories = {}
         for subscription, owner in self._auxiliary_subscriptions.items():
             frame = self._auxiliary_cache.get(subscription)
-            if frame is None or frame.empty:
-                continue
+            cutoff = cutoffs.get(owner)
+            if frame is None or frame.empty or cutoff is None:
+                # Registered with nothing visible rather than omitted: a
+                # strategy that declared this identity must not get a KeyError
+                # from ctx.market_data because one feed is down.
+                frame = pd.DataFrame(columns=["ts", AVAILABLE_AT_COLUMN])
+                cutoff = None
             timestamps = pd.to_datetime(frame["ts"], utc=True)
             available_at = pd.to_datetime(frame[AVAILABLE_AT_COLUMN], utc=True)
-            cutoff = cutoffs.get(owner)
             visible = (
                 frame.iloc[0:0]
                 if cutoff is None

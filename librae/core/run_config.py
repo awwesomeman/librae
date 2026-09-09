@@ -48,9 +48,6 @@ class AuxiliarySubscription:
 
     symbol: str
     timeframe: str
-    # None inherits the run's session_mode; naming it makes the same cadence
-    # under a different session a distinct input.
-    session_mode: MarketDataSessionMode | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("symbol", "timeframe"):
@@ -59,13 +56,6 @@ class AuxiliarySubscription:
                 raise ValueError(f"AuxiliarySubscription.{field_name} must be a non-empty string")
         object.__setattr__(self, "symbol", self.symbol.strip())
         object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
-        if self.session_mode is not None and self.session_mode not in ("regular", "extended"):
-            raise ValueError(
-                f"session_mode must be 'regular' or 'extended', got {self.session_mode!r}"
-            )
-
-    def resolved_session_mode(self, run_session_mode: MarketDataSessionMode) -> str:
-        return self.session_mode if self.session_mode is not None else run_session_mode
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,7 +483,12 @@ class RunConfig:
                 f"optional_symbols must be configured symbols; got {sorted(unknown_optional)}"
             )
         object.__setattr__(self, "auxiliary_subscriptions", tuple(self.auxiliary_subscriptions))
-        seen_auxiliary: set[tuple[str, str, str]] = set()
+        # Compare against the canonical run timeframe: __post_init__ canonicalizes
+        # self.timeframe further down, and build_run passes the YAML form
+        # verbatim, so a raw "1h" here would silently accept an auxiliary that
+        # duplicates the executing cadence.
+        canonical_timeframe = to_canonical(self.timeframe)
+        seen_auxiliary: set[tuple[str, str]] = set()
         for auxiliary in self.auxiliary_subscriptions:
             if not isinstance(auxiliary, AuxiliarySubscription):
                 raise TypeError("auxiliary_subscriptions must contain AuxiliarySubscription values")
@@ -502,12 +497,11 @@ class RunConfig:
                     f"auxiliary_subscriptions must reference configured symbols; "
                     f"got {auxiliary.symbol!r}"
                 )
-            session_mode = auxiliary.resolved_session_mode(self.session_mode)
-            identity = (auxiliary.symbol, auxiliary.timeframe, session_mode)
+            identity = (auxiliary.symbol, auxiliary.timeframe)
             if identity in seen_auxiliary:
                 raise ValueError(f"duplicate auxiliary subscription for {auxiliary.symbol!r}")
             seen_auxiliary.add(identity)
-            if auxiliary.timeframe == self.timeframe and session_mode == self.session_mode:
+            if auxiliary.timeframe == canonical_timeframe:
                 raise ValueError(
                     f"auxiliary subscription for {auxiliary.symbol!r} repeats the primary "
                     "cadence; an executing cadence is already subscribed"
@@ -615,11 +609,7 @@ class RunConfig:
                         {
                             "auxiliary_subscriptions": tuple(
                                 sorted(
-                                    (
-                                        auxiliary.symbol,
-                                        auxiliary.timeframe,
-                                        auxiliary.resolved_session_mode(self.session_mode),
-                                    )
+                                    (auxiliary.symbol, auxiliary.timeframe)
                                     for auxiliary in self.auxiliary_subscriptions
                                 )
                             )

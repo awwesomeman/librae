@@ -70,16 +70,6 @@ class TestAuxiliaryDeclaration:
 
         assert config.auxiliary_subscriptions[0].timeframe == "D1"
 
-    def test_a_different_session_mode_of_the_same_cadence_is_a_distinct_input(self) -> None:
-        config = _config(
-            session_mode="extended",
-            auxiliary_subscriptions=[
-                AuxiliarySubscription(symbol="BTCUSDT", timeframe="H1", session_mode="regular")
-            ],
-        )
-
-        assert config.auxiliary_subscriptions[0].session_mode == "regular"
-
     def test_auxiliary_inputs_change_the_config_hash(self) -> None:
         """The strategy sees different data, so it is a different run."""
         with_aux = _config(
@@ -216,3 +206,120 @@ def test_the_strategy_config_file_reaches_run_config(tmp_path, monkeypatch) -> N
     assert config.auxiliary_subscriptions == (
         AuxiliarySubscription(symbol="BTCUSDT", timeframe="D1"),
     )
+
+
+class TestBacktestLiveParity:
+    """Backtest is handed its auxiliary frames; live fetches them. The same
+    RunConfig must not mean different things in the two modes."""
+
+    @staticmethod
+    def _panel():
+        import pandas as pd
+
+        index = pd.MultiIndex.from_product(
+            [["BTCUSDT"], pd.date_range("2025-01-01", periods=6, freq="h", tz="UTC")],
+            names=["symbol", "datetime"],
+        )
+        return pd.DataFrame(
+            {
+                "open": [100.0] * 6,
+                "high": [101.0] * 6,
+                "low": [99.0] * 6,
+                "close": [100.0] * 6,
+                "volume": [1_000.0] * 6,
+            },
+            index=index,
+        )
+
+    @staticmethod
+    def _config(auxiliary):
+        return RunConfig(
+            strategy_name="t",
+            mode="backtest",
+            symbols=["BTCUSDT"],
+            timeframe="H1",
+            market="crypto",
+            data_source="binance_spot",
+            account=AccountConfig(currency="USDT", initial_cash=100_000.0),
+            auxiliary_subscriptions=auxiliary,
+        )
+
+    def _build(self, auxiliary, auxiliary_data):
+        from librae.backtest.engine import Backtest
+        from librae.core.cost_model import CostModel
+        from librae.core.strategy import Strategy
+
+        class Hold(Strategy):
+            def on_bar(self, ctx):
+                return []
+
+        return Backtest(
+            self._panel(),
+            Hold(),
+            config=self._config(auxiliary),
+            cost_model=CostModel.zero(),
+            auxiliary_data=auxiliary_data,
+        )
+
+    def test_a_declared_auxiliary_must_be_supplied(self) -> None:
+        with pytest.raises(ValueError, match="auxiliary_data must supply"):
+            self._build(
+                (AuxiliarySubscription(symbol="BTCUSDT", timeframe="D1"),),
+                auxiliary_data=None,
+            )
+
+    def test_supplying_the_declared_identity_is_accepted(self) -> None:
+        import pandas as pd
+        from librae.core.market_data import MarketDataSubscription
+
+        subscription = MarketDataSubscription(
+            symbol="BTCUSDT",
+            timeframe="D1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="binance_spot",
+            instrument_type="spot",
+        )
+        frame = pd.DataFrame(
+            {
+                "ts": pd.date_range("2024-12-25", periods=3, freq="D", tz="UTC"),
+                "open": [100.0] * 3,
+                "high": [101.0] * 3,
+                "low": [99.0] * 3,
+                "close": [100.0] * 3,
+                "volume": [1_000.0] * 3,
+            }
+        ).set_index("ts")
+
+        self._build(
+            (AuxiliarySubscription(symbol="BTCUSDT", timeframe="D1"),),
+            auxiliary_data={subscription: frame},
+        )
+
+    def test_undeclared_frames_stay_supported(self) -> None:
+        """The Python-API mixed-frequency path predates the declaration and
+        never claimed live parity, so passing frames without declaring them
+        must keep working."""
+        import pandas as pd
+        from librae.core.market_data import MarketDataSubscription
+
+        subscription = MarketDataSubscription(
+            symbol="BTCUSDT",
+            timeframe="D1",
+            calendar_id="24/7",
+            session_mode="extended",
+            data_source="binance_spot",
+            instrument_type="spot",
+        )
+        frame = pd.DataFrame(
+            {
+                "ts": pd.date_range("2024-12-25", periods=3, freq="D", tz="UTC"),
+                "open": [100.0] * 3,
+                "high": [101.0] * 3,
+                "low": [99.0] * 3,
+                "close": [100.0] * 3,
+                "volume": [1_000.0] * 3,
+            }
+        ).set_index("ts")
+
+        self._build((), auxiliary_data={subscription: frame})

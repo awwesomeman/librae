@@ -1100,6 +1100,27 @@ class Backtest:
             raise TypeError("batch_feature_fn must be callable or None")
         data = _canonicalize_backtest_timestamps(data)
         normalized_auxiliary_data = _normalize_auxiliary_data(auxiliary_data)
+        if config is not None and config.auxiliary_subscriptions:
+            # Backtest is handed its auxiliary frames; live fetches them. A
+            # RunConfig that DECLARES them must therefore mean the same thing
+            # in both, or the same config silently yields a different
+            # ctx.market_data per mode. Passing frames without declaring them
+            # stays supported: that is the Python-API mixed-frequency path,
+            # which predates the declaration and never claimed live parity.
+            declared = {
+                (auxiliary.symbol, auxiliary.timeframe)
+                for auxiliary in config.auxiliary_subscriptions
+            }
+            supplied = {
+                (subscription.symbol, subscription.timeframe)
+                for subscription in normalized_auxiliary_data
+            }
+            if declared != supplied:
+                raise ValueError(
+                    "auxiliary_data must supply exactly the identities in "
+                    f"config.auxiliary_subscriptions; declared={sorted(declared)}, "
+                    f"supplied={sorted(supplied)}"
+                )
         try:
             supplied_subscriptions = (
                 () if primary_subscriptions is None else tuple(primary_subscriptions)
