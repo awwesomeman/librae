@@ -1090,6 +1090,36 @@ symbol cannot be optional: it is the default symbol for bare intents and the
 run's cadence anchor. Set it in the strategy config as a top-level
 `optional_symbols:` list, or pass it to `RunConfig` directly.
 
+## Same-symbol multi-frequency inputs
+
+A run has exactly one **executing** cadence per symbol: two primaries for one
+position would mean two execution cadences for one book, which the backtest
+already refuses. Extra frequencies are therefore **auxiliary** — read-only
+context reached through `ctx.market_data.history(subscription)`, never a source
+of fills.
+
+```yaml
+strategy:
+  symbol: BTCUSDT
+  timeframe: 1h
+  auxiliary_subscriptions:
+    - symbol: BTCUSDT
+      timeframe: 1d
+```
+
+The symbol must already be in the run, so the input reuses its resolved
+instrument, calendar and data route rather than introducing one the run never
+resolved; a different instrument as context is not this feature. An auxiliary
+may not repeat the primary cadence, and naming a `session_mode` makes the same
+cadence under a different session a distinct input. Auxiliary inputs are part
+of `config_hash` — the strategy sees different data, so it is a different run.
+
+Availability still governs visibility: a daily bar opening this morning is not
+in the view until it completes, exactly as in backtest replay. Auxiliaries
+produce no execution events, so they carry no durable watermark and a restart
+simply refetches them; they also cannot hold the readiness gate, which is about
+the inputs a run executes on.
+
 Both the stale alert and the not-ready alert are edge-triggered: one
 diagnostic when the condition starts and one when it clears, not one per poll
 cycle.

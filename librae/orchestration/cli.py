@@ -37,6 +37,7 @@ from librae.config.env import RedactSecrets
 from librae.core.run_config import (
     DEFAULT_POLL_SECONDS,
     AccountConfig,
+    AuxiliarySubscription,
     ExecutionPolicy,
     RiskPolicy,
     RunConfig,
@@ -436,6 +437,14 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         broker=scfg.get("broker"),
         session_mode=scfg.get("session_mode", "extended"),
         optional_symbols=tuple(scfg.get("optional_symbols", ()) or ()),
+        auxiliary_subscriptions=tuple(
+            AuxiliarySubscription(
+                symbol=str(entry["symbol"]),
+                timeframe=str(entry["timeframe"]),
+                session_mode=entry.get("session_mode"),
+            )
+            for entry in (scfg.get("auxiliary_subscriptions") or ())
+        ),
         calendar_id=scfg.get("calendar_id"),
         start=start,
         end=end,
@@ -731,6 +740,7 @@ def log_run_summary(config: RunConfig, options: RunOptions) -> None:
         f"  symbol_cost_overrides: {config.symbol_cost_overrides}",
         f"  instrument_overrides: {config.instrument_overrides}",
         f"  optional_symbols: {config.optional_symbols}",
+        f"  auxiliary_subscriptions: {config.auxiliary_subscriptions}",
         f"  calendar_id: {config.calendar_id}",
         f"  session_mode: {config.session_mode}",
         f"  execution:   {config.execution}",
