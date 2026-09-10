@@ -194,9 +194,17 @@ def _connection(cursor: FakeCursor):
     return connect
 
 
-class TestTheCliIsTheStrandedRowGate:
+class TestOnlyTheCliGatesStrandedRows:
     """Only a database adopted via 0003 before its backfill has stranded rows,
     and a later revision enforces NOT NULL; the engine gate stays structural."""
+
+    def test_migrations_still_apply_while_rows_are_stranded(self) -> None:
+        # apply_migrations verifies inside its own transaction, and 0003 always
+        # leaves stranded rows: a data check there would roll every adoption back.
+        cursor = FakeCursor(revision=None, legacy_compatible=True)
+        cursor.stranded = 42
+
+        assert apply_migrations(cursor) == tuple(range(1, CURRENT_SCHEMA_REVISION + 1))
 
     def test_the_engine_gate_ignores_stranded_rows_and_never_reads_ohlcv(self) -> None:
         cursor = _current_cursor(stranded=42)
