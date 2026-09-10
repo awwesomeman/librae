@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -221,6 +222,29 @@ class TestRedactSecrets:
         assert redact.filter(record) is True
         assert "AAlongtokenvalue" not in record.getMessage()
         assert "<redacted>" in record.getMessage()
+
+    def test_scrubs_the_traceback_a_third_party_exception_carried(self):
+        """The formatter renders exc_info separately, so the message is only half.
+
+        httpx puts the bot token in the request URL it echoes back in the
+        exception, which is why ``logger.exception`` around a broker or
+        notifier call is the realistic leak path.
+        """
+        redact = RedactSecrets(values=["8000:AAlongtokenvalue"])
+        try:
+            raise RuntimeError(
+                "POST https://api.telegram.org/bot8000:AAlongtokenvalue/sendMessage failed"
+            )
+        except RuntimeError:
+            record = logging.LogRecord(
+                "httpx", logging.ERROR, __file__, 1, "send failed", (), sys.exc_info()
+            )
+
+        assert redact.filter(record) is True
+
+        rendered = logging.Formatter().format(record)
+        assert "AAlongtokenvalue" not in rendered
+        assert "<redacted>" in rendered
 
     def test_short_placeholders_are_left_alone(self):
         redact = RedactSecrets(values=["test"])

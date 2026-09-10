@@ -92,7 +92,22 @@ librae/orchestration -> librae/notifications -> librae public contracts
 librae/app           -> librae/db schema
 librae/backtest      -> librae/core
 librae/live          -> librae/core
+librae/core          -> librae/brokers   (venue capability tables only)
 ```
+
+That last edge runs against the others, so it is stated rather than left to be
+discovered. When a run configures a broker, preflight in `librae/core` imports
+the venue capability tables from `librae/brokers/capabilities.py`. It exists
+because a backtest has no adapter: in live the same table is applied a second
+time by the adapter's own order construction, but a backtest that sets `broker`
+would otherwise get no venue rules at all, which is the guarantee
+[engine-usage.md](docs/guides/engine-usage.md) makes for backtest as well as
+live. The import is deferred until a symbol actually resolves to a venue, so a
+run with no configured broker loads no adapter module — the boundary a
+backtest-only caller relies on. `capabilities.py` holds routing only; each
+table is declared next to the adapter that owns the venue knowledge. Removing
+the edge would mean the caller supplying the tables, which silently drops the
+check for anyone constructing `Backtest` or `LiveTrader` directly.
 
 Layering details in `docs/decisions/2026-03-26-platform-architecture.md`
 describe the historical decision; this document remains the current source of

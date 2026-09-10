@@ -3512,13 +3512,6 @@ def validate_strategy_decision(
         # order is deliberately NOT rejected here: it resolves on its first
         # eligible event, so every lifetime collapses to the same behavior.
         # Venue rules are layered on top per symbol, via broker_for.
-        check_venue_lifetime = None
-        if broker_for is not None:
-            # Local import: keeps core from loading every broker adapter
-            # module at import time.
-            from librae.brokers.capabilities import validate_broker_time_in_force
-
-            check_venue_lifetime = validate_broker_time_in_force
 
         for intent in decision:
             # WHY: an entry with no quantity sizes from available cash, so
@@ -3543,10 +3536,18 @@ def validate_strategy_decision(
             # elsewhere both misses violations and invents them. An unset
             # time_in_force is left alone: the engine's per-order-type
             # default is accepted everywhere.
-            if check_venue_lifetime is not None and intent.time_in_force is not None:
+            if broker_for is not None and intent.time_in_force is not None:
                 venue = broker_for(intent.symbol or primary_symbol)
                 if venue is not None:
-                    check_venue_lifetime(
+                    # Local, and not until a symbol has actually resolved to a
+                    # venue. Every run that can emit order intents supplies
+                    # broker_for, so importing on the callable alone charged a
+                    # broker-neutral backtest for loading the whole reference
+                    # adapter package. architecture.md records why core reaches
+                    # librae/brokers at all.
+                    from librae.brokers.capabilities import validate_broker_time_in_force
+
+                    validate_broker_time_in_force(
                         venue,
                         "limit" if intent.limit_price is not None else "market",
                         intent.time_in_force,

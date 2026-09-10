@@ -6,7 +6,11 @@ instead of depending on engine-private implementation details.
 
 from typing import Protocol
 
-from librae.live.execution_identity import ExecutionIdentity, ExecutionIdentityProvider
+from librae.live.execution_identity import (
+    ExecutionIdentity,
+    ExecutionIdentityProvider,
+    account_fingerprint,
+)
 from librae.live.executor import (
     BalanceReader,
     BrokerBalance,
@@ -51,4 +55,5 @@ __all__ = [
     "OrderRequest",
     "OrderSignal",
     "PositionRequest",
+    "account_fingerprint",
 ]
