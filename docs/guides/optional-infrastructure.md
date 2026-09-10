@@ -104,7 +104,9 @@ adds, is what sets the maintenance window: it is full-table work under an
    migration, and the index rebuild blocks writes anyway.
 2. Take and verify a backup.
 3. `librae db migrate`.
-4. `scripts/backfill_ohlcv_identity.py`. Until it finishes, the rows it has
+4. Run the backfill. `scripts/backfill_ohlcv_identity.py` is a module, not a
+   command: call `backfill_ohlcv_identity(conn)` with a connection allowed to
+   write `ohlcv`, which `librae.db.admin_conn()` supplies. Until it finishes, the rows it has
    not reached carry a null `calendar_id`, and reads filter on that column —
    so those rows are invisible rather than merely incomplete. `librae db
    preflight` counts them and fails while any remain. The backfill derives

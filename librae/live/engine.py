@@ -479,7 +479,14 @@ def _validate_market_data_calendar_preconditions(
     route_owners: Mapping[str, str | None],
     calendar_ids: Mapping[str, str | None],
 ) -> None:
-    """Fail before polling when a route cannot normalize its requested bars."""
+    """Fail before polling when a route cannot normalize its requested bars.
+
+    WHY the rule names a route here rather than living in its adapter: an
+    adapter cannot refuse a run it has not been constructed for, and this
+    has to fail at startup rather than on the first daily bar. The route
+    name is the adapter's own declared capability, not an engine assumption
+    about the venue, and every other route is left alone.
+    """
     from librae.core.utils import to_ccxt
 
     if to_ccxt(timeframe) != "1d":

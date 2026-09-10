@@ -66,3 +66,58 @@ assert blocked.isdisjoint(sys.modules)
         capture_output=True,
         text=True,
     )
+
+
+def test_a_broker_neutral_decision_does_not_load_the_adapter_package() -> None:
+    """Preflight reaches librae.brokers only once a symbol resolves to a venue.
+
+    Every run that can emit order intents supplies ``broker_for``, so gating
+    the import on the callable alone made a backtest with no configured broker
+    import all four reference adapters. Asserted in a subprocess because any
+    other test in this session may already have imported them.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    script = """
+import sys
+
+from librae.core.executor import validate_strategy_decision
+from librae.core.strategy import OrderIntent
+
+bars = {"BTCUSDT": {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0}}
+decision = [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0, time_in_force="gtc")]
+
+validate_strategy_decision(
+    decision,
+    {"BTCUSDT"},
+    primary_symbol="BTCUSDT",
+    bars=bars,
+    positions={},
+    broker_for=lambda symbol: None,
+)
+
+loaded = sorted(m for m in sys.modules if m.startswith("librae.brokers"))
+assert not loaded, loaded
+
+# The check still applies once a symbol does resolve to a venue.
+try:
+    validate_strategy_decision(
+        decision,
+        {"BTCUSDT"},
+        primary_symbol="BTCUSDT",
+        bars=bars,
+        positions={},
+        broker_for=lambda symbol: "binance",
+    )
+except ValueError as exc:
+    assert "does not support time_in_force='gtc'" in str(exc), exc
+else:
+    raise AssertionError("a configured venue must still reject an unsupported lifetime")
+"""
+
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )

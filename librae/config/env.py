@@ -352,6 +352,11 @@ def doctor(project_root: Path) -> list[Finding]:
 _MIN_SCRUB_LEN = 8
 
 
+# Renders ``exc_info`` exactly as a default formatter would, so a scrubbed
+# traceback is byte-identical to the one that would otherwise be printed.
+_EXC_FORMATTER = logging.Formatter()
+
+
 class RedactSecrets(logging.Filter):
     """Scrub configured secret values from every log record on a handler.
 
@@ -360,6 +365,11 @@ class RedactSecrets(logging.Filter):
     Telegram bot token as part of the request URL). Values shorter than eight
     characters are left alone so a placeholder like ``test`` cannot blank out
     ordinary words.
+
+    The message is only half of a record. A traceback is rendered separately
+    by the formatter, from ``exc_info``, so scrubbing the message alone still
+    prints whatever a third-party exception carried — which is exactly where
+    the revealed value tends to be. Both halves are scrubbed here.
     """
 
     def __init__(self, values: Iterable[str] | None = None) -> None:
@@ -370,14 +380,27 @@ class RedactSecrets(logging.Filter):
             sorted({v for v in values if len(v) >= _MIN_SCRUB_LEN}, key=len, reverse=True)
         )
 
+    def _scrub(self, text: str) -> str:
+        for value in self._values:
+            text = text.replace(value, _MASK)
+        return text
+
     def filter(self, record: logging.LogRecord) -> bool:
         if not self._values:
             return True
         message = record.getMessage()
-        scrubbed = message
-        for value in self._values:
-            scrubbed = scrubbed.replace(value, _MASK)
+        scrubbed = self._scrub(message)
         if scrubbed != message:
             record.msg = scrubbed
             record.args = ()
+        # Render the traceback here rather than leaving it to the formatter:
+        # a formatter reuses ``exc_text`` verbatim when it is already set, so
+        # this is the only point at which the scrubbed version is the one that
+        # reaches the handler.
+        if record.exc_info and not record.exc_text:
+            record.exc_text = _EXC_FORMATTER.formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = self._scrub(record.exc_text)
+        if record.stack_info:
+            record.stack_info = self._scrub(record.stack_info)
         return True
