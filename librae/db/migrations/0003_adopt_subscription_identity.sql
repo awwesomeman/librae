@@ -158,6 +158,16 @@ CREATE INDEX IF NOT EXISTS idx_ohlcv_coverage_ranges_lookup
 -- ============================================================
 -- Dropped rather than replaced: CREATE OR REPLACE VIEW can only append
 -- columns, and these belong in the middle of the select list.
+--
+-- Dropping a view drops every ACL on it, including grants this migration has
+-- no way to know about — a BI account, a read replica's reader. Restoring
+-- only the two managed roles would silently revoke the rest, so the existing
+-- ACL is captured first and replayed after.
+CREATE TEMP TABLE data_inventory_acl ON COMMIT DROP AS
+SELECT unnest(relacl)::text AS entry
+  FROM pg_class
+ WHERE oid = to_regclass('public.data_inventory') AND relacl IS NOT NULL;
+
 DROP VIEW IF EXISTS data_inventory;
 CREATE VIEW data_inventory AS
 SELECT
@@ -194,10 +204,29 @@ GROUP BY ef.symbol, ef.data_source, ef.timeframe, ef.instrument_type, ef.factor_
 
 ORDER BY table_name, symbol, factor_name;
 
--- Dropping the view dropped its grants. Guarded on the roles existing, the
--- way 0001 guards its REVOKEs: a database restored without the managed roles
--- is still a database this migration has to finish on.
-DO $$ BEGIN
+-- Replay what the view had, then ensure the two roles librae manages. The
+-- replay covers grants this migration never knew about; the explicit grants
+-- cover a database whose view predates them or was created without one.
+-- Both are guarded on the grantee still existing, the way 0001 guards its
+-- REVOKEs — an aclitem can name a role that was dropped since.
+DO $$
+DECLARE
+    acl_entry TEXT;
+    grantee TEXT;
+BEGIN
+    FOR acl_entry IN SELECT entry FROM data_inventory_acl LOOP
+        grantee := split_part(acl_entry, '=', 1);
+        CONTINUE WHEN grantee = '';  -- PUBLIC, replayed below
+        IF EXISTS (SELECT FROM pg_roles WHERE rolname = grantee)
+           AND split_part(split_part(acl_entry, '=', 2), '/', 1) LIKE '%r%' THEN
+            EXECUTE format('GRANT SELECT ON data_inventory TO %I', grantee);
+        END IF;
+    END LOOP;
+
+    IF EXISTS (SELECT entry FROM data_inventory_acl WHERE entry LIKE '=%r%') THEN
+        EXECUTE 'GRANT SELECT ON data_inventory TO PUBLIC';
+    END IF;
+
     IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'quant_app') THEN
         EXECUTE 'GRANT SELECT ON data_inventory TO quant_app';
     END IF;

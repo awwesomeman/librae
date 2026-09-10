@@ -168,10 +168,21 @@ def _status_error(status: SchemaStatus) -> RuntimeError:
 
 
 def require_current_schema(cur: _Cursor) -> None:
-    """Fail closed before persistence or order-capable startup."""
+    """Fail closed before persistence or order-capable startup.
+
+    Stranded rows are part of "current" here, not merely reported. Reads
+    filter on calendar_id, so a row the backfill has not reached is invisible
+    rather than incomplete — an engine started over one silently trades and
+    reports on a fraction of its own history. Gating the writer rather than
+    only the CLI means the operator who skips a step still fails closed,
+    which is the whole point of a precondition.
+    """
     status = inspect_schema(cur)
     if not status.current:
         raise _status_error(status)
+    stranded = _unbackfilled_ohlcv_rows(cur)
+    if stranded:
+        raise RuntimeError(_STRANDED_MESSAGE.format(count=stranded))
 
 
 def apply_migrations(cur: _Cursor) -> tuple[int, ...]:
@@ -246,6 +257,10 @@ def _run_cli(command: str) -> int:
             stranded = _unbackfilled_ohlcv_rows(cur)
             if stranded:
                 print(_STRANDED_MESSAGE.format(count=stranded))
+                # Non-zero: the schema moved, but the data it describes is not
+                # yet readable, and the operator's next step is to start the
+                # engine. A green exit here would say the adoption finished.
+                return 1
             return 0
         admin_status = inspect_schema(cur)
         _describe("admin", admin_status)

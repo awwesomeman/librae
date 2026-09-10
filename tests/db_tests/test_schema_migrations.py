@@ -33,7 +33,10 @@ class FakeCursor:
 
     def execute(self, query: str, params: object = None) -> None:
         self.executed.append(query)
-        if query == "SELECT to_regclass(%s)":
+        if query == "SELECT to_regclass('public.ohlcv')":
+            # Spelled literally in the source, not parameterized.
+            self._result = [("public.ohlcv",)]
+        elif query == "SELECT to_regclass(%s)":
             relation = params[0]
             exists = (
                 self.revision is not None if "schema_revision" in relation else self.core_exists
@@ -61,6 +64,8 @@ class FakeCursor:
                 # cannot recognize at all.
                 rows = [r for r in rows if r != ("backtest_runs", "run_id")]
             self._result = rows
+        elif "count(*) FROM ohlcv WHERE calendar_id IS NULL" in query:
+            self._result = [(getattr(self, "stranded", 0),)]
         elif query.startswith("SELECT revision FROM librae_schema_revision"):
             self._result = [] if self.revision is None else [(self.revision,)]
         elif "CREATE TABLE IF NOT EXISTS librae_schema_revision" in query:
@@ -169,3 +174,34 @@ def test_bootstrap_states_one_revision_everywhere_it_is_written() -> None:
     assert f"WHERE singleton = TRUE) <> {revision} THEN" in schema
     assert f"does not match bootstrap revision {revision}" in schema
     assert f"complete Librae schema revision {revision}" in schema
+
+
+class TestTheWriterRefusesStrandedRows:
+    """`require_current_schema` gates the writer and the live state store.
+
+    Reads filter on calendar_id, so a row the backfill has not reached is
+    invisible rather than incomplete — an engine started over one trades and
+    reports on a fraction of its own history, silently. Reporting it from the
+    CLI only helps the operator who runs the CLI; this is the gate that holds
+    regardless of which command was run.
+    """
+
+    @staticmethod
+    def _cursor(stranded: int) -> FakeCursor:
+        cursor = FakeCursor(revision=CURRENT_SCHEMA_REVISION)
+        cursor.stranded = stranded
+        return cursor
+
+    def test_it_refuses_while_any_row_is_stranded(self) -> None:
+        with pytest.raises(RuntimeError, match="null calendar_id"):
+            require_current_schema(self._cursor(11_677_056))
+
+    def test_the_message_carries_the_count_and_where_to_look(self) -> None:
+        with pytest.raises(RuntimeError) as excinfo:
+            require_current_schema(self._cursor(42))
+
+        assert "42" in str(excinfo.value)
+        assert "https://" in str(excinfo.value)
+
+    def test_a_fully_backfilled_database_passes(self) -> None:
+        require_current_schema(self._cursor(0))

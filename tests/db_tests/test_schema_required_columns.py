@@ -87,3 +87,26 @@ def test_the_stranded_warning_resolves_without_the_repository() -> None:
     assert references, "the warning must point somewhere"
     for reference in references:
         assert reference.startswith("https://"), reference
+
+
+MIGRATION_0003 = INIT_SQL.parent / "migrations/0003_adopt_subscription_identity.sql"
+
+
+def test_the_view_drop_preserves_grants_it_does_not_know_about() -> None:
+    """Dropping a view drops every ACL on it, not just librae's own.
+
+    A deployment may have granted `data_inventory` to a BI account or a read
+    replica. Restoring only the two managed roles would revoke those with no
+    message, so the migration captures the ACL first and replays it.
+    """
+    sql = MIGRATION_0003.read_text(encoding="utf-8")
+    capture = sql.index("CREATE TEMP TABLE data_inventory_acl")
+    drop = sql.index("DROP VIEW IF EXISTS data_inventory")
+    replay = sql.index("FOR acl_entry IN SELECT entry FROM data_inventory_acl")
+
+    # Capture must precede the drop, and the replay must follow it.
+    assert capture < drop < replay
+    # A grantee dropped since the grant leaves an aclitem naming no role.
+    assert "EXISTS (SELECT FROM pg_roles WHERE rolname = grantee)" in sql
+    # PUBLIC has an empty grantee and cannot be granted by that name.
+    assert "TO PUBLIC" in sql
