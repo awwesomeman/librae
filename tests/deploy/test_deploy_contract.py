@@ -10,7 +10,7 @@ from typing import get_args, get_type_hints
 
 import pytest
 import yaml
-from librae.config.env import DECLARED, ENV_VARS, Where
+from librae.config.env import DECLARED, ENV_VARS, SECRET_NAMES, Where
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy"
@@ -285,6 +285,15 @@ def _run_trade_script(
     fake_docker = tmp_path / "docker"
     fake_docker.write_text(
         """#!/usr/bin/env bash
+if [[ "$1" == "run" ]]; then
+    # A secret handed over as `-e NAME` arrives in the environment and appears
+    # nowhere in "$*", so a test reading only the arguments cannot tell "not
+    # passed" from "passed safely". Record the environment too, on its own
+    # line ahead of the call: the preflight run ends in a multi-line `python
+    # -c` script, so anything appended after "$*" lands on a later line.
+    note="TIMESCALE_DSN=${TIMESCALE_DSN:-} TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}"
+    printf 'envnote %s\\n' "${note}" >> "${DOCKER_LOG}"
+fi
 printf '%s\\n' "$*" >> "${DOCKER_LOG}"
 if [[ "$1" == "image" && "$2" == "inspect" ]]; then
     if [[ "$*" == *"{{.Id}}"* ]]; then
@@ -572,9 +581,19 @@ def test_trade_script_uses_account_specific_identity_config_and_credentials(
     assert result.returncode == 0, result.stderr
     final_run = next(call for call in docker_calls if call.startswith("run -d "))
     preflight = next(call for call in docker_calls if call.startswith("run --rm "))
+    dsn = "postgresql://quant_app:secret@quant_timescaledb:5432/quant"
     for call in (preflight, final_run):
         assert f"--env-file {credentials_file}" in call
-        assert "TIMESCALE_DSN=postgresql://quant_app:secret@quant_timescaledb:5432/quant" in call
+        assert " -e TIMESCALE_DSN " in f"{call} "
+    # The DSN still reaches Docker, but through the environment rather than
+    # the command line: /proc/<pid>/cmdline is world-readable and the DSN
+    # carries POSTGRES_APP_PASSWORD. Both halves are asserted, so "passed
+    # safely" cannot be confused with "not passed at all".
+    notes = [call for call in docker_calls if call.startswith("envnote ")]
+    arguments = "\n".join(call for call in docker_calls if not call.startswith("envnote "))
+    assert dsn not in arguments
+    assert len(notes) == 2
+    assert all(f"TIMESCALE_DSN={dsn}" in note for note in notes)
     assert "--name quant_momentum-main" in final_run
     assert "--label io.librae.deployment_id=momentum-main" in final_run
     assert "--label io.librae.account_id=account-main" in final_run
@@ -780,7 +799,13 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     replacement = script.index('docker rm "${container}"')
     assert preflight < replacement
     assert 'local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?' in script
-    assert '-e TIMESCALE_DSN="${trade_timescale_dsn}"' in script
+    # The DSN still reaches both containers, but by name: it used to be
+    # spelled `-e TIMESCALE_DSN="${trade_timescale_dsn}"`, which put a
+    # password on a world-readable command line. See the dedicated test below.
+    assert 'TIMESCALE_DSN="${trade_timescale_dsn}" \\\n    docker run --rm' in script
+    assert 'TIMESCALE_DSN="${trade_timescale_dsn}" \\\n    TELEGRAM_BOT_TOKEN=' in script
+    assert script.count("-e TIMESCALE_DSN\n") == 1
+    assert "        -e TIMESCALE_DSN \\\n" in script
     assert '--add-host "host.docker.internal:host-gateway"' in script
     assert "IBKR_HOST cannot use container loopback" in script
     # .env.secrets (shared infra secrets, e.g. TRADE_TIMESCALE_DSN) is sourced
@@ -1151,6 +1176,39 @@ def test_env_templates_declare_exactly_the_registry() -> None:
     }
     assert _assigned_names(ROOT / ".env.secrets.example") == {
         v.name for v in ENV_VARS if v.where is Where.SECRETS
+    }
+
+
+def test_trade_never_puts_a_declared_secret_on_the_docker_command_line() -> None:
+    """`-e NAME=value` publishes the value to every local user.
+
+    /proc/<pid>/cmdline is world-readable, so a password spelled into the
+    argument list is readable by anyone with a shell on the host. Passing
+    `-e NAME` makes Docker read it from trade.sh's own environment instead,
+    which only the same user and root can read. It is not about
+    `docker inspect`: the value reaches Config.Env either way, as it does
+    with --env-file.
+    """
+    script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
+
+    inline = set(re.findall(r"-e ([A-Z][A-Z0-9_]*)=", script))
+
+    assert not inline & SECRET_NAMES, sorted(inline & SECRET_NAMES)
+
+
+def test_account_credential_template_holds_no_shared_secret() -> None:
+    """A per-account file must not carry a value that is one per deployment.
+
+    Accounts are copied one per file; a shared password copied in with them
+    would exist in as many files as there are accounts, and rotating it would
+    mean finding every one.
+    """
+    names = _assigned_names(ROOT / ".env.credentials.example")
+
+    assert names == {
+        v.name
+        for v in ENV_VARS
+        if v.where is Where.SECRETS and v.name.startswith(("BINANCE_", "SHIOAJI_", "IBKR_"))
     }
 
 
