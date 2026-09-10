@@ -74,10 +74,16 @@ def test_the_stranded_warning_resolves_without_the_repository() -> None:
 
     This warning reaches someone who installed the package and has an older
     database, so a bare repository path tells them to open a file they do not
-    have. Twice now it has named one; a URL is what resolves for both readers.
+    have. Twice it named one, and once it named nothing at all — a silent
+    warning about a silent gap. A URL is what resolves for both readers.
     """
     from librae.db.schema import _STRANDED_MESSAGE
 
-    # Every path-like reference must be part of a URL, not a bare path.
-    for reference in re.findall(r"\S*/\S*", _STRANDED_MESSAGE):
+    references = re.findall(r"\S*/\S*", _STRANDED_MESSAGE)
+
+    # Both halves matter, and both have already failed once. A message with no
+    # pointer at all passes a loop over an empty list, and that is exactly what
+    # an earlier revision of this warning said: a gap exists, with no remedy.
+    assert references, "the warning must point somewhere"
+    for reference in references:
         assert reference.startswith("https://"), reference
