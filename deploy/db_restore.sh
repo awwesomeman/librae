@@ -35,6 +35,15 @@ if [[ -f "${PROJECT_ROOT}/.env.secrets" ]]; then
 fi
 : "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.secrets}"
 
+# WHY PGPASSWORD is exported once here rather than spelled into each
+# `docker exec`: `-e NAME=value` puts the value in /proc/<pid>/cmdline, which
+# every local user can read, and this is the password of quant -- the role that
+# owns every table. `-e NAME` with no value makes the client copy it from this
+# script's environment instead, which only the same user and root can read.
+# Exporting it costs nothing extra: the sourced secrets file above already put
+# POSTGRES_PASSWORD in this environment with `set -a`.
+export PGPASSWORD="${POSTGRES_PASSWORD}"
+
 if ! docker inspect "${CONTAINER}" >/dev/null 2>&1; then
     echo "${CONTAINER} is not running — start it first: cd deploy && docker compose up -d timescaledb" >&2
     exit 1
@@ -43,13 +52,13 @@ fi
 echo "Recreating an empty 'quant' database on ${CONTAINER} (drops the current one)..."
 # DROP/CREATE DATABASE cannot run inside a transaction block, so each
 # statement needs its own -c call rather than one semicolon-joined string.
-docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" psql -U quant -d postgres -v ON_ERROR_STOP=1 \
+docker exec -e PGPASSWORD "${CONTAINER}" psql -U quant -d postgres -v ON_ERROR_STOP=1 \
     -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'quant' AND pid <> pg_backend_pid();"
-docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" psql -U quant -d postgres -v ON_ERROR_STOP=1 \
+docker exec -e PGPASSWORD "${CONTAINER}" psql -U quant -d postgres -v ON_ERROR_STOP=1 \
     -c "DROP DATABASE IF EXISTS quant;"
-docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" psql -U quant -d postgres -v ON_ERROR_STOP=1 \
+docker exec -e PGPASSWORD "${CONTAINER}" psql -U quant -d postgres -v ON_ERROR_STOP=1 \
     -c "CREATE DATABASE quant OWNER quant;"
-docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" \
+docker exec -e PGPASSWORD "${CONTAINER}" \
     psql -U quant -d quant -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
 
 echo "Restoring ${DUMP_FILE} -> ${CONTAINER}:quant ..."
@@ -57,11 +66,11 @@ docker cp "${DUMP_FILE}" "${CONTAINER}:/tmp/restore.dump"
 # timescaledb_pre_restore/post_restore bracket the pg_restore per TimescaleDB's
 # restore procedure: they let pg_restore write the extension's internal catalog
 # (chunks, continuous aggregates — the circular-FK tables pg_dump warns about).
-docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" \
+docker exec -e PGPASSWORD "${CONTAINER}" \
     psql -U quant -d quant -v ON_ERROR_STOP=1 -c "SELECT timescaledb_pre_restore();"
-docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" \
+docker exec -e PGPASSWORD "${CONTAINER}" \
     pg_restore -U quant -d quant --no-owner /tmp/restore.dump
-docker exec -e PGPASSWORD="${POSTGRES_PASSWORD}" "${CONTAINER}" \
+docker exec -e PGPASSWORD "${CONTAINER}" \
     psql -U quant -d quant -v ON_ERROR_STOP=1 -c "SELECT timescaledb_post_restore();"
 docker exec "${CONTAINER}" rm /tmp/restore.dump
 
