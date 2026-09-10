@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from librae.db import schema as schema_module
@@ -176,32 +178,41 @@ def test_bootstrap_states_one_revision_everywhere_it_is_written() -> None:
     assert f"complete Librae schema revision {revision}" in schema
 
 
-class TestTheWriterRefusesStrandedRows:
-    """`require_current_schema` gates the writer and the live state store.
+def _current_cursor(stranded: int) -> FakeCursor:
+    cursor = FakeCursor(revision=CURRENT_SCHEMA_REVISION)
+    cursor.stranded = stranded
+    return cursor
 
-    Reads filter on calendar_id, so a row the backfill has not reached is
-    invisible rather than incomplete — an engine started over one trades and
-    reports on a fraction of its own history, silently. Reporting it from the
-    CLI only helps the operator who runs the CLI; this is the gate that holds
-    regardless of which command was run.
-    """
 
-    @staticmethod
-    def _cursor(stranded: int) -> FakeCursor:
-        cursor = FakeCursor(revision=CURRENT_SCHEMA_REVISION)
-        cursor.stranded = stranded
-        return cursor
+def _connection(cursor: FakeCursor):
+    @contextmanager
+    def connect(*_args: object):
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        yield conn
 
-    def test_it_refuses_while_any_row_is_stranded(self) -> None:
-        with pytest.raises(RuntimeError, match="null calendar_id"):
-            require_current_schema(self._cursor(11_677_056))
+    return connect
 
-    def test_the_message_carries_the_count_and_where_to_look(self) -> None:
-        with pytest.raises(RuntimeError) as excinfo:
-            require_current_schema(self._cursor(42))
 
-        assert "42" in str(excinfo.value)
-        assert "https://" in str(excinfo.value)
+class TestTheCliIsTheStrandedRowGate:
+    """Only a database adopted via 0003 before its backfill has stranded rows,
+    and a later revision enforces NOT NULL; the engine gate stays structural."""
 
-    def test_a_fully_backfilled_database_passes(self) -> None:
-        require_current_schema(self._cursor(0))
+    def test_the_engine_gate_ignores_stranded_rows_and_never_reads_ohlcv(self) -> None:
+        cursor = _current_cursor(stranded=42)
+
+        require_current_schema(cursor)
+
+        assert not [query for query in cursor.executed if "FROM ohlcv" in query]
+
+    @pytest.mark.parametrize("command", ["migrate", "preflight"])
+    @pytest.mark.parametrize(("stranded", "exit_code"), [(42, 1), (0, 0)])
+    def test_the_cli_exits_non_zero_while_rows_are_stranded(
+        self, monkeypatch: pytest.MonkeyPatch, command: str, stranded: int, exit_code: int
+    ) -> None:
+        monkeypatch.setenv("TIMESCALE_DSN", "postgresql://quant_app@localhost:5432/quant")
+        with (
+            patch("librae.db.admin_conn", _connection(_current_cursor(stranded))),
+            patch("librae.db.get_conn", _connection(_current_cursor(0))),
+        ):
+            assert schema_module._run_cli(command) == exit_code

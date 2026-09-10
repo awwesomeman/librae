@@ -108,13 +108,14 @@ adds, is what sets the maintenance window: it is full-table work under an
    command: call `backfill_ohlcv_identity(conn)` with a connection allowed to
    write `ohlcv`, which `librae.db.admin_conn()` supplies. Until it finishes, the rows it has
    not reached carry a null `calendar_id`, and reads filter on that column —
-   so those rows are invisible rather than merely incomplete. This is a
-   precondition, not a recommendation: `librae db migrate` exits non-zero
-   while any row is stranded, `librae db preflight` fails the same way, and
-   the engine itself refuses to start — so skipping this step cannot quietly
-   produce a run over partial history. The backfill derives each calendar
-   from the `symbols` table and librae's registry, and reports any data
-   source it cannot resolve rather than guessing one.
+   so those rows are invisible rather than merely incomplete. `librae db
+   migrate` exits non-zero and `librae db preflight` fails while any row is
+   stranded, so do not restart writers until preflight passes. The engine
+   does not re-check this at startup: only an adopted database can be in
+   this state, and a later revision will make it impossible by enforcing
+   NOT NULL. The backfill derives each calendar from the `symbols` table and
+   librae's registry, and reports any data source it cannot resolve rather
+   than guessing one.
 5. Restart writers on a build matching the migrated schema.
 
 Check free disk before starting. The backfill is an `UPDATE`, so Postgres
