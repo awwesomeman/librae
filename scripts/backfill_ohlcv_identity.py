@@ -45,10 +45,10 @@ def resolve_calendars(cur) -> dict[str, str]:
     A source the database and the registry both leave unnamed is absent from
     the result; the caller reports it instead of choosing one.
     """
-    from librae.config.symbols import _BUILTIN_SYMBOLS
+    from librae.config.symbols import load_symbol_registry
 
     shipped: dict[str, set[str]] = {}
-    for info in _BUILTIN_SYMBOLS.values():
+    for info in load_symbol_registry().values():
         if info.calendar_id:
             shipped.setdefault(info.data_source, set()).add(info.calendar_id)
 

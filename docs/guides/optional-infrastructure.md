@@ -87,21 +87,49 @@ the current revision, for example when refreshing role grants:
 docker exec -i quant_timescaledb psql -U quant -d quant < librae/db/timescale_init.sql
 ```
 
-For an unversioned schema older than the one recognized by the migration
-command, recreate disposable development data or write an operator-reviewed
-migration before running the new revision.
-The subscription-identity schema adds `backtest_runs.primary_subscriptions`,
-`ohlcv.calendar_id`, `ohlcv.available_at`, and the calendar dimension on
-`ohlcv_coverage_ranges`; it also replaces the OHLCV unique/index keys. Those
-columns must be backfilled from auditable source metadata before constraints
-and indexes are changed. Do not infer missing calendar or instrument type from
-the symbol string. Runs whose exact six-field identities cannot be recovered
-must be marked explicitly with `primary_subscriptions=[]` as legacy records;
-`load_ohlcv(run_id=...)` rejects them and requires recreation or an explicit
-operator-owned migration instead of reading a mixed dataset. New writes still
-require a complete non-empty identity list. Re-running `timescale_init.sql` is
-not that migration. Its create-if-not-exists statements also do not add columns
-or replace constraints on an existing table. The reference live factory
+A database predating subscription identity is adopted by the same command:
+revision 3 adds `backtest_runs.primary_subscriptions`, `ohlcv.calendar_id`,
+`ohlcv.available_at`, and the calendar dimension on `ohlcv_coverage_ranges`,
+and widens the OHLCV unique key to carry the session.
+
+The order is index first, then backfill, and it is deliberate. The writer's
+`ON CONFLICT` names the session-aware key, so it cannot write at all until
+that index exists — the columns therefore land nullable and are filled
+afterwards, in committed batches, by `scripts/backfill_ohlcv_identity.py`.
+Backfilling first is not an option, and the index rebuild, not the column
+adds, is what sets the maintenance window: it is full-table work under an
+`ACCESS EXCLUSIVE` lock. Adopting an existing database means, in order:
+
+1. Stop every writer. Nothing may hold a transaction open across the
+   migration, and the index rebuild blocks writes anyway.
+2. Take and verify a backup.
+3. `librae db migrate`.
+4. `scripts/backfill_ohlcv_identity.py`. Until it finishes, the rows it has
+   not reached carry a null `calendar_id`, and reads filter on that column —
+   so those rows are invisible rather than merely incomplete. `librae db
+   preflight` counts them and fails while any remain. The backfill derives
+   each calendar from the `symbols` table and librae's registry, and reports
+   any data source it cannot resolve rather than guessing one.
+5. Restart writers on a build matching the migrated schema.
+
+Check free disk before starting. The backfill is an `UPDATE`, so Postgres
+writes a new row version and marks the old one dead, in the heap and in every
+index on it — and on a bar table the indexes can outweigh the heap. Committing
+each batch keeps the peak well below a full second copy, because autovacuum
+can reclaim a batch once no transaction still sees it, but that only holds if
+nothing keeps a long transaction open across the run. Stopping the writers
+first, as step 1 requires, is what makes that true. Watching `n_dead_tup` on
+`ohlcv` fall between batches is the direct evidence autovacuum is keeping up.
+
+`session_mode` defaults every adopted row to `extended`, the engine's own
+default; nothing in an adopted row records which session it came from.
+
+Runs whose exact identities cannot be recovered are marked with
+`primary_subscriptions=[]` as legacy records; `load_ohlcv(run_id=...)`
+rejects them and requires recreation rather than reading a mixed dataset.
+New writes still require a complete non-empty identity list. Re-running
+`timescale_init.sql` is not a migration: its create-if-not-exists statements
+do not add columns or replace constraints on an existing table. The reference live factory
 therefore treats `backtest_runs` registration as a startup precondition: if the
 foreign-key parent cannot be written, construction fails before polling or
 order execution and emits a distinct `DB Startup Failed` alert when a notifier
