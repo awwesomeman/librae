@@ -1179,21 +1179,31 @@ def test_env_templates_declare_exactly_the_registry() -> None:
     }
 
 
-def test_trade_never_puts_a_declared_secret_on_the_docker_command_line() -> None:
+def test_no_deploy_script_puts_a_secret_on_the_docker_command_line() -> None:
     """`-e NAME=value` publishes the value to every local user.
 
     /proc/<pid>/cmdline is world-readable, so a password spelled into the
     argument list is readable by anyone with a shell on the host. Passing
-    `-e NAME` makes Docker read it from trade.sh's own environment instead,
-    which only the same user and root can read. It is not about
-    `docker inspect`: the value reaches Config.Env either way, as it does
-    with --env-file.
+    `-e NAME` makes Docker read it from the calling script's environment
+    instead, which only the same user and root can read. It is not about
+    `docker inspect`: for `docker run` the value reaches Config.Env either
+    way, as it does with --env-file.
+
+    Every script under deploy/ is checked, not only the one that had the
+    defect first: `docker exec` in the backup and restore scripts had it too.
     """
-    script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
+    # PGPASSWORD is libpq's own variable rather than one librae declares, so
+    # the registry cannot know it. It carries the password of the role that
+    # owns every table, which is why it is worth naming here by hand.
+    checked = SECRET_NAMES | {"PGPASSWORD"}
+    offenders: dict[str, list[str]] = {}
 
-    inline = set(re.findall(r"-e ([A-Z][A-Z0-9_]*)=", script))
+    for path in sorted(DEPLOY.glob("*.sh")):
+        inline = set(re.findall(r"-e ([A-Z][A-Z0-9_]*)=", path.read_text(encoding="utf-8")))
+        if inline & checked:
+            offenders[path.name] = sorted(inline & checked)
 
-    assert not inline & SECRET_NAMES, sorted(inline & SECRET_NAMES)
+    assert not offenders, offenders
 
 
 def test_account_credential_template_holds_no_shared_secret() -> None:
