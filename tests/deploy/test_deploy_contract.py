@@ -798,6 +798,11 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     preflight = script.index('echo "Checking strategy account and TimescaleDB')
     replacement = script.index('docker rm "${container}"')
     assert preflight < replacement
+    # The last check before the old container goes: a revision mismatch must
+    # stop the deploy here, not at the new container's startup.
+    preflight_block = script[preflight:replacement]
+    assert "from librae.db.schema import require_current_schema" in preflight_block
+    assert "require_current_schema(cursor)" in preflight_block
     assert 'local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?' in script
     # The DSN still reaches both containers, but by name: it used to be
     # spelled `-e TIMESCALE_DSN="${trade_timescale_dsn}"`, which put a
@@ -836,7 +841,6 @@ def test_remote_schema_path_matches_compose_source() -> None:
     assert 'STAGE="schema loading"' in script
     assert "Cloud deployment failed during ${STAGE}" in script
     assert 'rsync -az "${PROJECT_ROOT}/librae/db/timescale_init.sql"' in script
-    assert 'rsync -az "${PROJECT_ROOT}/librae/db/migrations/"' in script
     assert '"${PROJECT_ROOT}/.env.secrets.example"' in script
     assert '"${PROJECT_ROOT}/.credentials"' not in script
     assert "${REMOTE_DIR}/librae/db/timescale_init.sql" in script

@@ -40,103 +40,14 @@ Install the database extra when using the reference writer or live state store:
 pip install "librae[db] @ git+https://github.com/awwesomeman/librae.git@<tag-or-commit>"
 ```
 
-The reference Compose service initializes an empty database automatically.
-`timescale_init.sql` records the current revision in
-`librae_schema_revision`; it refuses to stamp or migrate an older database.
-Both schema commands connect as the role that owns the tables, which
-`TIMESCALE_DSN` deliberately is not — `quant_app` holds DML only and cannot
-`ALTER` a table or write `librae_schema_revision`. Set `TIMESCALE_ADMIN_DSN`
-in `.env.secrets` on the machine that migrates; without it the commands fail
-rather than falling back.
-
-Preflight inspects twice, and passes only if both agree: once as the owner,
-which is the role the migration itself will run as, and once through
-`TIMESCALE_DSN` as the application role, which is the role the engine reads
-with. Both halves are needed because `information_schema.columns` is
-permission-filtered — a table the owner sees every column of shows none to a
-role that was never granted it, so an owner-only pass could report `current`
-on a database the engine then refuses at startup.
-
-Before deploying a build against an existing database, run the read-only
-preflight:
-
-```bash
-librae db preflight
-```
-
-A non-current result prevents run registration and live checkpoint restore.
-For the supported legacy revision, first stop writers, take and verify a
-backup, then run the ordered SQL migration:
-
-```bash
-librae db migrate
-librae db preflight
-```
-
-Each migration runs in the same transaction as an advisory schema lock. A
-failed statement rolls the revision and DDL back together; fix the reported
-cause and rerun. A repeated successful run is a no-op. Newer, unsupported-old,
-unknown, and partially applied schemas fail closed instead of being guessed.
-Database backups remain the rollback boundary: migrations are forward-only,
-so restore the pre-upgrade dump together with the matching application image.
-
-Re-running the bootstrap is supported only when the database already matches
-the current revision, for example when refreshing role grants:
-
-```bash
-docker exec -i quant_timescaledb psql -U quant -d quant < librae/db/timescale_init.sql
-```
-
-A database predating subscription identity is adopted by the same command:
-revision 3 adds `backtest_runs.primary_subscriptions`, `ohlcv.calendar_id`,
-`ohlcv.available_at`, and the calendar dimension on `ohlcv_coverage_ranges`,
-and widens the OHLCV unique key to carry the session.
-
-The order is index first, then backfill, and it is deliberate. The writer's
-`ON CONFLICT` names the session-aware key, so it cannot write at all until
-that index exists — the columns therefore land nullable and are filled
-afterwards, in committed batches, by `scripts/backfill_ohlcv_identity.py`.
-Backfilling first is not an option, and the index rebuild, not the column
-adds, is what sets the maintenance window: it is full-table work under an
-`ACCESS EXCLUSIVE` lock. Adopting an existing database means, in order:
-
-1. Stop every writer. Nothing may hold a transaction open across the
-   migration, and the index rebuild blocks writes anyway.
-2. Take and verify a backup.
-3. `librae db migrate`.
-4. Run the backfill. `scripts/backfill_ohlcv_identity.py` is a module, not a
-   command: call `backfill_ohlcv_identity(conn)` with a connection allowed to
-   write `ohlcv`, which `librae.db.admin_conn()` supplies. Until it finishes, the rows it has
-   not reached carry a null `calendar_id`, and reads filter on that column —
-   so those rows are invisible rather than merely incomplete. `librae db
-   migrate` exits non-zero and `librae db preflight` fails while any row is
-   stranded, so do not restart writers until preflight passes. The engine
-   does not re-check this at startup: only an adopted database can be in
-   this state, and a later revision will make it impossible by enforcing
-   NOT NULL. The backfill derives each calendar from the `symbols` table and
-   librae's registry, and reports any data source it cannot resolve rather
-   than guessing one.
-5. Restart writers on a build matching the migrated schema.
-
-Check free disk before starting. The backfill is an `UPDATE`, so Postgres
-writes a new row version and marks the old one dead, in the heap and in every
-index on it — and on a bar table the indexes can outweigh the heap. Committing
-each batch keeps the peak well below a full second copy, because autovacuum
-can reclaim a batch once no transaction still sees it, but that only holds if
-nothing keeps a long transaction open across the run. Stopping the writers
-first, as step 1 requires, is what makes that true. Watching `n_dead_tup` on
-`ohlcv` fall between batches is the direct evidence autovacuum is keeping up.
-
-`session_mode` defaults every adopted row to `extended`, the engine's own
-default; nothing in an adopted row records which session it came from.
+The reference Compose service initializes an empty database automatically;
+see [Schema revisions](#schema-revisions) for an existing database.
 
 Runs whose exact identities cannot be recovered are marked with
 `primary_subscriptions=[]` as legacy records; `load_ohlcv(run_id=...)`
 rejects them and requires recreation rather than reading a mixed dataset.
-New writes still require a complete non-empty identity list. Re-running
-`timescale_init.sql` is not a migration: its create-if-not-exists statements
-do not add columns or replace constraints on an existing table. The reference live factory
-therefore treats `backtest_runs` registration as a startup precondition: if the
+New writes still require a complete non-empty identity list. The reference
+live factory treats `backtest_runs` registration as a startup precondition: if the
 foreign-key parent cannot be written, construction fails before polling or
 order execution and emits a distinct `DB Startup Failed` alert when a notifier
 is configured. That alert means persistence startup failed, not that a run
@@ -185,22 +96,16 @@ either strategy code or input data changes. Librae combines it with
 `--force` requires a revision and replaces only the run with that combined
 cache identity.
 
-Adding `backtest_revision` and `backtest_cache_key`, changing `config_hash` to
-a non-unique index, and adding the cache-key unique index are schema changes.
-An existing database must be recreated or migrated explicitly before this
-revision is used; re-running `timescale_init.sql` cannot replace the old unique
-index in place.
-
-`broker_orders.cancel_requested` is a schema change on the same terms. It
-records that the engine decided to cancel an order, which is separate from the
+`broker_orders.cancel_requested` records that the engine decided to cancel an
+order, which is separate from the
 broker having acknowledged one: `status` carries only what the broker reported
 and stays inside its `CHECK` vocabulary, so an engine-owned intent cannot be
 expressed by adding a value there. The flag is checkpointed before the cancel
 call, which is what lets a restart resume an unresolved cancellation rather
 than lose it.
 
-`config_hash` changed representation on the same terms, and it reaches further
-than the database. Hash-included mappings are now encoded with explicit type
+`config_hash` changed representation, and the change reaches further than the
+database. Hash-included mappings are now encoded with explicit type
 tags instead of a `default=str` fallback, and a timeframe is hashed in its
 canonical form, so a configuration that hashed one way before this revision
 hashes another way after it — including one written only in ccxt timeframe
@@ -241,6 +146,27 @@ exercise the live path without a database. Reaching order-capable startup with
 no recovery state fails only after a crash, with the local book gone and the
 broker still holding positions, which is why this fails closed at
 construction.
+
+### Schema revisions
+
+Librae owns the current schema, not the upgrade of an existing database:
+
+- `librae/db/timescale_init.sql` bootstraps an empty database and stamps
+  `librae_schema_revision` with this build's revision. It refuses to stamp an
+  unversioned existing database.
+- The reference writer and the live state store read that revision before
+  registering a run or restoring a checkpoint, and fail closed when the table
+  is missing or holds any other revision.
+- Bringing an existing database to the required revision is the deployment's
+  job, run as the role that owns the tables. The spec for a revision bump is
+  the diff of `timescale_init.sql` between the two Librae versions.
+
+Re-running the bootstrap is supported only when the database already matches
+the current revision, for example when refreshing role grants:
+
+```bash
+docker exec -i quant_timescaledb psql -U quant -d quant < librae/db/timescale_init.sql
+```
 
 ## Grafana
 
@@ -470,8 +396,8 @@ version control. The repository does not embed an index URL, credentials, or
 TLS exceptions.
 
 Infrastructure-only deployment via `cloud_deploy.sh` does not copy either
-application repository; it syncs the compose file, the schema bootstrap and
-ordered migration SQL under `librae/db/`, Grafana provisioning, and `.env`.
+application repository; it syncs the compose file, the schema bootstrap under
+`librae/db/`, Grafana provisioning, and `.env`.
 
 This combined-source builder is optional. A caller-owned image may instead
 install a pinned Librae distribution and copy its own strategy package, as
@@ -666,12 +592,13 @@ migration:
    confirmed flat, and retain the old checkpoint for audit.
 
 Two independently versioned things are easy to confuse here. The database
-schema revision lives in `librae_schema_revision` and is upgraded by `librae
-db migrate`. The **checkpoint document version** (`_STATE_SCHEMA_VERSION` in
-`librae/live/state.py`) is stored as `schema_version` inside the JSON in
-`execution_runtime_state.state`, is compared for exact equality on load, and
-**nothing migrates it automatically** — running database initialization or
-`librae db migrate` does not transform stored checkpoint JSON.
+schema revision lives in `librae_schema_revision` and is upgraded by the
+deployment (see [Schema revisions](#schema-revisions)). The **checkpoint
+document version** (`_STATE_SCHEMA_VERSION` in `librae/live/state.py`) is
+stored as `schema_version` inside the JSON in `execution_runtime_state.state`,
+is compared for exact equality on load, and **nothing migrates it
+automatically** — neither database initialization nor a schema upgrade
+transforms stored checkpoint JSON.
 
 Any version other than the one this build writes is rejected outright rather
 than silently defaulted, and the refusal names the versions involved and the

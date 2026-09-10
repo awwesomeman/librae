@@ -63,10 +63,11 @@ class TestTheRefusalIsActionable:
         assert "optional-infrastructure" in message
 
     def test_it_distinguishes_this_from_the_database_revision(self, message: str) -> None:
-        """Both were once called a "revision" in the same breath. An operator
-        reaching for `librae db migrate` here would be reaching for the wrong
-        tool: nothing migrates a stored checkpoint document."""
-        assert "librae db migrate" in message
+        """Both were once called a "revision" in the same breath. A database
+        schema upgrade is the wrong tool here: nothing migrates a stored
+        checkpoint document."""
+        assert "not the database schema revision" in message
+        assert "does not transform a stored checkpoint" in message
 
     def test_it_does_not_enumerate_versions(self, message: str) -> None:
         """A per-version changelog in an error string is drift-prone: it would

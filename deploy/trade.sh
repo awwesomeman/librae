@@ -452,7 +452,7 @@ cmd_start() {
         echo "Librae revision: ${selected_revision}"
     fi
 
-    echo "Checking strategy account and TimescaleDB connectivity from ${image} on ${NETWORK}..."
+    echo "Checking strategy account and TimescaleDB schema revision from ${image} on ${NETWORK}..."
     # WHY the DSN is passed by name only: the assignment in front of the
     # command puts it in this script's environment for Docker to read, so it
     # never reaches /proc/<pid>/cmdline, which every local user can read. The
@@ -480,6 +480,7 @@ from pathlib import Path
 
 import psycopg2
 import yaml
+from librae.db.schema import require_current_schema
 
 module = os.environ["TRADE_RUN_MODULE"]
 if importlib.util.find_spec(module) is None:
@@ -526,9 +527,7 @@ if os.environ["TRADE_MODE"] == "live":
 connection = psycopg2.connect(os.environ["TIMESCALE_DSN"])
 try:
     with connection.cursor() as cursor:
-        cursor.execute("SELECT 1")
-        if cursor.fetchone() != (1,):
-            raise SystemExit("TimescaleDB preflight returned an unexpected result")
+        require_current_schema(cursor)
 finally:
     connection.close()
 '

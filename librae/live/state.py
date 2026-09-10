@@ -378,9 +378,8 @@ class LiveRuntimeState:
                 "checkpoint, or migrate the stored document externally after "
                 "reconciling it; see the live migration procedure in "
                 "docs/guides/optional-infrastructure.md. This is the checkpoint "
-                "document version, not the database schema revision that "
-                "`librae db migrate` upgrades — that command does not transform "
-                "a stored checkpoint."
+                "document version, not the database schema revision; upgrading "
+                "the database schema does not transform a stored checkpoint."
             )
         positions = {}
         for symbol, item in raw["positions"].items():

@@ -700,6 +700,11 @@ including `ohlcv`, `external_factors`, `symbols`, and the two
 **behavior**: fetcher registration, DB-first reads, coverage gap-filling,
 retries, and rate limits.
 
+That data model is the *current* schema: `timescale_init.sql` stamps its
+revision, and bringing an existing database to it is the deployment's job,
+specified by the diff of `timescale_init.sql` between versions (see
+[Schema revisions](docs/guides/optional-infrastructure.md#schema-revisions)).
+
 The split is deliberate rather than accidental. A schema is a contract
 between deployments, and several of them read the same database; a data
 layer is one deployment's implementation of how rows get there. Two callers
@@ -803,7 +808,7 @@ flowchart TD
 | `external_factor_coverage_ranges` | tracks `get_factor()`'s cache coverage ranges, same mechanism as `ohlcv_coverage_ranges` | no FK | no |
 | `factor_registry` | one row per `factor_name` — the frequency + data source it is registered at, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
 | `symbols` | instrument master: what a fact table's bare `symbol` string means (market, multiplier, tick size, venue symbol, calendar, ...) | PK `(symbol, data_source, instrument_type)`; deliberately no FK from the fact tables | no |
-| `librae_schema_revision` | authoritative reference-schema revision; writable only by the migration owner | singleton PK | no |
+| `librae_schema_revision` | authoritative reference-schema revision; writable only by the table owner | singleton PK | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
 | `broker_orders` | durable broker order lifecycle records | PK `state_key` + `client_order_id` | no |
 

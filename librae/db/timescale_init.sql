@@ -1,19 +1,18 @@
 -- TimescaleDB schema for an empty database or an already-current database.
--- This file never upgrades an older schema; use `librae db migrate`.
+-- This file never upgrades an older schema; migrating one is the deployment's job.
 -- See docs/plans/enhance_db_schema.md for schema evolution history
 \set ON_ERROR_STOP on
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
--- Refuse to stamp an unversioned existing database as current.  The migration
--- command first verifies the known legacy shape and upgrades transactionally.
+-- Refuse to stamp an unversioned existing database as current.
 DO $$
 BEGIN
     IF to_regclass('public.backtest_runs') IS NOT NULL
        AND to_regclass('public.librae_schema_revision') IS NULL THEN
         RAISE EXCEPTION
-            'unversioned Librae schema; run `librae db preflight` then `librae db migrate`';
+            'unversioned Librae schema; its deployment must migrate it before this bootstrap runs';
     END IF;
 END
 $$;
