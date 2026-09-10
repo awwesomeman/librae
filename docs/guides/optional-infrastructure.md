@@ -112,6 +112,15 @@ adds, is what sets the maintenance window: it is full-table work under an
    any data source it cannot resolve rather than guessing one.
 5. Restart writers on a build matching the migrated schema.
 
+Check free disk before starting. The backfill is an `UPDATE`, so Postgres
+writes a new row version and marks the old one dead, in the heap and in every
+index on it — and on a bar table the indexes can outweigh the heap. Committing
+each batch keeps the peak well below a full second copy, because autovacuum
+can reclaim a batch once no transaction still sees it, but that only holds if
+nothing keeps a long transaction open across the run. Stopping the writers
+first, as step 1 requires, is what makes that true. Watching `n_dead_tup` on
+`ohlcv` fall between batches is the direct evidence autovacuum is keeping up.
+
 `session_mode` defaults every adopted row to `extended`, the engine's own
 default; nothing in an adopted row records which session it came from.
 
