@@ -484,8 +484,10 @@ def _validate_market_data_calendar_preconditions(
     WHY the rule names a route here rather than living in its adapter: an
     adapter cannot refuse a run it has not been constructed for, and this
     has to fail at startup rather than on the first daily bar. The route
-    name is the adapter's own declared capability, not an engine assumption
-    about the venue, and every other route is left alone.
+    name is hardcoded, so the engine does carry that much venue knowledge;
+    what keeps it defensible is that it keys on a name the caller declared,
+    and that the rule governs bar normalization the engine performs rather
+    than the venue's own trading rules. Every other route is left alone.
     """
     from librae.core.utils import to_ccxt
 
