@@ -67,3 +67,17 @@ def test_every_required_column_exists_in_the_reference_schema() -> None:
 def test_the_current_revision_marker_is_a_real_column() -> None:
     # `_current_schema_is_compatible` keys the current revision off this one.
     assert "execution_identity" in _columns_by_table()["backtest_runs"]
+
+
+def test_the_stranded_warning_resolves_without_the_repository() -> None:
+    """The wheel ships `librae*` only — no docs/, no scripts/.
+
+    This warning reaches someone who installed the package and has an older
+    database, so a bare repository path tells them to open a file they do not
+    have. Twice now it has named one; a URL is what resolves for both readers.
+    """
+    from librae.db.schema import _STRANDED_MESSAGE
+
+    # Every path-like reference must be part of a URL, not a bare path.
+    for reference in re.findall(r"\S*/\S*", _STRANDED_MESSAGE):
+        assert reference.startswith("https://"), reference
