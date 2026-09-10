@@ -28,10 +28,12 @@ def require_current_schema(cur: _Cursor) -> None:
     else:
         cur.execute("SELECT revision FROM librae_schema_revision WHERE singleton = TRUE")
         row = cur.fetchone()
-        revision = row[0] if row else None
-        if revision == CURRENT_SCHEMA_REVISION:
+        if row is None:
+            found = "has no revision row"
+        elif row[0] == CURRENT_SCHEMA_REVISION:
             return
-        found = f"is at revision {revision}"
+        else:
+            found = f"is at revision {row[0]}"
     raise RuntimeError(
         f"incompatible Librae database schema: the database {found}, this build requires "
         f"revision {CURRENT_SCHEMA_REVISION}. Bootstrap an empty database with "

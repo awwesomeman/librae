@@ -55,7 +55,7 @@ def test_any_other_revision_fails_closed(revision: int) -> None:
 
 
 def test_a_revision_table_without_its_row_fails_closed() -> None:
-    _refusal(FakeCursor(None))
+    assert "has no revision row" in _refusal(FakeCursor(None))
 
 
 def test_bootstrap_is_current_and_does_not_embed_upgrade_ddl() -> None:

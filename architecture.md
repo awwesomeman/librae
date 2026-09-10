@@ -700,6 +700,11 @@ including `ohlcv`, `external_factors`, `symbols`, and the two
 **behavior**: fetcher registration, DB-first reads, coverage gap-filling,
 retries, and rate limits.
 
+That data model is the *current* schema: `timescale_init.sql` stamps its
+revision, and bringing an existing database to it is the deployment's job,
+specified by the diff of `timescale_init.sql` between versions (see
+[Schema revisions](docs/guides/optional-infrastructure.md#schema-revisions)).
+
 The split is deliberate rather than accidental. A schema is a contract
 between deployments, and several of them read the same database; a data
 layer is one deployment's implementation of how rows get there. Two callers

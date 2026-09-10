@@ -46,10 +46,8 @@ see [Schema revisions](#schema-revisions) for an existing database.
 Runs whose exact identities cannot be recovered are marked with
 `primary_subscriptions=[]` as legacy records; `load_ohlcv(run_id=...)`
 rejects them and requires recreation rather than reading a mixed dataset.
-New writes still require a complete non-empty identity list. Re-running
-`timescale_init.sql` is not a migration: its create-if-not-exists statements
-do not add columns or replace constraints on an existing table. The reference live factory
-therefore treats `backtest_runs` registration as a startup precondition: if the
+New writes still require a complete non-empty identity list. The reference
+live factory treats `backtest_runs` registration as a startup precondition: if the
 foreign-key parent cannot be written, construction fails before polling or
 order execution and emits a distinct `DB Startup Failed` alert when a notifier
 is configured. That alert means persistence startup failed, not that a run
@@ -98,22 +96,16 @@ either strategy code or input data changes. Librae combines it with
 `--force` requires a revision and replaces only the run with that combined
 cache identity.
 
-Adding `backtest_revision` and `backtest_cache_key`, changing `config_hash` to
-a non-unique index, and adding the cache-key unique index are schema changes.
-An existing database must be recreated or migrated explicitly before this
-revision is used; re-running `timescale_init.sql` cannot replace the old unique
-index in place.
-
-`broker_orders.cancel_requested` is a schema change on the same terms. It
-records that the engine decided to cancel an order, which is separate from the
+`broker_orders.cancel_requested` records that the engine decided to cancel an
+order, which is separate from the
 broker having acknowledged one: `status` carries only what the broker reported
 and stays inside its `CHECK` vocabulary, so an engine-owned intent cannot be
 expressed by adding a value there. The flag is checkpointed before the cancel
 call, which is what lets a restart resume an unresolved cancellation rather
 than lose it.
 
-`config_hash` changed representation on the same terms, and it reaches further
-than the database. Hash-included mappings are now encoded with explicit type
+`config_hash` changed representation, and the change reaches further than the
+database. Hash-included mappings are now encoded with explicit type
 tags instead of a `default=str` fallback, and a timeframe is hashed in its
 canonical form, so a configuration that hashed one way before this revision
 hashes another way after it — including one written only in ccxt timeframe
