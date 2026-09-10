@@ -453,12 +453,20 @@ cmd_start() {
     fi
 
     echo "Checking strategy account and TimescaleDB connectivity from ${image} on ${NETWORK}..."
+    # WHY the DSN is passed by name only: the assignment in front of the
+    # command puts it in this script's environment for Docker to read, so it
+    # never reaches /proc/<pid>/cmdline, which every local user can read. The
+    # DSN embeds POSTGRES_APP_PASSWORD, so `-e NAME=value` would publish that
+    # password to anyone with a shell here. This does not change what
+    # `docker inspect` shows -- the value lands in Config.Env either way, and
+    # so would --env-file -- so do not fold it back into the argument list.
+    TIMESCALE_DSN="${trade_timescale_dsn}" \
     docker run --rm \
         --network "${NETWORK}" \
         "${credential_args[@]+"${credential_args[@]}"}" \
         "${config_mount_args[@]+"${config_mount_args[@]}"}" \
         "${secret_mount_args[@]+"${secret_mount_args[@]}"}" \
-        -e TIMESCALE_DSN="${trade_timescale_dsn}" \
+        -e TIMESCALE_DSN \
         -e TRADE_RUN_MODULE="strategies.${strategy}.run" \
         -e TRADE_CONFIG_PATH="${container_config}" \
         -e TRADE_ACCOUNT_ID="${account_id}" \
@@ -567,9 +575,12 @@ finally:
         )
     fi
 
+    # The DSN and the bot token are named here and assigned in front of
+    # `docker run` below, for the reason given at the preflight run above. A
+    # chat id names a destination rather than an identity, so it stays inline.
     local env_args=(
-        -e TIMESCALE_DSN="${trade_timescale_dsn}"
-        -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+        -e TIMESCALE_DSN
+        -e TELEGRAM_BOT_TOKEN
         -e TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
         -e LIBRAE_READY_FILE="${ready_file}"
         -e LIBRAE_READY_TOKEN="${ready_token}"
@@ -582,6 +593,8 @@ finally:
 
     echo "Starting ${container}: account=${account_id}, currency=${currency}, strategy=${strategy}, mode=${mode}, poll=${poll_seconds}s"
 
+    TIMESCALE_DSN="${trade_timescale_dsn}" \
+    TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" \
     docker run -d \
         --name "${container}" \
         --network "${NETWORK}" \

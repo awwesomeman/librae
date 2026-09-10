@@ -234,7 +234,10 @@ When working from a clone, configuration is split by who may see it.
 strings, the Telegram bot token, broker keys — and is created by hand on each
 machine, never synced. Live trading additionally takes one
 `.credentials/<account>.env` file per account, which `trade.sh` hands to
-Docker with `--env-file` and never sources as shell code.
+Docker with `--env-file` and never sources as shell code. An account file
+holds only that account's broker credentials — copy it from
+`.env.credentials.example`, not from `.env.secrets.example`, so the shared
+infrastructure passwords are not duplicated into every account.
 
 POSIX shell:
 
@@ -242,7 +245,7 @@ POSIX shell:
 cp .env.example .env
 cp .env.secrets.example .env.secrets && chmod 600 .env.secrets
 mkdir -p .credentials
-cp .env.secrets.example .credentials/ibkr-main.env
+cp .env.credentials.example .credentials/ibkr-main.env
 chmod 600 .credentials/ibkr-main.env
 ```
 
@@ -252,11 +255,18 @@ PowerShell:
 Copy-Item .env.example .env
 Copy-Item .env.secrets.example .env.secrets
 New-Item -ItemType Directory -Force .credentials
-Copy-Item .env.secrets.example .credentials/ibkr-main.env
+Copy-Item .env.credentials.example .credentials/ibkr-main.env
 ```
 
-On Windows, apply the file ACL required by your organization and runtime
-instead of POSIX `chmod`.
+Windows has no POSIX `chmod`. Replace inherited permissions with your own
+account, for each file you just created:
+
+```powershell
+icacls .env.secrets /inheritance:r /grant:r "${env:USERNAME}:(R,W)"
+icacls .credentials/ibkr-main.env /inheritance:r /grant:r "${env:USERNAME}:(R,W)"
+```
+
+Use whatever ACL your organization requires instead, where it specifies one.
 
 Fill in the values, then check the result:
 
