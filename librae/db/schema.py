@@ -194,7 +194,8 @@ def apply_migrations(cur: _Cursor) -> tuple[int, ...]:
 
 _STRANDED_MESSAGE = (
     "WARNING: {count} ohlcv row(s) have a null calendar_id. Reads filter on that "
-    "column, so those rows stay invisible until it is filled in."
+    "column, so those rows are invisible until the column is filled in — see "
+    "the schema-adoption steps in docs/guides/optional-infrastructure.md."
 )
 
 
