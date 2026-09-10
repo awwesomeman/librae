@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from librae.db import schema as schema_module
@@ -23,17 +25,22 @@ class FakeCursor:
         core_exists: bool = True,
         legacy_compatible: bool = True,
         execution_column: bool | None = None,
+        stranded: int = 0,
     ) -> None:
         self.revision = revision
         self.core_exists = core_exists
         self.legacy_compatible = legacy_compatible
         self.execution_column = execution_column
+        self.stranded = stranded
         self._result: list[tuple[object, ...]] = []
         self.executed: list[str] = []
 
     def execute(self, query: str, params: object = None) -> None:
         self.executed.append(query)
-        if query == "SELECT to_regclass(%s)":
+        if query == "SELECT to_regclass('public.ohlcv')":
+            # Spelled literally in the source, not parameterized.
+            self._result = [("public.ohlcv",)]
+        elif query == "SELECT to_regclass(%s)":
             relation = params[0]
             exists = (
                 self.revision is not None if "schema_revision" in relation else self.core_exists
@@ -61,6 +68,8 @@ class FakeCursor:
                 # cannot recognize at all.
                 rows = [r for r in rows if r != ("backtest_runs", "run_id")]
             self._result = rows
+        elif "count(*) FROM ohlcv WHERE calendar_id IS NULL" in query:
+            self._result = [(self.stranded,)]
         elif query.startswith("SELECT revision FROM librae_schema_revision"):
             self._result = [] if self.revision is None else [(self.revision,)]
         elif "CREATE TABLE IF NOT EXISTS librae_schema_revision" in query:
@@ -169,3 +178,48 @@ def test_bootstrap_states_one_revision_everywhere_it_is_written() -> None:
     assert f"WHERE singleton = TRUE) <> {revision} THEN" in schema
     assert f"does not match bootstrap revision {revision}" in schema
     assert f"complete Librae schema revision {revision}" in schema
+
+
+def _current_cursor(stranded: int) -> FakeCursor:
+    return FakeCursor(revision=CURRENT_SCHEMA_REVISION, stranded=stranded)
+
+
+def _connection(cursor: FakeCursor):
+    @contextmanager
+    def connect(*_args: object):
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        yield conn
+
+    return connect
+
+
+class TestOnlyTheCliGatesStrandedRows:
+    """Only a database adopted via 0003 before its backfill has stranded rows,
+    and a later revision enforces NOT NULL; the engine gate stays structural."""
+
+    def test_migrations_still_apply_while_rows_are_stranded(self) -> None:
+        # apply_migrations verifies inside its own transaction, and 0003 always
+        # leaves stranded rows: a data check there would roll every adoption back.
+        cursor = FakeCursor(revision=None, legacy_compatible=True, stranded=42)
+
+        assert apply_migrations(cursor) == tuple(range(1, CURRENT_SCHEMA_REVISION + 1))
+
+    def test_the_engine_gate_ignores_stranded_rows_and_never_reads_ohlcv(self) -> None:
+        cursor = _current_cursor(stranded=42)
+
+        require_current_schema(cursor)
+
+        assert not [query for query in cursor.executed if "FROM ohlcv" in query]
+
+    @pytest.mark.parametrize("command", ["migrate", "preflight"])
+    @pytest.mark.parametrize(("stranded", "exit_code"), [(42, 1), (0, 0)])
+    def test_the_cli_exits_non_zero_while_rows_are_stranded(
+        self, monkeypatch: pytest.MonkeyPatch, command: str, stranded: int, exit_code: int
+    ) -> None:
+        monkeypatch.setenv("TIMESCALE_DSN", "postgresql://quant_app@localhost:5432/quant")
+        with (
+            patch("librae.db.admin_conn", _connection(_current_cursor(stranded))),
+            patch("librae.db.get_conn", _connection(_current_cursor(0))),
+        ):
+            assert schema_module._run_cli(command) == exit_code

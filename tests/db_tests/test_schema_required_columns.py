@@ -87,3 +87,21 @@ def test_the_stranded_warning_resolves_without_the_repository() -> None:
     assert references, "the warning must point somewhere"
     for reference in references:
         assert reference.startswith("https://"), reference
+
+
+MIGRATION_0003 = INIT_SQL.parent / "migrations/0003_adopt_subscription_identity.sql"
+
+
+def test_the_view_acl_is_captured_before_the_drop_and_replayed_after() -> None:
+    """Dropping a view drops every ACL on it, not just librae's own.
+
+    A deployment may have granted `data_inventory` to a BI account or a read
+    replica; those grants survive only if the ACL is read before the drop and
+    replayed after it.
+    """
+    sql = MIGRATION_0003.read_text(encoding="utf-8")
+    capture = sql.index("CREATE TEMP TABLE data_inventory_acl")
+    drop = sql.index("DROP VIEW IF EXISTS data_inventory")
+
+    assert capture < drop
+    assert "FROM data_inventory_acl" in sql[drop:], "the captured ACL is never replayed"

@@ -158,6 +158,16 @@ CREATE INDEX IF NOT EXISTS idx_ohlcv_coverage_ranges_lookup
 -- ============================================================
 -- Dropped rather than replaced: CREATE OR REPLACE VIEW can only append
 -- columns, and these belong in the middle of the select list.
+--
+-- Dropping a view drops every ACL on it, including grants this migration has
+-- no way to know about — a BI account, a read replica's reader. Restoring
+-- only the two managed roles would silently revoke the rest, so the existing
+-- ACL is captured first and replayed after.
+CREATE TEMP TABLE data_inventory_acl ON COMMIT DROP AS
+SELECT relacl AS acl, relowner
+  FROM pg_class
+ WHERE oid = to_regclass('public.data_inventory') AND relacl IS NOT NULL;
+
 DROP VIEW IF EXISTS data_inventory;
 CREATE VIEW data_inventory AS
 SELECT
@@ -194,10 +204,29 @@ GROUP BY ef.symbol, ef.data_source, ef.timeframe, ef.instrument_type, ef.factor_
 
 ORDER BY table_name, symbol, factor_name;
 
--- Dropping the view dropped its grants. Guarded on the roles existing, the
--- way 0001 guards its REVOKEs: a database restored without the managed roles
--- is still a database this migration has to finish on.
-DO $$ BEGIN
+-- Replay every table-level privilege the view had, grant option included; the
+-- owner is skipped because it holds everything implicitly. Column-level grants
+-- (attacl) are also dropped with the view and are deliberately not replayed.
+-- Then ensure the two roles librae manages, which covers a view that had no
+-- ACL. Those two are guarded because a restored database may not have the
+-- roles at all.
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN
+        SELECT a.grantee, a.privilege_type, a.is_grantable
+          FROM data_inventory_acl s, aclexplode(s.acl) a
+         WHERE a.grantee <> s.relowner
+    LOOP
+        EXECUTE format(
+            'GRANT %s ON data_inventory TO %s%s',
+            r.privilege_type,
+            CASE WHEN r.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(r.grantee)) END,
+            CASE WHEN r.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
+        );
+    END LOOP;
+
     IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'quant_app') THEN
         EXECUTE 'GRANT SELECT ON data_inventory TO quant_app';
     END IF;
