@@ -117,11 +117,25 @@ END $$;
 -- is full-table work under an ACCESS EXCLUSIVE lock, the same order of
 -- magnitude the nullable adds above exist to avoid — unavoidable here,
 -- because the writer cannot use the old key at all.
-DROP INDEX IF EXISTS idx_ohlcv_unique;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique
-    ON ohlcv (
-        ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type
-    );
+-- Only where it is actually wrong. A database bootstrapped from a current
+-- timescale_init.sql already has this exact index, and rebuilding it would
+-- charge every such deployment a full-table ACCESS EXCLUSIVE lock for no
+-- change at all.
+DO $$
+DECLARE
+    existing TEXT;
+BEGIN
+    SELECT indexdef INTO existing FROM pg_indexes
+     WHERE schemaname = 'public' AND indexname = 'idx_ohlcv_unique';
+    IF existing IS NULL OR existing NOT LIKE '%calendar_id%' THEN
+        DROP INDEX IF EXISTS idx_ohlcv_unique;
+        CREATE UNIQUE INDEX idx_ohlcv_unique
+            ON ohlcv (
+                ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type
+            );
+    END IF;
+END
+$$;
 
 ALTER TABLE ohlcv_coverage_ranges
     ADD COLUMN IF NOT EXISTS calendar_id TEXT,

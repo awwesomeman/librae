@@ -194,11 +194,11 @@ def apply_migrations(cur: _Cursor) -> tuple[int, ...]:
 
 _STRANDED_MESSAGE = (
     "WARNING: {count} ohlcv row(s) have a null calendar_id. Reads filter on that "
-    "column, so those rows are invisible until scripts/backfill_ohlcv_identity.py runs."
+    "column, so those rows stay invisible until it is filled in."
 )
 
 
-def unbackfilled_ohlcv_rows(cur: _Cursor) -> int:
+def _unbackfilled_ohlcv_rows(cur: _Cursor) -> int:
     """Rows the reader cannot see because their session identity is null.
 
     load_ohlcv filters on calendar_id, so a row whose value the expand
@@ -240,13 +240,13 @@ def _run_cli(command: str) -> int:
             # Said here rather than left to a later preflight: the operator's
             # next step is to start the engine, and this gap does not announce
             # itself — reads simply come back short.
-            stranded = unbackfilled_ohlcv_rows(cur)
+            stranded = _unbackfilled_ohlcv_rows(cur)
             if stranded:
                 print(_STRANDED_MESSAGE.format(count=stranded))
             return 0
         admin_status = inspect_schema(cur)
         _describe("admin", admin_status)
-        stranded = unbackfilled_ohlcv_rows(cur)
+        stranded = _unbackfilled_ohlcv_rows(cur)
         if stranded:
             print(_STRANDED_MESSAGE.format(count=stranded))
 
