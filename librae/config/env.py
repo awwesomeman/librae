@@ -152,7 +152,6 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("TS_AUTHKEY", Where.SECRETS, secret=True),
     EnvVar("TIMESCALE_DSN", Where.SECRETS, secret=True),
     EnvVar("TRADE_TIMESCALE_DSN", Where.SECRETS, secret=True),
-    EnvVar("TIMESCALE_ADMIN_DSN", Where.SECRETS, secret=True),
 )
 
 DECLARED: Mapping[str, EnvVar] = {v.name: v for v in ENV_VARS}
@@ -173,15 +172,13 @@ PAIRED_NAMES: tuple[tuple[str, str], ...] = (
 )
 
 # Each connection string names one role and carries that role's password.
-# The split is a privilege boundary, not a convention: quant owns the tables,
-# so only it can ALTER them or write librae_schema_revision, and quant_app is
-# granted DML alone. One variable serving both would hand the engine the
-# ability to change the schema it runs against.
+# The split is a privilege boundary, not a convention: quant owns the tables
+# and quant_app is granted DML alone, so a DSN naming the owner would hand the
+# engine the ability to change the schema it runs against.
 COMPOSE_LAYOUT_MARKER = "POSTGRES_APP_PASSWORD"
 DSN_ROLES: Mapping[str, tuple[str, str]] = {
     "TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
     "TRADE_TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
-    "TIMESCALE_ADMIN_DSN": ("quant", "POSTGRES_PASSWORD"),
 }
 
 
@@ -308,9 +305,6 @@ def doctor(project_root: Path) -> list[Finding]:
     # These roles exist only in the Compose-managed layout, which
     # POSTGRES_APP_PASSWORD identifies — a librae-specific name, unlike the
     # generic POSTGRES_PASSWORD a pip user may well set for their own database.
-    # Gating each check on its own password instead would let a blank one skip
-    # the role check silently, which is how an admin DSN pointing at the
-    # application role would pass clean.
     compose_layout = bool(merged.get(COMPOSE_LAYOUT_MARKER))
     for name, (role, password_name) in DSN_ROLES.items() if compose_layout else ():
         dsn = merged.get(name)
@@ -323,11 +317,7 @@ def doctor(project_root: Path) -> list[Finding]:
                 Finding(
                     "error",
                     f"{name} connects as {parts.username or '<none>'}, not {role}"
-                    + (
-                        " — the engine must not hold schema-changing rights"
-                        if role == "quant_app"
-                        else " — migrations need the role that owns the tables"
-                    ),
+                    " — the engine must not hold schema-changing rights",
                 )
             )
         if not password:

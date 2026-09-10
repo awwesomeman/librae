@@ -836,7 +836,6 @@ def test_remote_schema_path_matches_compose_source() -> None:
     assert 'STAGE="schema loading"' in script
     assert "Cloud deployment failed during ${STAGE}" in script
     assert 'rsync -az "${PROJECT_ROOT}/librae/db/timescale_init.sql"' in script
-    assert 'rsync -az "${PROJECT_ROOT}/librae/db/migrations/"' in script
     assert '"${PROJECT_ROOT}/.env.secrets.example"' in script
     assert '"${PROJECT_ROOT}/.credentials"' not in script
     assert "${REMOTE_DIR}/librae/db/timescale_init.sql" in script
