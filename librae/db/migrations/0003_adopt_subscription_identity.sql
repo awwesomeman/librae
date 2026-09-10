@@ -204,10 +204,12 @@ GROUP BY ef.symbol, ef.data_source, ef.timeframe, ef.instrument_type, ef.factor_
 
 ORDER BY table_name, symbol, factor_name;
 
--- Replay every privilege the view had, grant option included; the owner is
--- skipped because it holds everything implicitly. Then ensure the two roles
--- librae manages, which covers a view that had no ACL. Those two are guarded
--- because a restored database may not have the roles at all.
+-- Replay every table-level privilege the view had, grant option included; the
+-- owner is skipped because it holds everything implicitly. Column-level grants
+-- (attacl) are also dropped with the view and are deliberately not replayed.
+-- Then ensure the two roles librae manages, which covers a view that had no
+-- ACL. Those two are guarded because a restored database may not have the
+-- roles at all.
 DO $$
 DECLARE
     r RECORD;

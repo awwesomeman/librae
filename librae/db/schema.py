@@ -246,13 +246,12 @@ def _run_cli(command: str) -> int:
             stranded = _unbackfilled_ohlcv_rows(cur)
             if stranded:
                 print(
-                    "The schema migration succeeded and is not rolled back; rerunning "
-                    "migrate will not help. Next step: the ohlcv backfill in the adoption guide."
+                    "The schema is current; rerunning migrate will not clear this. "
+                    "Next step: the ohlcv backfill in the adoption guide."
                 )
                 print(_STRANDED_MESSAGE.format(count=stranded))
                 # Non-zero: the schema moved, but the data it describes is not
-                # yet readable, and the operator's next step is to start the
-                # engine. A green exit here would say the adoption finished.
+                # yet readable. A green exit here would say the adoption finished.
                 return 1
             return 0
         admin_status = inspect_schema(cur)

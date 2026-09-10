@@ -25,11 +25,13 @@ class FakeCursor:
         core_exists: bool = True,
         legacy_compatible: bool = True,
         execution_column: bool | None = None,
+        stranded: int = 0,
     ) -> None:
         self.revision = revision
         self.core_exists = core_exists
         self.legacy_compatible = legacy_compatible
         self.execution_column = execution_column
+        self.stranded = stranded
         self._result: list[tuple[object, ...]] = []
         self.executed: list[str] = []
 
@@ -67,7 +69,7 @@ class FakeCursor:
                 rows = [r for r in rows if r != ("backtest_runs", "run_id")]
             self._result = rows
         elif "count(*) FROM ohlcv WHERE calendar_id IS NULL" in query:
-            self._result = [(getattr(self, "stranded", 0),)]
+            self._result = [(self.stranded,)]
         elif query.startswith("SELECT revision FROM librae_schema_revision"):
             self._result = [] if self.revision is None else [(self.revision,)]
         elif "CREATE TABLE IF NOT EXISTS librae_schema_revision" in query:
@@ -179,9 +181,7 @@ def test_bootstrap_states_one_revision_everywhere_it_is_written() -> None:
 
 
 def _current_cursor(stranded: int) -> FakeCursor:
-    cursor = FakeCursor(revision=CURRENT_SCHEMA_REVISION)
-    cursor.stranded = stranded
-    return cursor
+    return FakeCursor(revision=CURRENT_SCHEMA_REVISION, stranded=stranded)
 
 
 def _connection(cursor: FakeCursor):
@@ -201,8 +201,7 @@ class TestOnlyTheCliGatesStrandedRows:
     def test_migrations_still_apply_while_rows_are_stranded(self) -> None:
         # apply_migrations verifies inside its own transaction, and 0003 always
         # leaves stranded rows: a data check there would roll every adoption back.
-        cursor = FakeCursor(revision=None, legacy_compatible=True)
-        cursor.stranded = 42
+        cursor = FakeCursor(revision=None, legacy_compatible=True, stranded=42)
 
         assert apply_migrations(cursor) == tuple(range(1, CURRENT_SCHEMA_REVISION + 1))
 
