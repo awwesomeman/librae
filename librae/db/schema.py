@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 _MIGRATION_FILES = {
     1: "0001_adopt_legacy_schema.sql",
     2: "0002_bind_execution_identity.sql",
+    3: "0003_adopt_subscription_identity.sql",
 }
 CURRENT_SCHEMA_REVISION = max(_MIGRATION_FILES)
 SchemaState = Literal[
@@ -23,13 +24,25 @@ SchemaState = Literal[
 # Revision 0 is the last unversioned schema shipped before the migration
 # contract.  These objects/columns are the durable execution boundary that
 # must be recognizable before it is safe to adopt an existing database.
+#
+# Identity only: a column a later release added is not part of recognizing a
+# database as Librae's.  Requiring one here refused a real production
+# database that predated it, leaving it unmigratable by the very tool meant
+# to adopt it.  Feature columns belong in _REVISION_MARKERS.
 _LEGACY_REQUIRED_COLUMNS = {
-    "backtest_runs": {"run_id", "config_hash", "primary_subscriptions"},
+    "backtest_runs": {"run_id", "config_hash"},
     "execution_runtime_state": {"state_key", "run_id", "config_hash", "state"},
     "broker_orders": {"state_key", "client_order_id", "run_id", "request"},
     "position_events": {"event_id", "run_id", "account_id"},
     "runtime_events": {"ts", "run_id", "event_type"},
 }
+
+# The column the newest migration adds, and the one the first adds.  "current"
+# looks for the newer rather than trusting a stamped number.
+_CURRENT_MARKER = ("ohlcv", "available_at")
+_LEGACY_MARKER = ("backtest_runs", "execution_identity")
+
+_INSPECTED_TABLES = sorted({*_LEGACY_REQUIRED_COLUMNS, _CURRENT_MARKER[0]})
 
 
 class _Cursor(Protocol):
@@ -65,7 +78,7 @@ def _schema_columns(cur: _Cursor) -> dict[str, set[str]]:
              FROM information_schema.columns
             WHERE table_schema = 'public'
               AND table_name = ANY(%s)""",
-        (list(_LEGACY_REQUIRED_COLUMNS),),
+        (_INSPECTED_TABLES,),
     )
     observed: dict[str, set[str]] = {}
     for table_name, column_name in cur.fetchall():
@@ -80,16 +93,17 @@ def _required_core_columns_are_present(observed: dict[str, set[str]]) -> bool:
     )
 
 
+def _has(observed: dict[str, set[str]], marker: tuple[str, str]) -> bool:
+    table, column = marker
+    return column in observed.get(table, set())
+
+
 def _legacy_schema_is_compatible(observed: dict[str, set[str]]) -> bool:
-    return _required_core_columns_are_present(
-        observed
-    ) and "execution_identity" not in observed.get("backtest_runs", set())
+    return _required_core_columns_are_present(observed) and not _has(observed, _LEGACY_MARKER)
 
 
 def _current_schema_is_compatible(observed: dict[str, set[str]]) -> bool:
-    return _required_core_columns_are_present(observed) and "execution_identity" in observed.get(
-        "backtest_runs", set()
-    )
+    return _required_core_columns_are_present(observed) and _has(observed, _CURRENT_MARKER)
 
 
 def inspect_schema(cur: _Cursor) -> SchemaStatus:
@@ -178,6 +192,29 @@ def apply_migrations(cur: _Cursor) -> tuple[int, ...]:
     return tuple(applied)
 
 
+_STRANDED_MESSAGE = (
+    "WARNING: {count} ohlcv row(s) have a null calendar_id. Reads filter on that "
+    "column, so those rows are invisible until scripts/backfill_ohlcv_identity.py runs."
+)
+
+
+def unbackfilled_ohlcv_rows(cur: _Cursor) -> int:
+    """Rows the reader cannot see because their session identity is null.
+
+    load_ohlcv filters on calendar_id, so a row whose value the expand
+    migration left null is invisible rather than merely incomplete. Reported
+    by preflight because the gap is silent everywhere else: the writer keeps
+    working, the schema reads as current, and only a query comes back short.
+    """
+    cur.execute("SELECT to_regclass('public.ohlcv')")
+    row = cur.fetchone()
+    if not (row and row[0] is not None):
+        return 0
+    cur.execute("SELECT count(*) FROM ohlcv WHERE calendar_id IS NULL")
+    result = cur.fetchone()
+    return int(result[0]) if result else 0
+
+
 def _describe(role: str, status: SchemaStatus) -> None:
     print(
         f"[{role}] schema state={status.state} revision={status.revision} "
@@ -200,9 +237,18 @@ def _run_cli(command: str) -> int:
                 f"schema revision {CURRENT_SCHEMA_REVISION} is current"
                 + (f"; applied {list(applied)}" if applied else "; no migrations required")
             )
+            # Said here rather than left to a later preflight: the operator's
+            # next step is to start the engine, and this gap does not announce
+            # itself — reads simply come back short.
+            stranded = unbackfilled_ohlcv_rows(cur)
+            if stranded:
+                print(_STRANDED_MESSAGE.format(count=stranded))
             return 0
         admin_status = inspect_schema(cur)
         _describe("admin", admin_status)
+        stranded = unbackfilled_ohlcv_rows(cur)
+        if stranded:
+            print(_STRANDED_MESSAGE.format(count=stranded))
 
     # The engine reads the schema as the application role, and
     # information_schema.columns is permission-filtered: a table the owner can
@@ -212,8 +258,8 @@ def _run_cli(command: str) -> int:
     application_dsn = os.getenv("TIMESCALE_DSN")
     if not application_dsn:
         print("TIMESCALE_DSN is not set; the application role's view was not checked")
-        return 0 if admin_status.current else 1
+        return 0 if admin_status.current and not stranded else 1
     with get_conn(application_dsn) as conn:
         application_status = inspect_schema(conn.cursor())
     _describe("application", application_status)
-    return 0 if admin_status.current and application_status.current else 1
+    return 0 if admin_status.current and application_status.current and not stranded else 1

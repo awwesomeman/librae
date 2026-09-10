@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from librae.db import schema as schema_module
 from librae.db.schema import (
+    _CURRENT_MARKER,
+    _LEGACY_MARKER,
     _LEGACY_REQUIRED_COLUMNS,
     CURRENT_SCHEMA_REVISION,
     apply_migrations,
@@ -46,14 +48,19 @@ class FakeCursor:
                 for table, columns in _LEGACY_REQUIRED_COLUMNS.items()
                 for column in sorted(columns)
             ]
-            has_execution_column = (
-                self.revision is not None and self.revision >= 2
-                if self.execution_column is None
-                else self.execution_column
+            applied = self.revision or 0
+            has_legacy_marker = (
+                applied >= 2 if self.execution_column is None else self.execution_column
             )
-            if has_execution_column:
-                rows.append(("backtest_runs", "execution_identity"))
-            self._result = rows if self.legacy_compatible else rows[:-1]
+            if has_legacy_marker:
+                rows.append(_LEGACY_MARKER)
+            if applied >= CURRENT_SCHEMA_REVISION:
+                rows.append(_CURRENT_MARKER)
+            if not self.legacy_compatible:
+                # Drop a fingerprint column: an unversioned schema this build
+                # cannot recognize at all.
+                rows = [r for r in rows if r != ("backtest_runs", "run_id")]
+            self._result = rows
         elif query.startswith("SELECT revision FROM librae_schema_revision"):
             self._result = [] if self.revision is None else [(self.revision,)]
         elif "CREATE TABLE IF NOT EXISTS librae_schema_revision" in query:
@@ -61,6 +68,8 @@ class FakeCursor:
             self._result = []
         elif "ADD COLUMN execution_identity JSONB" in query:
             self.revision = 2
+        elif "ADD COLUMN IF NOT EXISTS primary_subscriptions" in query:
+            self.revision = 3
             self._result = []
         else:
             self._result = []
@@ -79,11 +88,12 @@ def test_empty_database_requires_bootstrap() -> None:
     assert status.revision is None
 
 
-def test_known_unversioned_schema_has_one_supported_upgrade() -> None:
+def test_known_unversioned_schema_upgrades_through_every_revision() -> None:
     status = inspect_schema(FakeCursor(revision=None, legacy_compatible=True))
 
     assert status.state == "upgrade_required"
-    assert status.pending_revisions == (1, 2)
+    # Derived from the ladder: a revision bump should not need this edited.
+    assert status.pending_revisions == tuple(range(1, CURRENT_SCHEMA_REVISION + 1))
 
 
 def test_unknown_unversioned_schema_fails_closed() -> None:
@@ -96,15 +106,15 @@ def test_unknown_unversioned_schema_fails_closed() -> None:
 def test_supported_upgrade_and_repeated_execution() -> None:
     cursor = FakeCursor(revision=None, legacy_compatible=True)
 
-    assert apply_migrations(cursor) == (1, 2)
+    assert apply_migrations(cursor) == tuple(range(1, CURRENT_SCHEMA_REVISION + 1))
     assert cursor.revision == CURRENT_SCHEMA_REVISION
     assert apply_migrations(cursor) == ()
 
 
-def test_revision_one_applies_only_revision_two() -> None:
+def test_a_stamped_revision_applies_only_what_follows_it() -> None:
     cursor = FakeCursor(revision=1)
 
-    assert apply_migrations(cursor) == (2,)
+    assert apply_migrations(cursor) == tuple(range(2, CURRENT_SCHEMA_REVISION + 1))
     assert cursor.revision == CURRENT_SCHEMA_REVISION
 
 
