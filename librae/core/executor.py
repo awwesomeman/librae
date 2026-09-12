@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 # without free-text drift. Strategy-chosen closes may use any reason string.
 REASON_STOP_LOSS = "stop_loss"
 REASON_TAKE_PROFIT = "take_profit"
+# Reserved for the end-of-run liquidation: financing attribution reads it to
+# order that close after the final bar's accrual (FinancingLifecycleEvent).
 REASON_FORCE_CLOSE = "force_close"
 REASON_DRAWDOWN_BREACH = "drawdown_breach"
 REASON_LIQUIDATION = "liquidation"
