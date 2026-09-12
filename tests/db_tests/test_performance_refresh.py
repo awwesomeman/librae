@@ -269,6 +269,68 @@ def test_refresh_performance_attributes_funding_by_close_time() -> None:
     assert sum(trade.net_pnl for trade in trades) == pytest.approx(70.0)
 
 
+def test_refresh_performance_keeps_the_last_bar_financing_on_the_forced_close() -> None:
+    """The stored ``reason`` is what tells the replay that this close ran after
+    the last bar's accrual, exactly as the in-memory engine ordered it — the
+    two must agree or a run that attributes in memory fails once persisted."""
+    timestamps = pd.date_range(datetime(2026, 1, 1, tzinfo=UTC), periods=3, freq="h")
+    equity = pd.DataFrame({"_time": timestamps, "equity": [100.0, 100.0, 120.0]})
+    entry_at = timestamps[0]
+    closed = pd.DataFrame(
+        [
+            {
+                "_time": timestamps[2],
+                "symbol": "BTC/USDT:USDT",
+                "event_type": "close",
+                "reason": "force_close",
+                "realized_pnl": 0.0,
+                "commission": 0.0,
+                "slippage": 0.0,
+                "tax": 0.0,
+                "entry_commission": 0.0,
+                "entry_slippage": 0.0,
+                "entry_tax": 0.0,
+                "net_return": 0.0,
+                "fill_quantity": 2.0,
+                "remaining_quantity": 0.0,
+                "price": 100.0,
+                "entry_price": 100.0,
+                "notional": 200.0,
+                "entry_at": entry_at,
+            }
+        ]
+    )
+    funding = pd.DataFrame(
+        [
+            {
+                "_time": timestamps[2],
+                "symbol": "BTC/USDT:USDT",
+                "kind": "funding",
+                "side": "short",
+                "quantity": 2.0,
+                "mark_price": 100.0,
+                "multiplier": 1.0,
+                "rate": 0.01,
+                "cash_flow": 20.0,
+                "group_id": None,
+                "entry_at": entry_at,
+            }
+        ]
+    )
+    metrics = StrategyMetrics(total_return=0.2)
+
+    with (
+        patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
+        patch("librae.db.timescale_reader.load_position_events", return_value=closed),
+        patch("librae.db.timescale_reader.load_financing_cash_flows", return_value=funding),
+        patch("librae.core.metrics.compute_all", return_value=metrics) as compute,
+        patch("librae.db.timescale_writer.write_strategy_performance"),
+    ):
+        refresh_performance("run-1", "alpha", config=_config())
+
+    assert compute.call_args.kwargs["trade_pnls"][0].net_pnl == pytest.approx(20.0)
+
+
 def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:
     timestamps = pd.date_range(datetime(2026, 1, 1, tzinfo=UTC), periods=2, freq="h")
     equity = pd.DataFrame(

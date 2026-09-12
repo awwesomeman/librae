@@ -61,6 +61,7 @@ def _backtest_frame(
     funding_rates: list[float],
     *,
     mark_prices: list[float] | None = None,
+    rate_field: str = "funding_rate",
 ) -> pd.DataFrame:
     timestamps = pd.date_range("2026-01-01", periods=len(funding_rates), freq="h", tz="UTC")
     index = pd.MultiIndex.from_arrays(
@@ -74,7 +75,7 @@ def _backtest_frame(
             "low": 100.0,
             "close": 100.0,
             "volume": 1_000.0,
-            "funding_rate": funding_rates,
+            rate_field: funding_rates,
         },
         index=index,
     )
@@ -277,6 +278,48 @@ def test_backtest_metrics_assign_later_funding_only_to_remaining_quantity() -> N
     assert output.metrics.avg_trade_return == pytest.approx(-0.015)
 
 
+@pytest.mark.parametrize(
+    ("rate_field", "expected_financing"),
+    [("funding_rate", 40.0), ("borrow_rate", -40.0)],
+)
+def test_financing_on_the_final_bar_reaches_the_end_of_run_forced_close(
+    rate_field: str, expected_financing: float
+) -> None:
+    """A position held into the last bar did live through that bar's
+    settlement, so the forced liquidation is attributed after it — every bar
+    of a funding-arb run is a settlement, and refusing this blocked the whole
+    strategy. Funding and borrow share the accrual pass, so both get here.
+
+    The open bar's accrual pins the other direction: it still follows the fill
+    that created the position.
+    """
+    data = _backtest_frame([np.nan, 0.01, np.nan, np.nan, 0.01], rate_field=rate_field)
+    backtest = Backtest(
+        data,
+        _OpenOnce(side="short"),
+        initial_balance=10_000.0,
+        cost_model=_cost_model(),
+        data_source="test",
+    )
+    result = backtest.run()
+    output = backtest.build_output()
+
+    # 2 units * 100 * multiplier 10 * 1%, on the open bar and the last one.
+    assert [flow.cash_flow for flow in result.financing_cash_flows] == pytest.approx(
+        [expected_financing / 2] * 2
+    )
+    assert output.position_events[-1].reason == "force_close"
+    assert output.metrics.trades == 1
+    trade_pnls = _attribute_financing_to_trades(
+        result.trades,
+        [abs(trade.entry_price * trade.quantity * 10.0) for trade in result.trades],
+        result.position_events,
+        result.financing_cash_flows,
+    )
+    # Flat price and zero costs leave financing as the round-trip's whole PnL.
+    assert trade_pnls[0].net_pnl == pytest.approx(expected_financing)
+
+
 def test_partial_closes_split_funding_by_closed_quantity_not_double_count_it() -> None:
     """A partial close writes multiple TradeResults sharing one (symbol,
     entry_at). Funding accrued over that round-trip must be split across
@@ -437,10 +480,13 @@ def test_financing_after_a_full_close_is_refused_rather_than_dropped() -> None:
     """A flow can only accrue to quantity that is open, so one arriving after
     the position is flat has nowhere to land.
 
-    The engine cannot produce this today -- financing is computed after
-    execution, over the positions that survived the bar -- but the allocator
-    is loud about every other broken invariant, and silently discarding money
-    is the one failure that would not show up as a wrong number anywhere.
+    This is the intra-run close: it fills during the bar's execution, and the
+    accrual that follows covers only the positions that survived it, so a flow
+    landing here means the producer's ordering is broken. (The end-of-run
+    force close is the other way round, and says so -- see
+    ``after_bar_accrual``.) The allocator is loud about every other broken
+    invariant, and silently discarding money is the one failure that would not
+    show up as a wrong number anywhere.
     """
     entry_at = datetime(2026, 1, 1, tzinfo=UTC)
     exit_at = datetime(2026, 1, 1, 4, tzinfo=UTC)
@@ -465,6 +511,66 @@ def test_financing_after_a_full_close_is_refused_rather_than_dropped() -> None:
 
     with pytest.raises(ValueError, match="closed position"):
         attribute_financing_to_closes(events, cash_flows)
+
+
+def test_an_end_of_run_close_takes_the_financing_of_the_bar_it_closes_on() -> None:
+    entry_at = datetime(2026, 1, 1, tzinfo=UTC)
+    exit_at = datetime(2026, 1, 1, 4, tzinfo=UTC)
+    events = [
+        FinancingLifecycleEvent(entry_at, "PERP", entry_at, "open", 2.0, 2.0),
+        FinancingLifecycleEvent(
+            exit_at,
+            "PERP",
+            entry_at,
+            "close",
+            2.0,
+            0.0,
+            after_bar_accrual=True,
+        ),
+    ]
+    cash_flows = [
+        FinancingCashFlow(
+            ts=exit_at,
+            symbol="PERP",
+            side="short",
+            quantity=2.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=20.0,
+            group_id=None,
+            entry_at=entry_at,
+        )
+    ]
+
+    assert attribute_financing_to_closes(events, cash_flows) == pytest.approx([20.0])
+
+
+def test_an_open_precedes_financing_at_the_same_timestamp() -> None:
+    entry_at = datetime(2026, 1, 1, tzinfo=UTC)
+    exit_at = datetime(2026, 1, 1, 4, tzinfo=UTC)
+    events = [
+        FinancingLifecycleEvent(entry_at, "PERP", entry_at, "open", 2.0, 2.0),
+        FinancingLifecycleEvent(exit_at, "PERP", entry_at, "close", 2.0, 0.0),
+    ]
+    cash_flows = [
+        FinancingCashFlow(
+            ts=entry_at,
+            symbol="PERP",
+            side="short",
+            quantity=2.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=20.0,
+            group_id=None,
+            entry_at=entry_at,
+        )
+    ]
+
+    # The balance is opened by the fill, so the flow lands on it rather than
+    # on a fresh balance the open would then contradict.
+    assert attribute_financing_to_closes(events, cash_flows) == pytest.approx([20.0])
 
 
 def test_financing_pool_tracks_scale_in_and_same_timestamp_close_order() -> None:
