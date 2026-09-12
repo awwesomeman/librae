@@ -30,6 +30,15 @@ the code simpler and easier to maintain.
   external migration or removal. Never silently default a missing field from
   an older shape.
 
+Breaking is allowed; leaving it unannounced is not. A change that makes
+previously accepted input fail — a config that ran, a public call, a persisted
+shape — or that changes what a consumer gets back is a breaking change, and
+carries `!` in the commit subject plus a `BREAKING CHANGE:` footer naming the
+contract and what the operator changes it to. Downstreams pin commits, so the
+footers between two pins are the release notes they read; rewriting a squash
+message at merge is the point to ask whether the change rejects input that used
+to run.
+
 After either gate, compatibility, deprecation, and migration requirements must
 be defined explicitly before further breaking changes.
 
