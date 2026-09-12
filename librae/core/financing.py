@@ -49,7 +49,14 @@ FinancingKind = Literal["funding", "borrow"]
 
 @dataclass(frozen=True, slots=True)
 class FinancingLifecycleEvent:
-    """Quantity-changing position event used for financing attribution."""
+    """Quantity-changing position event used for financing attribution.
+
+    ``after_bar_accrual`` is the producer stating the order it actually ran
+    this event in, because a timestamp alone cannot: a fill and the accrual
+    over what survived it share the bar's timestamp. It is False for every
+    fill the bar loop executes (execution, then accrual) and True for the
+    end-of-run force close, which runs after the final bar's accrual.
+    """
 
     ts: datetime
     symbol: str
@@ -57,6 +64,7 @@ class FinancingLifecycleEvent:
     event_type: PositionEventType
     fill_quantity: float
     remaining_quantity: float
+    after_bar_accrual: bool = False
 
 
 @dataclass(slots=True)
@@ -108,6 +116,12 @@ class FinancingCashFlow:
     kind: FinancingKind = "funding"
 
 
+# Order of same-timestamp items on the attribution timeline.
+_BEFORE_ACCRUAL = 0
+_ACCRUAL = 1
+_AFTER_ACCRUAL = 2
+
+
 def attribute_financing_to_closes(
     position_events: Sequence[FinancingLifecycleEvent],
     cash_flows: Sequence[FinancingCashFlow],
@@ -117,8 +131,11 @@ def attribute_financing_to_closes(
     Financing remains attached to the quantity that is open when it accrues.
     A partial close releases the same fraction of the position's accumulated
     balance that the fill removes, matching Librae's average-cost position
-    accounting. Position events precede financing at an equal timestamp,
-    which mirrors the engine's execution-then-accrual cycle.
+    accounting. At an equal timestamp the order comes from the producer, not
+    from a rule this function invents: an event runs before that timestamp's
+    financing unless it is flagged ``after_bar_accrual``, which mirrors the
+    engine's execution-then-accrual cycle and the end-of-run force close that
+    follows the final bar's accrual.
     """
     close_event_indexes = [
         index
@@ -136,15 +153,18 @@ def attribute_financing_to_closes(
     # the one that would not surface as a wrong number anywhere.
     closed_keys: set[tuple[str, datetime]] = set()
 
-    timeline = [(event.ts, 0, index, event) for index, event in enumerate(position_events)]
+    timeline = [
+        (event.ts, _AFTER_ACCRUAL if event.after_bar_accrual else _BEFORE_ACCRUAL, index, event)
+        for index, event in enumerate(position_events)
+    ]
     timeline.extend(
-        (cash_flow.ts, 1, index, cash_flow) for index, cash_flow in enumerate(cash_flows)
+        (cash_flow.ts, _ACCRUAL, index, cash_flow) for index, cash_flow in enumerate(cash_flows)
     )
     timeline.sort(key=lambda item: (item[0], item[1], item[2]))
 
     for _, item_type, item_index, item in timeline:
         key = (item.symbol, item.entry_at)
-        if item_type == 1:
+        if item_type == _ACCRUAL:
             cash_flow = item
             if cash_flow.quantity <= EPSILON:
                 raise ValueError("financing cash flow quantity must be positive")

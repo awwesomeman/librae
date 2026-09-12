@@ -983,6 +983,9 @@ def _attribute_financing_to_trades(
             event_type=event.event_type,
             fill_quantity=event.fill_quantity,
             remaining_quantity=event.remaining_quantity,
+            # The bar loop accrues over the positions that survived execution;
+            # only the end-of-run liquidation runs after that accrual.
+            after_bar_accrual=event.reason == REASON_FORCE_CLOSE,
         )
         for event in position_events
         if event.entry_at is not None

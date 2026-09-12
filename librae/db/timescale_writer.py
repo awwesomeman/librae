@@ -1398,7 +1398,7 @@ def refresh_performance(
     Called after each trade close in sim mode to keep Grafana KPIs up to date.
     """
     from librae.core import EPSILON
-    from librae.core.executor import TradePnL
+    from librae.core.executor import REASON_FORCE_CLOSE, TradePnL
     from librae.core.financing import (
         FinancingCashFlow,
         FinancingLifecycleEvent,
@@ -1478,6 +1478,10 @@ def refresh_performance(
                 event_type=row["event_type"],
                 fill_quantity=float(row["fill_quantity"]),
                 remaining_quantity=float(row["remaining_quantity"]),
+                # Same ordering the engine applies in memory, read back off the
+                # stored reason — otherwise a run that attributes in memory
+                # fails once persisted.
+                after_bar_accrual=row.get("reason") == REASON_FORCE_CLOSE,
             )
             for row in event_rows
         ]
