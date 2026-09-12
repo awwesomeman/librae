@@ -320,6 +320,39 @@ def test_financing_on_the_final_bar_reaches_the_end_of_run_forced_close(
     assert trade_pnls[0].net_pnl == pytest.approx(expected_financing)
 
 
+def test_a_liquidity_capped_terminal_close_releases_its_share_of_the_last_accrual() -> None:
+    """The last bar's liquidity budget can absorb only part of the position,
+    and there is no later bar to retry on, so the end-of-run liquidation
+    leaves a residual. That partial close is ordered the same way as a full
+    one — after the accrual — and releases its fraction of a balance that
+    includes it."""
+    data = _backtest_frame([np.nan, 0.01, np.nan, np.nan, 0.01])
+    # Default participation cap is 10% of bar volume: 1 of the 2 units held.
+    data.loc[data.index[-1], "volume"] = 10.0
+    backtest = Backtest(
+        data,
+        _OpenOnce(side="short"),
+        initial_balance=10_000.0,
+        cost_model=_cost_model(),
+        data_source="test",
+    )
+    result = backtest.run()
+    backtest.build_output()
+
+    terminal_event = result.position_events[-1]
+    assert (terminal_event.event_type, terminal_event.reason) == ("reduce", "force_close")
+    assert terminal_event.remaining_quantity == pytest.approx(1.0)
+    trade_pnls = _attribute_financing_to_trades(
+        result.trades,
+        [abs(trade.entry_price * trade.quantity * 10.0) for trade in result.trades],
+        result.position_events,
+        result.financing_cash_flows,
+    )
+    # Both accruals (20 each) are in the balance when half the position is
+    # closed, so the closed half takes 20 and the residual keeps 20.
+    assert trade_pnls[0].net_pnl == pytest.approx(20.0)
+
+
 def test_partial_closes_split_funding_by_closed_quantity_not_double_count_it() -> None:
     """A partial close writes multiple TradeResults sharing one (symbol,
     entry_at). Funding accrued over that round-trip must be split across
@@ -544,6 +577,56 @@ def test_an_end_of_run_close_takes_the_financing_of_the_bar_it_closes_on() -> No
     ]
 
     assert attribute_financing_to_closes(events, cash_flows) == pytest.approx([20.0])
+
+
+def test_a_residual_leaving_terminal_close_splits_the_accrual_it_follows() -> None:
+    entry_at = datetime(2026, 1, 1, tzinfo=UTC)
+    capped_exit = datetime(2026, 1, 1, 4, tzinfo=UTC)
+    residual_accrual = datetime(2026, 1, 1, 5, tzinfo=UTC)
+    residual_exit = datetime(2026, 1, 1, 6, tzinfo=UTC)
+    events = [
+        FinancingLifecycleEvent(entry_at, "PERP", entry_at, "open", 2.0, 2.0),
+        FinancingLifecycleEvent(
+            capped_exit,
+            "PERP",
+            entry_at,
+            "reduce",
+            1.0,
+            1.0,
+            after_bar_accrual=True,
+        ),
+        FinancingLifecycleEvent(residual_exit, "PERP", entry_at, "close", 1.0, 0.0),
+    ]
+    cash_flows = [
+        FinancingCashFlow(
+            ts=capped_exit,
+            symbol="PERP",
+            side="short",
+            quantity=2.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=20.0,
+            group_id=None,
+            entry_at=entry_at,
+        ),
+        FinancingCashFlow(
+            ts=residual_accrual,
+            symbol="PERP",
+            side="short",
+            quantity=1.0,
+            mark_price=100.0,
+            multiplier=1.0,
+            rate=0.01,
+            cash_flow=10.0,
+            group_id=None,
+            entry_at=entry_at,
+        ),
+    ]
+
+    # Half the position is closed against a balance that already holds the
+    # accrual, and the residual keeps the other half plus what it earns after.
+    assert attribute_financing_to_closes(events, cash_flows) == pytest.approx([10.0, 20.0])
 
 
 def test_an_open_precedes_financing_at_the_same_timestamp() -> None:
