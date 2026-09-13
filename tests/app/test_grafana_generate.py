@@ -522,7 +522,9 @@ _CAST = re.compile(r"::\s*\w+")
 _CALL = re.compile(r"\b[A-Za-z_]\w*\s*\(")
 _NAMED_ARG = re.compile(r"\b\w+\s*=>")
 _BARE_ALIAS = re.compile(r"\bAS\s+(\w+)", re.IGNORECASE)
-_TABLE_REF = re.compile(r"\b(?:FROM|JOIN)\s+(\w+)(?:\s+(\w+))?", re.IGNORECASE)
+# EXTRACT(EPOCH FROM ...) — that FROM introduces no table, and reading it as
+# one makes a single-table target look multi-table and skip itself silently.
+_TABLE_REF = re.compile(r"\b(?<!EPOCH\s)(?:FROM|JOIN)\s+(\w+)(?:\s+(\w+))?", re.IGNORECASE)
 _QUALIFIED = re.compile(r"\b\w+\.(\w+)\b")
 _WORD = re.compile(r"\b[A-Za-z_]\w*\b")
 
