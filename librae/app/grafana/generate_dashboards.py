@@ -755,7 +755,7 @@ BASE_PANELS_DEF: list[dict] = [
                 ' ROUND(fill_quantity::numeric,4) AS "Quantity",'
                 ' ROUND(price::numeric,2) AS "Trade Price",'
                 ' ROUND(cash_flow::numeric,2) AS "Cash Flow",'
-                ' ROUND(pnl::numeric,2) AS "P&L",'
+                ' ROUND(realized_pnl::numeric,2) AS "P&L",'
                 ' ROUND(net_return::numeric,2) AS "Notional Return",'
                 ' ROUND(margin_roi::numeric,2) AS "Margin Return",'
                 ' margin_mode AS "Margin Mode",'
