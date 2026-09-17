@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +19,12 @@ from librae.core.utils import make_event_id
 from tests.signal_outcome_contract import (
     SIGNAL_OUTCOME_LONG_FRACTIONS,
     make_signal_outcome_contract_ohlcv,
+)
+from tests.sql_schema_check import (
+    INIT_SQL,
+    columns_by_table,
+    single_table,
+    unknown_columns,
 )
 
 DASHBOARD_DIR = (
@@ -497,75 +502,9 @@ class TestRenderSignalMonitor:
         assert np.allclose(mae, SIGNAL_OUTCOME_LONG_FRACTIONS["mae"])
 
 
-INIT_SQL = Path(__file__).resolve().parents[2] / "librae" / "db" / "timescale_init.sql"
-
-_CREATE_TABLE = re.compile(
-    r"CREATE TABLE IF NOT EXISTS\s+(\w+)\s*\((.*?)\n\);", re.DOTALL | re.IGNORECASE
-)
-_COLUMN = re.compile(r"^\s{4}(\w+)\s+\S")
-_NOT_A_COLUMN = frozenset({"constraint", "primary", "unique", "foreign", "check"})
-
-# Everything a bare word in a target can be other than a column reference.
-_SQL_KEYWORDS = """
-    all and as asc between by case cross current desc distinct else end epoch exists false
-    filter following from full group having in inner intersect interval is join lateral left
-    like limit not null offset on or order outer over partition preceding right rows select
-    then true union unnest using when where window with
-"""
-_SQL_WORDS = frozenset(_SQL_KEYWORDS.split())
-
-_STRING = re.compile(r"'[^']*'")
-_LABELLED_OUTPUT = re.compile(r"\bAS\s+\"[^\"]*\"", re.IGNORECASE)
-_QUOTED = re.compile(r"\"[^\"]*\"")
-_GRAFANA = re.compile(r"\$\{[^}]*\}|\$\w+")
-_CAST = re.compile(r"::\s*\w+")
-_CALL = re.compile(r"\b[A-Za-z_]\w*\s*\(")
-_NAMED_ARG = re.compile(r"\b\w+\s*=>")
-_BARE_ALIAS = re.compile(r"\bAS\s+(\w+)", re.IGNORECASE)
-# EXTRACT(EPOCH FROM ...) — that FROM introduces no table, and reading it as
-# one makes a single-table target look multi-table and skip itself silently.
-_TABLE_REF = re.compile(r"\b(?<!EPOCH\s)(?:FROM|JOIN)\s+(\w+)(?:\s+(\w+))?", re.IGNORECASE)
-_QUALIFIED = re.compile(r"\b\w+\.(\w+)\b")
-_WORD = re.compile(r"\b[A-Za-z_]\w*\b")
-
-
-def _columns_by_table() -> dict[str, set[str]]:
-    """Column names of every CREATE TABLE in the reference schema."""
-    sql = INIT_SQL.read_text(encoding="utf-8")
-    return {
-        name: {
-            match.group(1)
-            for line in body.splitlines()
-            if (match := _COLUMN.match(line)) and match.group(1).lower() not in _NOT_A_COLUMN
-        }
-        for name, body in _CREATE_TABLE.findall(sql)
-    }
-
-
-def _strip_non_columns(sql: str) -> str:
-    """Drop everything that is not a column or table reference."""
-    sql = _STRING.sub(" ", sql)  # literals, including '${run_id}'
-    sql = _LABELLED_OUTPUT.sub(" ", sql)  # AS "P&L" — an output label, not a column
-    sql = _QUOTED.sub(" ", sql)
-    sql = _GRAFANA.sub(" ", sql)  # ${account_id:sqlstring}, $__timeFilter, $n
-    sql = _CAST.sub(" ", sql)  # ::numeric
-    sql = _CALL.sub("(", sql)  # an identifier before "(" is a function
-    sql = _NAMED_ARG.sub(" ", sql)  # make_interval(secs => ...)
-    # A bare output alias (AS status) is not a column; a keyword after AS is
-    # only ever the remains of a label stripped above, and must survive.
-    return _BARE_ALIAS.sub(
-        lambda m: " " if m.group(1).lower() not in _SQL_WORDS else m.group(0), sql
-    )
-
-
 def _single_table_targets() -> list[tuple[str, str, str]]:
-    """(panel title, table, stripped SQL) for every unambiguous target.
-
-    Unambiguous means one known table in FROM/JOIN, no CTE and no nested
-    SELECT, so a bare identifier can only be a column of that one table.
-    Every other shape is skipped rather than guessed at.
-    """
-    schema = _columns_by_table()
+    """(panel title, table, stripped SQL) for every unambiguous target."""
+    schema = columns_by_table()
     targets = []
     for dashboard in (
         render_unified_dashboard(),
@@ -574,18 +513,10 @@ def _single_table_targets() -> list[tuple[str, str, str]]:
     ):
         for panel in dashboard["panels"]:
             for target in panel.get("targets", []):
-                sql = _strip_non_columns(target["rawSql"])
-                upper = sql.upper()
-                if upper.count("SELECT") != 1 or "WITH" in upper:
-                    continue
-                refs = _TABLE_REF.findall(sql)
-                tables = {table for table, _ in refs}
-                if len(tables) != 1 or not tables <= schema.keys():
-                    continue
-                for _, alias in refs:
-                    if alias and alias.lower() not in _SQL_WORDS:
-                        sql = re.sub(rf"\b{re.escape(alias)}\b", " ", sql)
-                targets.append((panel["title"], tables.pop(), sql))
+                resolved = single_table(target["rawSql"], schema)
+                if resolved is not None:
+                    table, sql = resolved
+                    targets.append((panel["title"], table, sql))
     return targets
 
 
@@ -603,18 +534,17 @@ class TestTargetSqlMatchesTheSchema:
         table's column set — which would satisfy a column from the wrong
         table with the check below still passing."""
         sql = INIT_SQL.read_text(encoding="utf-8")
-        tables = _columns_by_table()
+        tables = columns_by_table()
 
         assert len(tables) == sql.count("CREATE TABLE")
         assert "realized_pnl" in tables["position_events"]
 
     def test_every_single_table_target_selects_columns_that_exist(self) -> None:
-        schema = _columns_by_table()
+        schema = columns_by_table()
         unknown = [
             (title, table, word)
             for title, table, sql in _single_table_targets()
-            for word in _WORD.findall(_QUALIFIED.sub(r"\1", sql))
-            if word.lower() not in _SQL_WORDS and word != table and word not in schema[table]
+            for word in unknown_columns(table, sql, schema)
         ]
 
         assert unknown == []

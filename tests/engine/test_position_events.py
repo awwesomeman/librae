@@ -1,7 +1,7 @@
 """Tests for PositionEvent generation in execute_order_intents and engine.
 
 Verifies open/add/reduce/close events have correct
-entry_price, remaining_quantity, pnl, net_return, and reason.
+entry_price, remaining_quantity, realized_pnl, net_return, and reason.
 """
 
 from __future__ import annotations
