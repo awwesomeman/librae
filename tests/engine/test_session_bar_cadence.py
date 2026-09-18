@@ -5,6 +5,10 @@ decide bucket geometry for themselves, so a series librae produced could be
 rejected by librae. These tests run the whole path end to end; the calendars
 with more than one segment per session are the ones that used to fail, and
 ``XTAIFEX_1725`` is here because it is the one that never did.
+
+Whether the calendar describes the geometry at all is a per-series question
+answered by ``bucket_geometry_is_known``, so every matrix here runs in both
+session modes.
 """
 
 from __future__ import annotations
@@ -20,6 +24,29 @@ from librae.core.utils import interval_to_timedelta
 CALENDARS = ("XTAIFEX", "XTAIFEX_1725", "XTKS", "XHKG", "XSHG", "XNYS", "24/7")
 TIMEFRAMES = ("M15", "H1", "H2", "H3", "H4", "H6", "D1")
 SYMBOL = "SYM"
+
+# Under session_mode="extended" a regular-session calendar describes none of
+# the feed's geometry, so these series fall back to the nominal interval and
+# the truncated final bucket of a segment still reads as an overlap. #249
+# teaches bucket_geometry_is_known that these calendars model their own full
+# day; when it lands, this set empties and the assertions below must be
+# updated deliberately rather than quietly passing.
+REJECTED_UNDER_EXTENDED = frozenset(
+    {
+        ("XTAIFEX", "H4"),
+        ("XTAIFEX", "H6"),
+        ("XTKS", "H2"),
+        ("XTKS", "H4"),
+        ("XTKS", "H6"),
+        ("XHKG", "H2"),
+        ("XHKG", "H4"),
+        ("XHKG", "H6"),
+        # XSHG H2 is absent on purpose: both its segments are exactly two
+        # hours, so no H2 bucket is ever truncated and the nominal rule holds.
+        ("XSHG", "H4"),
+        ("XSHG", "H6"),
+    }
+)
 
 
 def _session_minutes(calendar_id: str, sessions: int = 12) -> pd.DatetimeIndex:
@@ -68,18 +95,42 @@ def _panel(index: pd.DatetimeIndex) -> pd.DataFrame:
     return frame
 
 
-def _load(index: pd.DatetimeIndex, timeframe: str, calendar_id: str) -> str:
-    return _resolve_data_timeframe(_panel(index), timeframe, {SYMBOL: calendar_id})
+def _load(index: pd.DatetimeIndex, timeframe: str, calendar_id: str, session_mode: str) -> str:
+    return _resolve_data_timeframe(
+        _panel(index),
+        timeframe,
+        {SYMBOL: calendar_id},
+        session_mode=session_mode,
+    )
 
 
 @pytest.mark.parametrize("calendar_id", CALENDARS)
 @pytest.mark.parametrize("timeframe", TIMEFRAMES)
-def test_resampled_bars_pass_both_cadence_gates(calendar_id: str, timeframe: str) -> None:
+def test_resampled_bars_pass_both_cadence_gates_under_regular_sessions(
+    calendar_id: str, timeframe: str
+) -> None:
     resampled = _resampled(calendar_id, timeframe)
 
-    validate_bar_cadence(resampled.index, timeframe, calendar_id)
+    validate_bar_cadence(resampled.index, timeframe, calendar_id, session_mode="regular")
 
-    assert _load(resampled.index, timeframe, calendar_id) == timeframe
+    assert _load(resampled.index, timeframe, calendar_id, "regular") == timeframe
+
+
+@pytest.mark.parametrize("calendar_id", CALENDARS)
+@pytest.mark.parametrize("timeframe", TIMEFRAMES)
+def test_extended_sessions_keep_the_nominal_rule_until_249(
+    calendar_id: str, timeframe: str
+) -> None:
+    """Calendar-sized bars are unaffected; intraday ones fall back until #249."""
+    resampled = _resampled(calendar_id, timeframe)
+
+    if (calendar_id, timeframe) in REJECTED_UNDER_EXTENDED:
+        with pytest.raises(ValueError, match=f"overlap timeframe={timeframe}"):
+            validate_bar_cadence(resampled.index, timeframe, calendar_id, session_mode="extended")
+        return
+
+    validate_bar_cadence(resampled.index, timeframe, calendar_id, session_mode="extended")
+    assert _load(resampled.index, timeframe, calendar_id, "extended") == timeframe
 
 
 def test_resampled_taifex_hours_run_through_a_real_backtest() -> None:
@@ -97,6 +148,7 @@ def test_resampled_taifex_hours_run_through_a_real_backtest() -> None:
         timeframe="H1",
         market="tw_futures",
         data_source="test",
+        session_mode="regular",
         account=AccountConfig(currency="TWD", initial_cash=1_000_000.0),
         symbol_cost_overrides={SYMBOL: {"multiplier": 1.0}},
         instrument_overrides={
@@ -126,11 +178,43 @@ def test_resampled_taifex_hours_run_through_a_real_backtest() -> None:
 
 def test_truncated_final_bucket_is_cadence_not_overlap() -> None:
     """The gap the fix is about: XTAIFEX H4 leaves 2h15m before the next
-    segment opens, which the old fixed-duration rule read as an overlap."""
+    segment opens, which the fixed-duration rule reads as an overlap."""
     index = _resampled("XTAIFEX", "H4").index
     gaps = pd.Series(index).diff().dropna()
 
     assert bool((gaps < pd.Timedelta(hours=4)).any())
+
+
+def _utc_hourly_xnys_feed() -> pd.DatetimeIndex:
+    """What IB returns for a US equity with ``useRTH=0``: whole UTC hours,
+    which are not XNYS buckets — that session opens at 14:30Z."""
+    return pd.DatetimeIndex(
+        [pd.Timestamp("2024-06-03T09:00Z") + pd.Timedelta(hours=hour) for hour in range(12)]
+    )
+
+
+def test_extended_hours_feed_off_the_session_phase_is_accepted() -> None:
+    index = _utc_hourly_xnys_feed()
+
+    validate_bar_cadence(index, "H1", "XNYS", session_mode="extended")
+
+    assert _load(index, "H1", "XNYS", "extended") == "H1"
+
+
+def test_same_feed_declared_regular_is_rejected_off_boundary() -> None:
+    index = _utc_hourly_xnys_feed()
+
+    with pytest.raises(ValueError, match="outside the XNYS trading session"):
+        validate_bar_cadence(index, "H1", "XNYS", session_mode="regular")
+
+
+def test_regular_feed_inside_the_session_must_sit_on_a_bucket_boundary() -> None:
+    index = pd.DatetimeIndex(
+        [pd.Timestamp("2024-06-03T15:00Z") + pd.Timedelta(hours=hour) for hour in range(5)]
+    )
+
+    with pytest.raises(ValueError, match="not the canonical timeframe=H1"):
+        validate_bar_cadence(index, "H1", "XNYS", session_mode="regular")
 
 
 @pytest.mark.parametrize("calendar_id", CALENDARS)
@@ -138,10 +222,11 @@ def test_overlapping_bar_is_rejected(calendar_id: str) -> None:
     index = _resampled(calendar_id, "H4").index
     overlapping = index.insert(1, index[0] + pd.Timedelta(hours=1)).sort_values()
 
-    with pytest.raises(ValueError, match="overlap timeframe=H4"):
-        validate_bar_cadence(overlapping, "H4", calendar_id)
-    with pytest.raises(ValueError, match="overlap timeframe=H4"):
-        _load(overlapping, "H4", calendar_id)
+    for session_mode in ("regular", "extended"):
+        with pytest.raises(ValueError, match="overlap timeframe=H4"):
+            validate_bar_cadence(overlapping, "H4", calendar_id, session_mode=session_mode)
+        with pytest.raises(ValueError, match="overlap timeframe=H4"):
+            _load(overlapping, "H4", calendar_id, session_mode)
 
 
 @pytest.mark.parametrize("calendar_id", CALENDARS)
@@ -150,6 +235,6 @@ def test_bar_starting_off_its_bucket_boundary_is_rejected(calendar_id: str) -> N
     shifted = index.delete(0).insert(0, index[0] + pd.Timedelta(minutes=15))
 
     with pytest.raises(ValueError, match="not the canonical timeframe=H4"):
-        validate_bar_cadence(shifted, "H4", calendar_id)
+        validate_bar_cadence(shifted, "H4", calendar_id, session_mode="regular")
     with pytest.raises(ValueError, match="not the canonical timeframe=H4"):
-        _load(shifted, "H4", calendar_id)
+        _load(shifted, "H4", calendar_id, "regular")

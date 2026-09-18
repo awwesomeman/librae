@@ -859,6 +859,7 @@ def _resolve_data_timeframe(
     configured_timeframe: str | None,
     calendar_ids: dict[str, str | None],
     *,
+    session_mode: MarketDataSessionMode,
     authoritative_timeframe: bool = False,
 ) -> str:
     """Validate one coherent bar interval, preferring declared exact identity."""
@@ -953,6 +954,7 @@ def _resolve_data_timeframe(
                 index,
                 data_timeframe,
                 calendar_id,
+                session_mode=session_mode,
                 context=f"data symbol {symbol!r}",
             )
             calendar_validated.add(symbol)
@@ -969,6 +971,7 @@ def _resolve_data_timeframe(
                 index,
                 data_timeframe,
                 calendar_id,
+                session_mode=session_mode,
                 context=f"data symbol {symbol!r}",
             )
             continue
@@ -1467,6 +1470,7 @@ class Backtest:
             self._data,
             configured_timeframe,
             self._calendar_ids,
+            session_mode=self._session_mode,
             authoritative_timeframe=direct_mixed,
         )
         if self._primary_subscriptions and any(

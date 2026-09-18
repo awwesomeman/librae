@@ -115,6 +115,20 @@ def session_label(value: object, calendar_id: str) -> date:
         ) from exc
 
 
+def bucket_geometry_is_known(*, calendar_id: str, session_mode: str) -> bool:
+    """Whether this calendar describes bucket geometry for this session mode.
+
+    A regular-session calendar says nothing about where an after-hours bar's
+    bucket opens or closes, so a feed carrying those hours has no geometry to
+    be held to and the nominal interval is all there is. ``24/7`` has no
+    outside to extend into, so it always describes its own.
+
+    One place on purpose: teaching this that a calendar models its own full
+    day (#249) has to move every consumer at once.
+    """
+    return session_mode == "regular" or calendar_id == ALWAYS_OPEN_CALENDAR
+
+
 def validate_calendar_id(calendar_id: str) -> None:
     """Resolve a calendar identifier without requiring an in-session timestamp."""
     if calendar_id != ALWAYS_OPEN_CALENDAR:

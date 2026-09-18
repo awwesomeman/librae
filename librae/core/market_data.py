@@ -12,8 +12,8 @@ import pandas as pd
 
 from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
-    ALWAYS_OPEN_CALENDAR,
     bucket_bounds,
+    bucket_geometry_is_known,
     period_close,
     period_start,
     session_labels,
@@ -442,16 +442,16 @@ def _completion_floor(
 ) -> pd.Timestamp:
     timeframe = subscription.timeframe
     calendar_sized = timeframe.startswith(("D", "W", "MN"))
-    extended_calendar = (
-        subscription.session_mode == "extended" and subscription.calendar_id != ALWAYS_OPEN_CALENDAR
+    geometry_known = bucket_geometry_is_known(
+        calendar_id=subscription.calendar_id,
+        session_mode=subscription.session_mode,
     )
-    if calendar_sized and extended_calendar and not allow_extended_calendar_inference:
+    if calendar_sized and not geometry_known and not allow_extended_calendar_inference:
         raise ValueError(
             "available_at is required for extended-session calendar bars because "
             f"calendar_id={subscription.calendar_id!r} does not define their close"
         )
-    if not calendar_sized and extended_calendar:
-        # A regular-session calendar cannot validate after-hours bucket geometry.
+    if not calendar_sized and not geometry_known:
         # The nominal fixed duration is conservative for a shortened final bucket.
         return timestamp + interval_to_timedelta(timeframe)
     try:
@@ -475,28 +475,44 @@ def validate_bar_cadence(
     timeframe: str,
     calendar_id: str,
     *,
+    session_mode: MarketDataSessionMode,
     context: str = "bar data",
 ) -> None:
     """Validate non-overlap plus per-series cadence under the calendar.
 
-    Intraday bars are held to the bucket geometry ``bucket_bounds`` defines:
-    each one starts where its segment says a bucket starts, and never before
-    the previous bucket ended. The end is the calendar's, not a nominal
-    duration, so the short gap a truncated final bucket leaves before the next
-    segment is cadence rather than an overlap. Bars the calendar cannot place
-    — an off-hours print under an extended-session feed — keep the nominal
-    duration as their only bound, since no bucket geometry exists for them.
+    Whether the calendar describes this series' geometry at all is one
+    question, asked once per series rather than once per bar: an
+    extended-session feed carries hours the calendar says nothing about, and
+    holding part of it to segment geometry and the rest to a nominal duration
+    would judge one feed by two rules.
+
+    Where the geometry is known, intraday bars are held to the buckets
+    ``bucket_bounds`` defines: each starts where its segment says a bucket
+    starts, and never before the previous bucket ended. That end is the
+    calendar's, so the short gap a truncated final bucket leaves before the
+    next segment is cadence rather than an overlap. Where it is not, two
+    observations still cannot overlap by the nominal interval, and the phase
+    stays the series' own.
+
     Calendar-sized bars use the first observation as that series' phase.
     Missing whole bars are allowed.
     """
     canonical = to_canonical(timeframe)
     if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
         interval = interval_to_timedelta(canonical)
+        if not bucket_geometry_is_known(calendar_id=calendar_id, session_mode=session_mode):
+            diffs = pd.Series(timestamps).diff().dropna()
+            if bool((diffs < interval).any()):
+                raise ValueError(f"{context} timestamps overlap timeframe={canonical}")
+            return
         starts, closes = bucket_bounds(timestamps, canonical, calendar_id)
-        unplaced = starts.isna()
+        unplaced = np.asarray(starts.isna())
         if unplaced.any():
-            starts = starts.where(~unplaced, timestamps)
-            closes = closes.where(~unplaced, timestamps + interval)
+            first = pd.Timestamp(timestamps[int(np.flatnonzero(unplaced)[0])])
+            raise ValueError(
+                f"{context} timestamp {first.isoformat()} is outside "
+                f"the {calendar_id} trading session"
+            )
         # Overlap first: a bar landing inside the previous bucket is also off
         # its own boundary, and overlap is the more precise diagnosis.
         if bool((starts[1:] < closes[:-1]).any()):
@@ -551,6 +567,7 @@ def normalize_bar_times(
         normalized_ts,
         subscription.timeframe,
         subscription.calendar_id,
+        session_mode=subscription.session_mode,
         context=f"{subscription.symbol!r} subscription",
     )
     provided = available_at is not None
