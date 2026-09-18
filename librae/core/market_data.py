@@ -12,10 +12,10 @@ import pandas as pd
 
 from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
-    bucket_bounds,
     bucket_geometry_is_known,
     period_close,
     period_start,
+    segment_closes,
     session_labels,
     session_ordinals,
 )
@@ -478,24 +478,26 @@ def validate_bar_cadence(
     session_mode: MarketDataSessionMode,
     context: str = "bar data",
 ) -> None:
-    """Validate non-overlap plus per-series cadence under the calendar.
+    """Validate non-overlap plus calendar-sized per-series cadence.
 
-    Whether the calendar describes this series' geometry at all is one
+    Intraday bars need not share a provider-independent phase, but two
+    observations of one subscription cannot overlap. A bar overlaps its
+    predecessor when it starts before that bar closed, and a bar closes where
+    ``_completion_floor`` says it does: a nominal interval, clamped at the
+    segment close when the segment ends first. That clamp is the whole
+    difference — without it the short gap a truncated bucket leaves before the
+    next segment opens reads as an overlap.
+
+    Whether the calendar describes this feed's geometry at all is one
     question, asked once per series rather than once per bar: an
     extended-session feed carries hours the calendar says nothing about, and
-    holding part of it to segment geometry and the rest to a nominal duration
-    would judge one feed by two rules.
-
-    Where the geometry is known, intraday bars are held to the buckets
-    ``bucket_bounds`` defines: each starts where its segment says a bucket
-    starts, and never before the previous bucket ended. That end is the
-    calendar's, so the short gap a truncated final bucket leaves before the
-    next segment is cadence rather than an overlap. Where it is not, two
-    observations still cannot overlap by the nominal interval, and the phase
-    stays the series' own.
+    there the nominal interval is the only bound there is. A bar that lands
+    outside every segment keeps that nominal bound too — the calendar has no
+    close to clamp it at.
 
     Calendar-sized bars use the first observation as that series' phase.
-    Missing whole bars are allowed.
+    Missing whole bars are allowed; different symbols remain free to use other
+    phases.
     """
     canonical = to_canonical(timeframe)
     if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
@@ -505,22 +507,13 @@ def validate_bar_cadence(
             if bool((diffs < interval).any()):
                 raise ValueError(f"{context} timestamps overlap timeframe={canonical}")
             return
-        starts, closes = bucket_bounds(timestamps, canonical, calendar_id)
-        unplaced = np.asarray(starts.isna())
-        if unplaced.any():
-            first = pd.Timestamp(timestamps[int(np.flatnonzero(unplaced)[0])])
-            raise ValueError(
-                f"{context} timestamp {first.isoformat()} is outside "
-                f"the {calendar_id} trading session"
-            )
-        # Overlap first: a bar landing inside the previous bucket is also off
-        # its own boundary, and overlap is the more precise diagnosis.
-        if bool((starts[1:] < closes[:-1]).any()):
+        starts = timestamps.tz_convert("UTC").as_unit("ns").asi8
+        nominal = starts + int(interval.as_unit("ns").value)
+        closes = segment_closes(timestamps, canonical, calendar_id).asi8
+        placed = closes != pd.NaT.value
+        bounds = np.where(placed, np.minimum(nominal, closes), nominal)
+        if bool((starts[1:] < bounds[:-1]).any()):
             raise ValueError(f"{context} timestamps overlap timeframe={canonical}")
-        if bool((timestamps != starts).any()):
-            raise ValueError(
-                f"{context} timestamps are not the canonical timeframe={canonical} period starts"
-            )
         return
     if not canonical.startswith(("D", "W", "MN")):
         return

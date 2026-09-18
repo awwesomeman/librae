@@ -1,14 +1,14 @@
 """Resampler output must survive both cadence gates, on every calendar.
 
 The resampler, ``validate_bar_cadence`` and the backtest loader each used to
-decide bucket geometry for themselves, so a series librae produced could be
-rejected by librae. These tests run the whole path end to end; the calendars
-with more than one segment per session are the ones that used to fail, and
+decide where a bar closed, so a series librae produced could be rejected by
+librae. These tests run the whole path end to end; the calendars with more
+than one segment per session are the ones that used to fail, and
 ``XTAIFEX_1725`` is here because it is the one that never did.
 
 Whether the calendar describes the geometry at all is a per-series question
 answered by ``bucket_geometry_is_known``, so every matrix here runs in both
-session modes.
+session modes. Bar phase is deliberately not judged: only the close is.
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ SYMBOL = "SYM"
 
 # Under session_mode="extended" a regular-session calendar describes none of
 # the feed's geometry, so these series fall back to the nominal interval and
-# the truncated final bucket of a segment still reads as an overlap. #249
+# the short gap a truncated bucket leaves still reads as an overlap. #249
 # teaches bucket_geometry_is_known that these calendars model their own full
-# day; when it lands, this set empties and the assertions below must be
-# updated deliberately rather than quietly passing.
+# day; when it lands both sets empty and the assertions below must be updated
+# deliberately rather than quietly passing.
 REJECTED_UNDER_EXTENDED = frozenset(
     {
         ("XTAIFEX", "H4"),
@@ -41,11 +41,17 @@ REJECTED_UNDER_EXTENDED = frozenset(
         ("XHKG", "H2"),
         ("XHKG", "H4"),
         ("XHKG", "H6"),
-        # XSHG H2 is absent on purpose: both its segments are exactly two
-        # hours, so no H2 bucket is ever truncated and the nominal rule holds.
+        # XSHG's segments are exactly two hours, so no H2 bucket is ever
+        # truncated and the nominal rule is satisfied.
         ("XSHG", "H4"),
         ("XSHG", "H6"),
     }
+)
+# These clear the overlap check but not the loader: with no truncation to
+# explain them, the mode of bar-to-bar gaps reads back as another bar size, so
+# the declared timeframe is refused exactly as it is on main.
+MISLABELLED_UNDER_EXTENDED = frozenset(
+    {("XTKS", "H3"), ("XHKG", "H3"), ("XSHG", "H2"), ("XSHG", "H3")}
 )
 
 
@@ -123,13 +129,18 @@ def test_extended_sessions_keep_the_nominal_rule_until_249(
 ) -> None:
     """Calendar-sized bars are unaffected; intraday ones fall back until #249."""
     resampled = _resampled(calendar_id, timeframe)
+    cell = (calendar_id, timeframe)
 
-    if (calendar_id, timeframe) in REJECTED_UNDER_EXTENDED:
+    if cell in REJECTED_UNDER_EXTENDED:
         with pytest.raises(ValueError, match=f"overlap timeframe={timeframe}"):
             validate_bar_cadence(resampled.index, timeframe, calendar_id, session_mode="extended")
-        return
+    else:
+        validate_bar_cadence(resampled.index, timeframe, calendar_id, session_mode="extended")
 
-    validate_bar_cadence(resampled.index, timeframe, calendar_id, session_mode="extended")
+    if cell in REJECTED_UNDER_EXTENDED or cell in MISLABELLED_UNDER_EXTENDED:
+        with pytest.raises(ValueError):
+            _load(resampled.index, timeframe, calendar_id, "extended")
+        return
     assert _load(resampled.index, timeframe, calendar_id, "extended") == timeframe
 
 
@@ -185,56 +196,74 @@ def test_truncated_final_bucket_is_cadence_not_overlap() -> None:
     assert bool((gaps < pd.Timedelta(hours=4)).any())
 
 
-def _utc_hourly_xnys_feed() -> pd.DatetimeIndex:
-    """What IB returns for a US equity with ``useRTH=0``: whole UTC hours,
-    which are not XNYS buckets — that session opens at 14:30Z."""
+def _hourly(first: str, count: int, step_hours: int = 1) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(
-        [pd.Timestamp("2024-06-03T09:00Z") + pd.Timedelta(hours=hour) for hour in range(12)]
+        [pd.Timestamp(first) + pd.Timedelta(hours=step_hours * hour) for hour in range(count)]
     )
 
 
-def test_extended_hours_feed_off_the_session_phase_is_accepted() -> None:
-    index = _utc_hourly_xnys_feed()
-
-    validate_bar_cadence(index, "H1", "XNYS", session_mode="extended")
-
-    assert _load(index, "H1", "XNYS", "extended") == "H1"
-
-
-def test_same_feed_declared_regular_is_rejected_off_boundary() -> None:
-    index = _utc_hourly_xnys_feed()
-
-    with pytest.raises(ValueError, match="outside the XNYS trading session"):
-        validate_bar_cadence(index, "H1", "XNYS", session_mode="regular")
+OFF_PHASE_FEEDS = {
+    # 24/7 H4 anchored anywhere but midnight, and 24/7 H1 on the half hour:
+    # the default crypto path, where no venue defines a phase to align to.
+    "24/7-H4": ("24/7", "H4", _hourly("2024-06-03T02:00Z", 12, step_hours=4)),
+    "24/7-H1": ("24/7", "H1", _hourly("2024-06-03T00:30Z", 12)),
+    # Whole UTC hours inside one XNYS session, which opens at 14:30Z.
+    "XNYS-H1": ("XNYS", "H1", _hourly("2024-06-03T15:00Z", 5)),
+}
 
 
-def test_regular_feed_inside_the_session_must_sit_on_a_bucket_boundary() -> None:
-    index = pd.DatetimeIndex(
-        [pd.Timestamp("2024-06-03T15:00Z") + pd.Timedelta(hours=hour) for hour in range(5)]
-    )
+@pytest.mark.parametrize("session_mode", ("regular", "extended"))
+@pytest.mark.parametrize("feed", sorted(OFF_PHASE_FEEDS))
+def test_a_series_on_its_own_phase_is_accepted(feed: str, session_mode: str) -> None:
+    """Phase is the series' own: only the close decides an overlap."""
+    calendar_id, timeframe, index = OFF_PHASE_FEEDS[feed]
 
-    with pytest.raises(ValueError, match="not the canonical timeframe=H1"):
-        validate_bar_cadence(index, "H1", "XNYS", session_mode="regular")
+    validate_bar_cadence(index, timeframe, calendar_id, session_mode=session_mode)
+
+    assert _load(index, timeframe, calendar_id, session_mode) == timeframe
 
 
+@pytest.mark.parametrize("session_mode", ("regular", "extended"))
+def test_out_of_session_bar_still_loads(session_mode: str) -> None:
+    """The loader accepted bars outside every segment before #248 and still
+    does. The write path rejects them through ``_completion_floor``;
+    tightening the loader to match is a separate decision, not this issue's.
+    """
+    index = _resampled("XNYS", "H1").index.insert(0, pd.Timestamp("2024-06-03T00:00Z"))
+
+    validate_bar_cadence(index, "H1", "XNYS", session_mode=session_mode)
+
+    assert _load(index, "H1", "XNYS", session_mode) == "H1"
+
+
+@pytest.mark.parametrize("session_mode", ("regular", "extended"))
+@pytest.mark.parametrize("declared", ("M15", "M30"))
+def test_coarse_data_cannot_pass_as_a_finer_declared_timeframe(
+    declared: str, session_mode: str
+) -> None:
+    index = _resampled("XNYS", "H1").index
+
+    with pytest.raises(ValueError, match=f"config.timeframe={declared} does not match"):
+        _load(index, declared, "XNYS", session_mode)
+
+
+@pytest.mark.parametrize("session_mode", ("regular", "extended"))
+def test_the_declared_timeframe_the_data_really_is_loads(session_mode: str) -> None:
+    index = _resampled("XNYS", "H1").index
+
+    assert _load(index, "H1", "XNYS", session_mode) == "H1"
+
+
+@pytest.mark.parametrize("session_mode", ("regular", "extended"))
 @pytest.mark.parametrize("calendar_id", CALENDARS)
-def test_overlapping_bar_is_rejected(calendar_id: str) -> None:
-    index = _resampled(calendar_id, "H4").index
-    overlapping = index.insert(1, index[0] + pd.Timedelta(hours=1)).sort_values()
+def test_overlapping_bar_is_rejected(calendar_id: str, session_mode: str) -> None:
+    """H1 rather than H4 so the extra bar cannot also change what size the
+    series looks like: every calendar here fits several H1 buckets in one
+    segment, so the modal intra-segment gap stays an hour."""
+    index = _resampled(calendar_id, "H1").index
+    overlapping = index.insert(1, index[0] + pd.Timedelta(minutes=30)).sort_values()
 
-    for session_mode in ("regular", "extended"):
-        with pytest.raises(ValueError, match="overlap timeframe=H4"):
-            validate_bar_cadence(overlapping, "H4", calendar_id, session_mode=session_mode)
-        with pytest.raises(ValueError, match="overlap timeframe=H4"):
-            _load(overlapping, "H4", calendar_id, session_mode)
-
-
-@pytest.mark.parametrize("calendar_id", CALENDARS)
-def test_bar_starting_off_its_bucket_boundary_is_rejected(calendar_id: str) -> None:
-    index = _resampled(calendar_id, "H4").index
-    shifted = index.delete(0).insert(0, index[0] + pd.Timedelta(minutes=15))
-
-    with pytest.raises(ValueError, match="not the canonical timeframe=H4"):
-        validate_bar_cadence(shifted, "H4", calendar_id, session_mode="regular")
-    with pytest.raises(ValueError, match="not the canonical timeframe=H4"):
-        _load(shifted, "H4", calendar_id, "regular")
+    with pytest.raises(ValueError, match="overlap timeframe=H1"):
+        validate_bar_cadence(overlapping, "H1", calendar_id, session_mode=session_mode)
+    with pytest.raises(ValueError, match="overlap timeframe=H1"):
+        _load(overlapping, "H1", calendar_id, session_mode)

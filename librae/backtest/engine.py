@@ -109,9 +109,11 @@ from librae.core.strategy import (
 )
 from librae.core.trading_calendar import (
     ALWAYS_OPEN_CALENDAR,
+    bucket_geometry_is_known,
     period_start,
     require_resting_session_support,
     resting_session_label,
+    segment_closes,
     session_labels,
     session_ordinals,
     validate_calendar_id,
@@ -121,6 +123,7 @@ from librae.core.utils import (
     infer_timeframe,
     interval_to_timedelta,
     make_event_id,
+    timeframe_for_interval,
     to_canonical,
 )
 
@@ -854,6 +857,27 @@ def _session_timeframe_unit(timeframe: str) -> str | None:
     return None
 
 
+def _intra_segment_timeframe(
+    index: pd.DatetimeIndex,
+    timeframe: str,
+    calendar_id: str,
+) -> str | None:
+    """Cadence read from gaps between bars that share a segment.
+
+    Session buckets are truncated at each segment close, so a gap that crosses
+    one says nothing about bar size — a venue with 2.5h segments reads back as
+    M210 at any declared size. Gaps inside a segment are clean. ``None`` when
+    no adjacent pair shares a segment, which leaves nothing to infer from.
+    """
+    closes = segment_closes(index, timeframe, calendar_id).asi8
+    shared = (closes[1:] == closes[:-1]) & (closes[1:] != pd.NaT.value)
+    if not shared.any():
+        return None
+    gaps = np.diff(index.tz_convert("UTC").as_unit("ns").asi8)[shared]
+    modal = int(pd.Series(gaps).mode().iloc[0])
+    return timeframe_for_interval(pd.Timedelta(modal, unit="ns"))
+
+
 def _resolve_data_timeframe(
     data: pd.DataFrame,
     configured_timeframe: str | None,
@@ -898,22 +922,26 @@ def _resolve_data_timeframe(
     if configured_timeframe is not None:
         expected = to_canonical(configured_timeframe)
         expected_session_unit = _session_timeframe_unit(expected)
-        # A calendar makes the declared timeframe the authority on bucket
-        # geometry, and validate_bar_cadence holds the data to it. Inference
-        # from the mode of bar-to-bar gaps cannot: session buckets are
-        # truncated at each segment close, so a venue whose segments are 2.5h
-        # long reads back as M210 whatever the declared size was. The unit
-        # still has to agree, so daily data cannot pass as hourly.
-        mismatches = {
-            symbol: timeframe
-            for symbol, timeframe in inferred_by_symbol.items()
-            if timeframe != expected
-            and not authoritative_timeframe
-            and not (
-                _session_timeframe_unit(timeframe) == expected_session_unit
-                and calendar_ids.get(symbol) is not None
+        mismatches: dict[str, str] = {}
+        for symbol, timeframe in inferred_by_symbol.items():
+            if timeframe == expected or authoritative_timeframe:
+                continue
+            calendar_id = calendar_ids.get(symbol)
+            if calendar_id is None or _session_timeframe_unit(timeframe) != expected_session_unit:
+                mismatches[symbol] = timeframe
+                continue
+            if expected_session_unit is not None:
+                continue
+            if not bucket_geometry_is_known(calendar_id=calendar_id, session_mode=session_mode):
+                mismatches[symbol] = timeframe
+                continue
+            observed = _intra_segment_timeframe(
+                indexes_by_symbol[symbol],
+                expected,
+                calendar_id,
             )
-        }
+            if observed is not None and observed != expected:
+                mismatches[symbol] = observed
         if mismatches:
             raise ValueError(
                 f"config.timeframe={expected} does not match per-symbol data "
