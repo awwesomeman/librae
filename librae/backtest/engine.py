@@ -897,14 +897,19 @@ def _resolve_data_timeframe(
     if configured_timeframe is not None:
         expected = to_canonical(configured_timeframe)
         expected_session_unit = _session_timeframe_unit(expected)
+        # A calendar makes the declared timeframe the authority on bucket
+        # geometry, and validate_bar_cadence holds the data to it. Inference
+        # from the mode of bar-to-bar gaps cannot: session buckets are
+        # truncated at each segment close, so a venue whose segments are 2.5h
+        # long reads back as M210 whatever the declared size was. The unit
+        # still has to agree, so daily data cannot pass as hourly.
         mismatches = {
             symbol: timeframe
             for symbol, timeframe in inferred_by_symbol.items()
             if timeframe != expected
             and not authoritative_timeframe
             and not (
-                expected_session_unit is not None
-                and _session_timeframe_unit(timeframe) == expected_session_unit
+                _session_timeframe_unit(timeframe) == expected_session_unit
                 and calendar_ids.get(symbol) is not None
             )
         }
@@ -958,6 +963,17 @@ def _resolve_data_timeframe(
     for symbol, index in indexes_by_symbol.items():
         if len(index) < 2 or symbol in calendar_validated:
             continue
+        calendar_id = calendar_ids.get(symbol)
+        if calendar_id is not None:
+            validate_bar_cadence(
+                index,
+                data_timeframe,
+                calendar_id,
+                context=f"data symbol {symbol!r}",
+            )
+            continue
+        # Without a calendar there is no bucket geometry to align to, so the
+        # nominal grid is all that is left: whole multiples of the interval.
         diffs = pd.Series(index).diff().dropna()
         if any(diff < base_interval or diff % base_interval != pd.Timedelta(0) for diff in diffs):
             raise ValueError(

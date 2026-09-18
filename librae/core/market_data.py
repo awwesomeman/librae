@@ -13,6 +13,7 @@ import pandas as pd
 from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
     ALWAYS_OPEN_CALENDAR,
+    bucket_bounds,
     period_close,
     period_start,
     session_labels,
@@ -476,19 +477,34 @@ def validate_bar_cadence(
     *,
     context: str = "bar data",
 ) -> None:
-    """Validate non-overlap plus calendar-sized per-series cadence.
+    """Validate non-overlap plus per-series cadence under the calendar.
 
-    Fixed intraday bars need not share a provider-independent global phase,
-    but two observations of one subscription cannot overlap. Calendar-sized
-    bars additionally use the first observation as that series' phase. Missing
-    whole bars are allowed; different symbols remain free to use other phases.
+    Intraday bars are held to the bucket geometry ``bucket_bounds`` defines:
+    each one starts where its segment says a bucket starts, and never before
+    the previous bucket ended. The end is the calendar's, not a nominal
+    duration, so the short gap a truncated final bucket leaves before the next
+    segment is cadence rather than an overlap. Bars the calendar cannot place
+    — an off-hours print under an extended-session feed — keep the nominal
+    duration as their only bound, since no bucket geometry exists for them.
+    Calendar-sized bars use the first observation as that series' phase.
+    Missing whole bars are allowed.
     """
     canonical = to_canonical(timeframe)
     if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
         interval = interval_to_timedelta(canonical)
-        diffs = pd.Series(timestamps).diff().dropna()
-        if bool((diffs < interval).any()):
+        starts, closes = bucket_bounds(timestamps, canonical, calendar_id)
+        unplaced = starts.isna()
+        if unplaced.any():
+            starts = starts.where(~unplaced, timestamps)
+            closes = closes.where(~unplaced, timestamps + interval)
+        # Overlap first: a bar landing inside the previous bucket is also off
+        # its own boundary, and overlap is the more precise diagnosis.
+        if bool((starts[1:] < closes[:-1]).any()):
             raise ValueError(f"{context} timestamps overlap timeframe={canonical}")
+        if bool((timestamps != starts).any()):
+            raise ValueError(
+                f"{context} timestamps are not the canonical timeframe={canonical} period starts"
+            )
         return
     if not canonical.startswith(("D", "W", "MN")):
         return

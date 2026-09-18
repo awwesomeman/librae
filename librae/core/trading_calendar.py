@@ -13,12 +13,16 @@ from functools import cache
 from math import ceil
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
     from exchange_calendars import ExchangeCalendar
 
 logger = logging.getLogger(__name__)
+
+_DAY_SECONDS = 24 * 60 * 60
+_NS_PER_SECOND = 1_000_000_000
 
 ALWAYS_OPEN_CALENDAR = "24/7"
 TAIFEX_INDEX_CALENDAR = "XTAIFEX"
@@ -205,6 +209,10 @@ def session_ordinals(index: pd.DatetimeIndex, calendar_id: str) -> tuple[int, ..
     return tuple(int(position) for position in positions)
 
 
+def _epoch_ns(timestamp: pd.Timestamp) -> int:
+    return timestamp.as_unit("ns").value
+
+
 def _local_timestamp(day: date, clock: time, timezone: str) -> pd.Timestamp:
     return pd.Timestamp.combine(day, clock).tz_localize(timezone).tz_convert("UTC")
 
@@ -299,15 +307,33 @@ def _segment_containing(
     raise ValueError(f"{timestamp.isoformat()} is outside the {calendar_id} trading segments")
 
 
+def _bucket_start_ns[T: (int, np.ndarray)](
+    timestamp_ns: T, segment_open_ns: int, target_ns: int
+) -> T:
+    """Floor an instant onto its segment-anchored bucket start, in epoch ns.
+
+    Elementwise over numpy arrays as well as scalars, so the single-timestamp
+    and whole-series paths cannot drift apart on the one arithmetic that
+    defines a bucket.
+    """
+    return segment_open_ns + (timestamp_ns - segment_open_ns) // target_ns * target_ns
+
+
 def _bucket_start(value: object, target_seconds: int, calendar_id: str) -> pd.Timestamp:
     timestamp = _timestamp(value)
     label = session_label(timestamp, calendar_id)
     segments = _session_segments(calendar_id, label)
-    if target_seconds >= 24 * 60 * 60:
+    if target_seconds >= _DAY_SECONDS:
         return segments[0][0]
     segment_open, _ = _segment_containing(segments, timestamp, calendar_id)
-    offset_seconds = int((timestamp - segment_open).total_seconds())
-    return segment_open + pd.Timedelta(seconds=offset_seconds - offset_seconds % target_seconds)
+    return pd.Timestamp(
+        _bucket_start_ns(
+            _epoch_ns(timestamp),
+            _epoch_ns(segment_open),
+            target_seconds * _NS_PER_SECOND,
+        ),
+        tz="UTC",
+    )
 
 
 def bar_close(value: object, target_seconds: int, calendar_id: str) -> pd.Timestamp:
@@ -316,7 +342,7 @@ def bar_close(value: object, target_seconds: int, calendar_id: str) -> pd.Timest
         raise ValueError("target_seconds must be positive")
     timestamp = _timestamp(value)
     segments = _session_segments(calendar_id, session_label(timestamp, calendar_id))
-    if target_seconds >= 24 * 60 * 60:
+    if target_seconds >= _DAY_SECONDS:
         return segments[-1][1]
     _, segment_close = _segment_containing(segments, timestamp, calendar_id)
     return min(timestamp + pd.Timedelta(seconds=target_seconds), segment_close)
@@ -383,6 +409,89 @@ def period_close(value: object, timeframe: str, calendar_id: str) -> pd.Timestam
         raise ValueError(f"unsupported session-aligned timeframe={canonical!r}")
 
     return _session_segments(calendar_id, final_label)[-1][1]
+
+
+def _from_epoch_ns(values: np.ndarray) -> pd.DatetimeIndex:
+    return pd.DatetimeIndex(values.view("datetime64[ns]"), tz="UTC")
+
+
+def _period_bounds(
+    index: pd.DatetimeIndex, timeframe: str, calendar_id: str
+) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
+    """Per-bar bucket bounds for calendar-sized periods, ``NaT`` when unresolved."""
+    starts: list[pd.Timestamp] = []
+    closes: list[pd.Timestamp] = []
+    for timestamp in index:
+        try:
+            start = period_start(timestamp, timeframe, calendar_id)
+            close = period_close(timestamp, timeframe, calendar_id)
+        except (TypeError, ValueError):
+            start = close = pd.NaT
+        starts.append(start)
+        closes.append(close)
+    return (
+        pd.DatetimeIndex(starts, dtype="datetime64[ns, UTC]"),
+        pd.DatetimeIndex(closes, dtype="datetime64[ns, UTC]"),
+    )
+
+
+def bucket_bounds(
+    index: pd.DatetimeIndex, timeframe: str, calendar_id: str
+) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
+    """Canonical start and end of the bucket each bar in ``index`` falls in.
+
+    This is the geometry ``resample_session_ohlcv`` produces: a bucket is
+    anchored to its segment's open and the last one of a segment is truncated
+    at the segment close, so the gap left before the next segment is shorter
+    than the nominal interval. Anything that judges cadence has to ask the
+    calendar for those bounds; a fixed duration reads that gap as an overlap on
+    every venue with more than one segment per session.
+
+    Bars outside every segment get ``NaT`` for both bounds — an off-hours print
+    has no session bucket — leaving the caller to decide whether that is fatal.
+
+    ``index`` must be increasing: segments are resolved once per run of bars
+    that share one rather than once per bar, which is what keeps validating
+    millions of bars off the calendar lookup path.
+    """
+    from librae.core.utils import interval_to_timedelta, to_canonical
+
+    if index.tz is None:
+        raise ValueError("bar timestamps must be timezone-aware")
+    if not index.is_monotonic_increasing:
+        raise ValueError("bucket bounds require increasing bar timestamps")
+
+    canonical = to_canonical(timeframe)
+    utc = index.tz_convert("UTC").as_unit("ns")
+    target_ns = int(interval_to_timedelta(canonical).as_unit("ns").value)
+    intraday = canonical.startswith(("M", "H")) and not canonical.startswith("MN")
+    if not intraday or target_ns >= _DAY_SECONDS * _NS_PER_SECOND:
+        return _period_bounds(utc, canonical, calendar_id)
+
+    values = utc.asi8
+    starts = np.full(len(values), pd.NaT.value, dtype=np.int64)
+    closes = np.full(len(values), pd.NaT.value, dtype=np.int64)
+    position = 0
+    while position < len(values):
+        timestamp = utc[position]
+        try:
+            segments = _session_segments(calendar_id, session_label(timestamp, calendar_id))
+            segment_open, segment_close = _segment_containing(segments, timestamp, calendar_id)
+        except ValueError:
+            position += 1
+            continue
+        close_ns = _epoch_ns(segment_close)
+        # Only bars strictly inside the segment share this lookup: whether the
+        # closing instant itself is in session is a per-calendar answer that
+        # only session_label can give, so leave it to the next iteration. The
+        # current bar belongs here either way, which is what breaks the tie
+        # when it is that instant.
+        stop = max(int(np.searchsorted(values, close_ns, side="left")), position + 1)
+        block = _bucket_start_ns(values[position:stop], _epoch_ns(segment_open), target_ns)
+        starts[position:stop] = block
+        closes[position:stop] = np.minimum(block + target_ns, close_ns)
+        position = stop
+    return _from_epoch_ns(starts), _from_epoch_ns(closes)
 
 
 def _first_session_on_or_after(boundary: date, calendar_id: str) -> date:
