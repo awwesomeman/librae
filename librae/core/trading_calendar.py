@@ -13,12 +13,15 @@ from functools import cache
 from math import ceil
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
     from exchange_calendars import ExchangeCalendar
 
 logger = logging.getLogger(__name__)
+
+_DAY_SECONDS = 24 * 60 * 60
 
 ALWAYS_OPEN_CALENDAR = "24/7"
 TAIFEX_INDEX_CALENDAR = "XTAIFEX"
@@ -109,6 +112,20 @@ def session_label(value: object, calendar_id: str) -> date:
         raise ValueError(
             f"{timestamp.isoformat()} is outside the {calendar_id} trading session"
         ) from exc
+
+
+def bucket_geometry_is_known(*, calendar_id: str, session_mode: str) -> bool:
+    """Whether this calendar describes bucket geometry for this session mode.
+
+    A regular-session calendar says nothing about where an after-hours bar's
+    bucket opens or closes, so a feed carrying those hours has no geometry to
+    be held to and the nominal interval is all there is. ``24/7`` has no
+    outside to extend into, so it always describes its own.
+
+    One place on purpose: teaching this that a calendar models its own full
+    day (#249) has to move every consumer at once.
+    """
+    return session_mode == "regular" or calendar_id == ALWAYS_OPEN_CALENDAR
 
 
 def validate_calendar_id(calendar_id: str) -> None:
@@ -203,6 +220,10 @@ def session_ordinals(index: pd.DatetimeIndex, calendar_id: str) -> tuple[int, ..
     if (positions < 0).any():  # pragma: no cover - session_label already validates
         raise ValueError(f"bar timestamps include an unknown {calendar_id} session")
     return tuple(int(position) for position in positions)
+
+
+def _epoch_ns(timestamp: pd.Timestamp) -> int:
+    return timestamp.as_unit("ns").value
 
 
 def _local_timestamp(day: date, clock: time, timezone: str) -> pd.Timestamp:
@@ -303,7 +324,7 @@ def _bucket_start(value: object, target_seconds: int, calendar_id: str) -> pd.Ti
     timestamp = _timestamp(value)
     label = session_label(timestamp, calendar_id)
     segments = _session_segments(calendar_id, label)
-    if target_seconds >= 24 * 60 * 60:
+    if target_seconds >= _DAY_SECONDS:
         return segments[0][0]
     segment_open, _ = _segment_containing(segments, timestamp, calendar_id)
     offset_seconds = int((timestamp - segment_open).total_seconds())
@@ -316,7 +337,7 @@ def bar_close(value: object, target_seconds: int, calendar_id: str) -> pd.Timest
         raise ValueError("target_seconds must be positive")
     timestamp = _timestamp(value)
     segments = _session_segments(calendar_id, session_label(timestamp, calendar_id))
-    if target_seconds >= 24 * 60 * 60:
+    if target_seconds >= _DAY_SECONDS:
         return segments[-1][1]
     _, segment_close = _segment_containing(segments, timestamp, calendar_id)
     return min(timestamp + pd.Timedelta(seconds=target_seconds), segment_close)
@@ -383,6 +404,63 @@ def period_close(value: object, timeframe: str, calendar_id: str) -> pd.Timestam
         raise ValueError(f"unsupported session-aligned timeframe={canonical!r}")
 
     return _session_segments(calendar_id, final_label)[-1][1]
+
+
+def _from_epoch_ns(values: np.ndarray) -> pd.DatetimeIndex:
+    return pd.DatetimeIndex(values.view("datetime64[ns]"), tz="UTC")
+
+
+def segment_closes(index: pd.DatetimeIndex, timeframe: str, calendar_id: str) -> pd.DatetimeIndex:
+    """Close of the trading segment each bar in ``index`` falls in.
+
+    An intraday bar ends where its segment does when the segment ends first,
+    which is what makes the short gap before the next segment opens cadence
+    rather than an overlap; a nominal duration reads it as one on every venue
+    with more than one segment per session. This is the whole-series form of
+    the clamp ``bar_close`` applies to a single timestamp.
+
+    Bars outside every segment get ``NaT`` — an off-hours print belongs to no
+    segment — leaving the caller to decide what bound to use instead.
+
+    Intraday only: a calendar-sized period spans whole sessions and closes
+    where ``period_close`` says, not where a segment does.
+
+    ``index`` must be increasing: one calendar lookup per run of bars sharing a
+    segment rather than one per bar is what keeps validating millions of bars
+    off the calendar lookup path.
+    """
+    from librae.core.utils import to_canonical
+
+    canonical = to_canonical(timeframe)
+    if not canonical.startswith(("M", "H")) or canonical.startswith("MN"):
+        raise ValueError(f"segment closes are intraday-only; got timeframe={canonical}")
+    if index.tz is None:
+        raise ValueError("bar timestamps must be timezone-aware")
+    if not index.is_monotonic_increasing:
+        raise ValueError("segment closes require increasing bar timestamps")
+
+    utc = index.tz_convert("UTC").as_unit("ns")
+    values = utc.asi8
+    closes = np.full(len(values), pd.NaT.value, dtype=np.int64)
+    position = 0
+    while position < len(values):
+        timestamp = utc[position]
+        try:
+            segments = _session_segments(calendar_id, session_label(timestamp, calendar_id))
+            _, segment_close = _segment_containing(segments, timestamp, calendar_id)
+        except ValueError:
+            position += 1
+            continue
+        close_ns = _epoch_ns(segment_close)
+        # Only bars strictly inside the segment share this lookup: whether the
+        # closing instant itself is in session is a per-calendar answer that
+        # only session_label can give, so leave it to the next iteration. The
+        # current bar belongs here either way, which is what breaks the tie
+        # when it is that instant.
+        stop = max(int(np.searchsorted(values, close_ns, side="left")), position + 1)
+        closes[position:stop] = close_ns
+        position = stop
+    return _from_epoch_ns(closes)
 
 
 def _first_session_on_or_after(boundary: date, calendar_id: str) -> date:

@@ -12,9 +12,10 @@ import pandas as pd
 
 from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
-    ALWAYS_OPEN_CALENDAR,
+    bucket_geometry_is_known,
     period_close,
     period_start,
+    segment_closes,
     session_labels,
     session_ordinals,
 )
@@ -441,16 +442,16 @@ def _completion_floor(
 ) -> pd.Timestamp:
     timeframe = subscription.timeframe
     calendar_sized = timeframe.startswith(("D", "W", "MN"))
-    extended_calendar = (
-        subscription.session_mode == "extended" and subscription.calendar_id != ALWAYS_OPEN_CALENDAR
+    geometry_known = bucket_geometry_is_known(
+        calendar_id=subscription.calendar_id,
+        session_mode=subscription.session_mode,
     )
-    if calendar_sized and extended_calendar and not allow_extended_calendar_inference:
+    if calendar_sized and not geometry_known and not allow_extended_calendar_inference:
         raise ValueError(
             "available_at is required for extended-session calendar bars because "
             f"calendar_id={subscription.calendar_id!r} does not define their close"
         )
-    if not calendar_sized and extended_calendar:
-        # A regular-session calendar cannot validate after-hours bucket geometry.
+    if not calendar_sized and not geometry_known:
         # The nominal fixed duration is conservative for a shortened final bucket.
         return timestamp + interval_to_timedelta(timeframe)
     try:
@@ -474,20 +475,44 @@ def validate_bar_cadence(
     timeframe: str,
     calendar_id: str,
     *,
+    session_mode: MarketDataSessionMode,
     context: str = "bar data",
 ) -> None:
     """Validate non-overlap plus calendar-sized per-series cadence.
 
-    Fixed intraday bars need not share a provider-independent global phase,
-    but two observations of one subscription cannot overlap. Calendar-sized
-    bars additionally use the first observation as that series' phase. Missing
-    whole bars are allowed; different symbols remain free to use other phases.
+    Intraday bars need not share a provider-independent phase, but two
+    observations of one subscription cannot overlap. A bar overlaps its
+    predecessor when it starts before that bar closed, and a bar closes where
+    ``_completion_floor`` says it does: a nominal interval, clamped at the
+    segment close when the segment ends first. That clamp is the whole
+    difference — without it the short gap a truncated bucket leaves before the
+    next segment opens reads as an overlap.
+
+    Whether the calendar describes this feed's geometry at all is one
+    question, asked once per series rather than once per bar: an
+    extended-session feed carries hours the calendar says nothing about, and
+    there the nominal interval is the only bound there is. A bar that lands
+    outside every segment keeps that nominal bound too — the calendar has no
+    close to clamp it at.
+
+    Calendar-sized bars use the first observation as that series' phase.
+    Missing whole bars are allowed; different symbols remain free to use other
+    phases.
     """
     canonical = to_canonical(timeframe)
     if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
         interval = interval_to_timedelta(canonical)
-        diffs = pd.Series(timestamps).diff().dropna()
-        if bool((diffs < interval).any()):
+        if not bucket_geometry_is_known(calendar_id=calendar_id, session_mode=session_mode):
+            diffs = pd.Series(timestamps).diff().dropna()
+            if bool((diffs < interval).any()):
+                raise ValueError(f"{context} timestamps overlap timeframe={canonical}")
+            return
+        starts = timestamps.tz_convert("UTC").as_unit("ns").asi8
+        nominal = starts + int(interval.as_unit("ns").value)
+        closes = segment_closes(timestamps, canonical, calendar_id).asi8
+        placed = closes != pd.NaT.value
+        bounds = np.where(placed, np.minimum(nominal, closes), nominal)
+        if bool((starts[1:] < bounds[:-1]).any()):
             raise ValueError(f"{context} timestamps overlap timeframe={canonical}")
         return
     if not canonical.startswith(("D", "W", "MN")):
@@ -535,6 +560,7 @@ def normalize_bar_times(
         normalized_ts,
         subscription.timeframe,
         subscription.calendar_id,
+        session_mode=subscription.session_mode,
         context=f"{subscription.symbol!r} subscription",
     )
     provided = available_at is not None

@@ -223,11 +223,18 @@ def infer_timeframe(index: pd.DatetimeIndex) -> str:
             f"(minimum {_MIN_BARS_FOR_INFERENCE} required)"
         )
     diffs = pd.Series(index).diff().dropna()
-    mode_td = diffs.mode().iloc[0]
+    return timeframe_for_interval(diffs.mode().iloc[0])
 
-    total_secs = mode_td.total_seconds()
+
+def timeframe_for_interval(interval: pd.Timedelta) -> str:
+    """Canonical label for one bar-to-bar interval.
+
+    Split out from ``infer_timeframe`` because a caller that already knows
+    which gaps are evidence needs the labelling without the mode.
+    """
+    total_secs = interval.total_seconds()
     if total_secs <= 0:
-        raise ValueError(f"Non-positive bar timedelta {mode_td}; cannot infer timeframe")
+        raise ValueError(f"Non-positive bar timedelta {interval}; cannot infer timeframe")
 
     total_minutes = total_secs / 60
 
@@ -243,5 +250,7 @@ def infer_timeframe(index: pd.DatetimeIndex) -> str:
 
     n_min = round(total_minutes)
     if n_min < 1:
-        raise ValueError(f"Bar interval {mode_td} is sub-minute; not supported by canonical labels")
+        raise ValueError(
+            f"Bar interval {interval} is sub-minute; not supported by canonical labels"
+        )
     return f"M{n_min}"

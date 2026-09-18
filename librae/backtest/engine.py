@@ -109,9 +109,11 @@ from librae.core.strategy import (
 )
 from librae.core.trading_calendar import (
     ALWAYS_OPEN_CALENDAR,
+    bucket_geometry_is_known,
     period_start,
     require_resting_session_support,
     resting_session_label,
+    segment_closes,
     session_labels,
     session_ordinals,
     validate_calendar_id,
@@ -121,6 +123,7 @@ from librae.core.utils import (
     infer_timeframe,
     interval_to_timedelta,
     make_event_id,
+    timeframe_for_interval,
     to_canonical,
 )
 
@@ -854,11 +857,33 @@ def _session_timeframe_unit(timeframe: str) -> str | None:
     return None
 
 
+def _intra_segment_timeframe(
+    index: pd.DatetimeIndex,
+    timeframe: str,
+    calendar_id: str,
+) -> str | None:
+    """Cadence read from gaps between bars that share a segment.
+
+    Session buckets are truncated at each segment close, so a gap that crosses
+    one says nothing about bar size — a venue with 2.5h segments reads back as
+    M210 at any declared size. Gaps inside a segment are clean. ``None`` when
+    no adjacent pair shares a segment, which leaves nothing to infer from.
+    """
+    closes = segment_closes(index, timeframe, calendar_id).asi8
+    shared = (closes[1:] == closes[:-1]) & (closes[1:] != pd.NaT.value)
+    if not shared.any():
+        return None
+    gaps = np.diff(index.tz_convert("UTC").as_unit("ns").asi8)[shared]
+    modal = int(pd.Series(gaps).mode().iloc[0])
+    return timeframe_for_interval(pd.Timedelta(modal, unit="ns"))
+
+
 def _resolve_data_timeframe(
     data: pd.DataFrame,
     configured_timeframe: str | None,
     calendar_ids: dict[str, str | None],
     *,
+    session_mode: MarketDataSessionMode,
     authoritative_timeframe: bool = False,
 ) -> str:
     """Validate one coherent bar interval, preferring declared exact identity."""
@@ -897,17 +922,26 @@ def _resolve_data_timeframe(
     if configured_timeframe is not None:
         expected = to_canonical(configured_timeframe)
         expected_session_unit = _session_timeframe_unit(expected)
-        mismatches = {
-            symbol: timeframe
-            for symbol, timeframe in inferred_by_symbol.items()
-            if timeframe != expected
-            and not authoritative_timeframe
-            and not (
-                expected_session_unit is not None
-                and _session_timeframe_unit(timeframe) == expected_session_unit
-                and calendar_ids.get(symbol) is not None
+        mismatches: dict[str, str] = {}
+        for symbol, timeframe in inferred_by_symbol.items():
+            if timeframe == expected or authoritative_timeframe:
+                continue
+            calendar_id = calendar_ids.get(symbol)
+            if calendar_id is None or _session_timeframe_unit(timeframe) != expected_session_unit:
+                mismatches[symbol] = timeframe
+                continue
+            if expected_session_unit is not None:
+                continue
+            if not bucket_geometry_is_known(calendar_id=calendar_id, session_mode=session_mode):
+                mismatches[symbol] = timeframe
+                continue
+            observed = _intra_segment_timeframe(
+                indexes_by_symbol[symbol],
+                expected,
+                calendar_id,
             )
-        }
+            if observed is not None and observed != expected:
+                mismatches[symbol] = observed
         if mismatches:
             raise ValueError(
                 f"config.timeframe={expected} does not match per-symbol data "
@@ -948,6 +982,7 @@ def _resolve_data_timeframe(
                 index,
                 data_timeframe,
                 calendar_id,
+                session_mode=session_mode,
                 context=f"data symbol {symbol!r}",
             )
             calendar_validated.add(symbol)
@@ -958,6 +993,18 @@ def _resolve_data_timeframe(
     for symbol, index in indexes_by_symbol.items():
         if len(index) < 2 or symbol in calendar_validated:
             continue
+        calendar_id = calendar_ids.get(symbol)
+        if calendar_id is not None:
+            validate_bar_cadence(
+                index,
+                data_timeframe,
+                calendar_id,
+                session_mode=session_mode,
+                context=f"data symbol {symbol!r}",
+            )
+            continue
+        # Without a calendar there is no bucket geometry to align to, so the
+        # nominal grid is all that is left: whole multiples of the interval.
         diffs = pd.Series(index).diff().dropna()
         if any(diff < base_interval or diff % base_interval != pd.Timedelta(0) for diff in diffs):
             raise ValueError(
@@ -1451,6 +1498,7 @@ class Backtest:
             self._data,
             configured_timeframe,
             self._calendar_ids,
+            session_mode=self._session_mode,
             authoritative_timeframe=direct_mixed,
         )
         if self._primary_subscriptions and any(
