@@ -732,9 +732,8 @@ def _two_calendar_panel() -> pd.DataFrame:
     rows: list[tuple[str, pd.Timestamp]] = []
     for ts in pd.date_range("2025-01-02T00:00Z", periods=48, freq="h", tz="UTC"):
         rows.append(("CRYPTO24", ts))
-        # XNYS opens at 14:30Z, so its hourly buckets fall on the half hour.
         if 15 <= ts.hour <= 20:
-            rows.append(("EQUITY", ts + pd.Timedelta(minutes=30)))
+            rows.append(("EQUITY", ts))
     index = pd.MultiIndex.from_tuples(rows, names=["symbol", "datetime"]).sort_values()
     size = len(index)
     return pd.DataFrame(
