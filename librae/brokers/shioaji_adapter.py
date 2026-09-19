@@ -172,11 +172,15 @@ class ShioajiAdapter:
                         "Shioaji order placement requires a CA certificate: "
                         "set SHIOAJI_CA_PATH, or drop trading_enabled for market data."
                     )
-                self._api.activate_ca(
+                activated = self._api.activate_ca(
                     ca_path=creds.ca_path,
                     ca_passwd=creds.ca_password.reveal(),
                     person_id=creds.person_id.reveal(),
                 )
+                # Documented success is True; `is False` rather than a falsy
+                # test so a build that returns None on success still passes.
+                if activated is False:
+                    raise ValueError(f"Shioaji rejected the CA certificate at {creds.ca_path}")
             except Exception:
                 self.close()
                 raise
@@ -406,10 +410,8 @@ class ShioajiAdapter:
     def _require_auth(self) -> None:
         if self._read_only:
             raise NotImplementedError(
-                "ShioajiAdapter is read-only — it was built for market data, so no CA "
-                "certificate was activated. Build it with trading_enabled=True to place "
-                "orders; a trading adapter activates the certificate at construction and "
-                "fails there when it is unusable."
+                "ShioajiAdapter is read-only: built for market data, so no CA "
+                "certificate was activated. Pass trading_enabled=True to place orders."
             )
 
     def prepare_order(self, signal: dict) -> dict:

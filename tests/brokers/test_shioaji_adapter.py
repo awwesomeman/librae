@@ -1145,6 +1145,40 @@ class TestInit:
         ):
             ShioajiAdapter(credentials=_trading_credentials(ca_path=""), trading_enabled=True)
 
+    def test_refused_ca_activation_is_not_mistaken_for_success(self):
+        """activate_ca reports refusal by returning False, not by raising, so a
+        discarded return value would leave a tradable-looking adapter that only
+        fails at its first order."""
+        from librae.brokers.shioaji_adapter import ShioajiAdapter
+
+        mock_api = MagicMock()
+        mock_api.activate_ca.return_value = False
+        with (
+            patch(
+                "librae.brokers.shioaji_adapter._require_shioaji",
+                return_value=self._mock_sj(mock_api),
+            ),
+            pytest.raises(ValueError, match="rejected the CA certificate"),
+        ):
+            ShioajiAdapter(credentials=_trading_credentials(), trading_enabled=True)
+
+        mock_api.logout.assert_called_once()
+
+    def test_ca_activation_returning_none_is_treated_as_success(self):
+        """Only an explicit False means refusal — a build that returns None
+        must not fail a live run that has a working certificate."""
+        from librae.brokers.shioaji_adapter import ShioajiAdapter
+
+        mock_api = MagicMock()
+        mock_api.activate_ca.return_value = None
+        with patch(
+            "librae.brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
+        ):
+            adapter = ShioajiAdapter(credentials=_trading_credentials(), trading_enabled=True)
+
+        assert adapter._read_only is False
+        mock_api.logout.assert_not_called()
+
     def test_failed_ca_activation_logs_out_before_propagating(self):
         """login() already succeeded, so a raise out of __init__ would strand
         an open Shioaji session with nobody left holding the adapter."""
