@@ -353,12 +353,44 @@ def test_normalize_bars_derives_real_calendar_period_close(
     assert result["available_at"].tolist() == list(pd.to_datetime(expected, utc=True))
 
 
+@pytest.mark.parametrize("session_mode", ("regular", "extended"))
+def test_taifex_calendar_bar_derives_the_same_close_in_both_session_modes(
+    session_mode: str,
+) -> None:
+    """The shape ``ShioajiAdapter.fetch_ohlcv('TXFR1', '1d')`` returns.
+
+    Librae writes the TAIFEX night and day segments itself, so the extended
+    day is the calendar. The second bar opens Friday night and closes at
+    Monday's day-session close, crossing the weekend.
+    """
+    data = _bars(
+        pd.DatetimeIndex(pd.to_datetime(["2026-09-17T07:00:00Z", "2026-09-18T07:00:00Z"], utc=True))
+    )
+
+    result = normalize_bars(
+        data,
+        symbol="AAA",
+        subscription=_subscription(
+            timeframe="D1",
+            calendar_id="XTAIFEX",
+            session_mode=session_mode,
+        ),
+    )
+
+    assert result["available_at"].tolist() == list(
+        pd.to_datetime(["2026-09-18T05:45:00Z", "2026-09-21T05:45:00Z"], utc=True)
+    )
+
+
+_REGULAR_ONLY_REFUSAL = "calendar_id='XNYS' describes only its regular sessions"
+
+
 def test_extended_calendar_bar_requires_provider_availability() -> None:
     data = _bars(
         pd.DatetimeIndex(pd.to_datetime(["2026-03-06T14:30:00Z", "2026-03-09T13:30:00Z"], utc=True))
     )
 
-    with pytest.raises(ValueError, match="available_at is required"):
+    with pytest.raises(ValueError, match=_REGULAR_ONLY_REFUSAL):
         normalize_bars(
             data,
             symbol="AAA",
@@ -368,6 +400,27 @@ def test_extended_calendar_bar_requires_provider_availability() -> None:
                 session_mode="extended",
             ),
         )
+
+
+def test_extended_calendar_bar_accepts_a_supplied_availability() -> None:
+    data = _bars(
+        pd.DatetimeIndex(pd.to_datetime(["2026-03-06T14:30:00Z", "2026-03-09T13:30:00Z"], utc=True))
+    )
+    data["available_at"] = pd.to_datetime(
+        ["2026-03-07T01:00:00Z", "2026-03-10T01:00:00Z"], utc=True
+    )
+
+    result = normalize_bars(
+        data,
+        symbol="AAA",
+        subscription=_subscription(
+            timeframe="D1",
+            calendar_id="XNYS",
+            session_mode="extended",
+        ),
+    )
+
+    assert result["available_at"].tolist() == list(data["available_at"])
 
 
 @pytest.mark.parametrize(

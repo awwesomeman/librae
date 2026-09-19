@@ -25,16 +25,14 @@ CALENDARS = ("XTAIFEX", "XTAIFEX_1725", "XTKS", "XHKG", "XSHG", "XNYS", "24/7")
 TIMEFRAMES = ("M15", "H1", "H2", "H3", "H4", "H6", "D1")
 SYMBOL = "SYM"
 
-# Under session_mode="extended" a regular-session calendar describes none of
-# the feed's geometry, so these series fall back to the nominal interval and
-# the short gap a truncated bucket leaves still reads as an overlap. #249
-# teaches bucket_geometry_is_known that these calendars model their own full
-# day; when it lands both sets empty and the assertions below must be updated
-# deliberately rather than quietly passing.
+# Under session_mode="extended" a calendar that models only its regular
+# sessions describes none of the feed's geometry, so these series fall back to
+# the nominal interval and the short gap a truncated bucket leaves still reads
+# as an overlap. Every entry is a library-backed calendar: librae writes the
+# TAIFEX segments itself, so both XTAIFEX timeframes that used to sit here take
+# the geometry path in either mode now.
 REJECTED_UNDER_EXTENDED = frozenset(
     {
-        ("XTAIFEX", "H4"),
-        ("XTAIFEX", "H6"),
         ("XTKS", "H2"),
         ("XTKS", "H4"),
         ("XTKS", "H6"),
@@ -49,7 +47,7 @@ REJECTED_UNDER_EXTENDED = frozenset(
 )
 # These clear the overlap check but not the loader: with no truncation to
 # explain them, the mode of bar-to-bar gaps reads back as another bar size, so
-# the declared timeframe is refused exactly as it is on main.
+# the declared timeframe is refused.
 MISLABELLED_UNDER_EXTENDED = frozenset(
     {("XTKS", "H3"), ("XHKG", "H3"), ("XSHG", "H2"), ("XSHG", "H3")}
 )
@@ -124,10 +122,10 @@ def test_resampled_bars_pass_both_cadence_gates_under_regular_sessions(
 
 @pytest.mark.parametrize("calendar_id", CALENDARS)
 @pytest.mark.parametrize("timeframe", TIMEFRAMES)
-def test_extended_sessions_keep_the_nominal_rule_until_249(
+def test_extended_sessions_keep_the_nominal_rule_on_regular_only_calendars(
     calendar_id: str, timeframe: str
 ) -> None:
-    """Calendar-sized bars are unaffected; intraday ones fall back until #249."""
+    """Only a calendar that stops at its regular sessions falls back."""
     resampled = _resampled(calendar_id, timeframe)
     cell = (calendar_id, timeframe)
 

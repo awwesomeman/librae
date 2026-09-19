@@ -129,6 +129,20 @@ def _make_ohlcv_df(n: int = 5, start_hour: int = 0) -> pd.DataFrame:
     )
 
 
+def _make_taifex_ohlcv_df(n: int = 5, start_hour: int = 0) -> pd.DataFrame:
+    """_make_ohlcv_df on bar starts XTAIFEX actually has.
+
+    Librae models the TAIFEX night segment, which opens 07:00Z, so an
+    extended-session feed of it is held to that geometry rather than to a
+    nominal hour (#249). _make_ohlcv_df's 2025-01-01 base is a TAIFEX holiday.
+    """
+    frame = _make_ohlcv_df(n=n)
+    frame["ts"] = pd.date_range(
+        datetime(2024, 12, 31, 7 + start_hour, tzinfo=UTC), periods=n, freq="h", tz=UTC
+    )
+    return frame
+
+
 def _make_ohlcv_df_at(ts_end: datetime, n: int = 5) -> pd.DataFrame:
     """Same shape as _make_ohlcv_df but with the last row's ts fixed to
     ts_end — used for staleness tests, where wall-clock-relative timing
@@ -6865,7 +6879,7 @@ class TestShioajiLiveFactory:
         def fetcher(*args, **kwargs):
             nonlocal call_num
             call_num += 1
-            return _make_ohlcv_df(n=5, start_hour=call_num)
+            return _make_taifex_ohlcv_df(n=5, start_hour=call_num)
 
         with (
             patch("librae.brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
