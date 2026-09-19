@@ -147,7 +147,7 @@ def _build_adapter(
     if name == "shioaji":
         from librae.brokers.shioaji_adapter import ShioajiAdapter
 
-        return ShioajiAdapter()
+        return ShioajiAdapter(trading_enabled=trading)
     if name == "ibkr":
         from librae.brokers.ibkr_adapter import IBKRAdapter
 

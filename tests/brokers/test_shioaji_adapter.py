@@ -44,6 +44,18 @@ def _rolling_contract(
     )
 
 
+def _trading_credentials(ca_path: str = "/path/to/ca"):
+    from librae.brokers.shioaji_adapter import ShioajiCredentials
+
+    return ShioajiCredentials(
+        api_key="k",
+        secret_key="s",
+        person_id="p",
+        ca_path=ca_path,
+        ca_password="pw",
+    )
+
+
 def _mock_shioaji_actions():
     return SimpleNamespace(Action=SimpleNamespace(Buy="Buy", Sell="Sell"))
 
@@ -1065,26 +1077,125 @@ class TestInit:
         with pytest.raises(ValueError, match="authenticated account identity"):
             adapter.execution_identity()
 
-    def test_login_with_ca_path_enables_trading(self):
-        from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
+    def test_trading_enabled_activates_ca_once_and_allows_orders(self):
+        from librae.brokers.shioaji_adapter import ShioajiAdapter
 
         mock_api = MagicMock()
+        mock_api.place_order.return_value.status.id = "order123"
+        mock_api.place_order.return_value.status.status = "PendingSubmit"
         with patch(
             "librae.brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
         ):
             adapter = ShioajiAdapter(
-                credentials=ShioajiCredentials(
-                    api_key="k",
-                    secret_key="s",
-                    person_id="p",
-                    ca_path="/path/to/ca",
-                    ca_password="pw",
-                ),
+                credentials=_trading_credentials(),
+                trading_enabled=True,
             )
         mock_api.activate_ca.assert_called_once_with(
             ca_path="/path/to/ca", ca_passwd="pw", person_id="p"
         )
         assert adapter._read_only is False
+
+        adapter._resolve_contract = MagicMock(
+            return_value=_rolling_contract(limit_down=19_000, limit_up=21_000)
+        )
+        with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=MagicMock()):
+            result = adapter.place_order(
+                {
+                    "symbol": "TXFR1",
+                    "side": "buy",
+                    "quantity": 1,
+                    "order_type": "limit",
+                    "time_in_force": "day",
+                    "price": 20_000,
+                    "continuous_alias": True,
+                }
+            )
+        assert result["id"] == "order123"
+
+    def test_data_only_ignores_an_unusable_ca_path(self):
+        """A stale certificate belongs to the trading role, so it must not
+        break a caller that only wants market data."""
+        from librae.brokers.shioaji_adapter import ShioajiAdapter
+
+        mock_api = MagicMock()
+        mock_api.kbars.return_value = _make_kbars_response()
+        with patch(
+            "librae.brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
+        ):
+            adapter = ShioajiAdapter(credentials=_trading_credentials(ca_path="/gone/stale.pfx"))
+
+        mock_api.activate_ca.assert_not_called()
+        assert adapter._read_only is True
+
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+        assert len(adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)) == 3
+        with pytest.raises(NotImplementedError, match="built for market data"):
+            adapter.place_order({"symbol": "TXFR1", "side": "buy", "quantity": 1})
+
+    def test_trading_enabled_without_a_ca_path_fails_closed(self):
+        from librae.brokers.shioaji_adapter import ShioajiAdapter
+
+        mock_api = MagicMock()
+        with (
+            patch(
+                "librae.brokers.shioaji_adapter._require_shioaji",
+                return_value=self._mock_sj(mock_api),
+            ),
+            pytest.raises(ValueError, match="requires a CA certificate"),
+        ):
+            ShioajiAdapter(credentials=_trading_credentials(ca_path=""), trading_enabled=True)
+
+    def test_refused_ca_activation_is_not_mistaken_for_success(self):
+        """activate_ca reports refusal by returning False, not by raising, so a
+        discarded return value would leave a tradable-looking adapter that only
+        fails at its first order."""
+        from librae.brokers.shioaji_adapter import ShioajiAdapter
+
+        mock_api = MagicMock()
+        mock_api.activate_ca.return_value = False
+        with (
+            patch(
+                "librae.brokers.shioaji_adapter._require_shioaji",
+                return_value=self._mock_sj(mock_api),
+            ),
+            pytest.raises(ValueError, match="rejected the CA certificate"),
+        ):
+            ShioajiAdapter(credentials=_trading_credentials(), trading_enabled=True)
+
+        mock_api.logout.assert_called_once()
+
+    def test_ca_activation_returning_none_is_treated_as_success(self):
+        """Only an explicit False means refusal — a build that returns None
+        must not fail a live run that has a working certificate."""
+        from librae.brokers.shioaji_adapter import ShioajiAdapter
+
+        mock_api = MagicMock()
+        mock_api.activate_ca.return_value = None
+        with patch(
+            "librae.brokers.shioaji_adapter._require_shioaji", return_value=self._mock_sj(mock_api)
+        ):
+            adapter = ShioajiAdapter(credentials=_trading_credentials(), trading_enabled=True)
+
+        assert adapter._read_only is False
+        mock_api.logout.assert_not_called()
+
+    def test_failed_ca_activation_logs_out_before_propagating(self):
+        """login() already succeeded, so a raise out of __init__ would strand
+        an open Shioaji session with nobody left holding the adapter."""
+        from librae.brokers.shioaji_adapter import ShioajiAdapter
+
+        mock_api = MagicMock()
+        mock_api.activate_ca.side_effect = RuntimeError("ca file unreadable")
+        with (
+            patch(
+                "librae.brokers.shioaji_adapter._require_shioaji",
+                return_value=self._mock_sj(mock_api),
+            ),
+            pytest.raises(RuntimeError, match="ca file unreadable"),
+        ):
+            ShioajiAdapter(credentials=_trading_credentials(), trading_enabled=True)
+
+        mock_api.logout.assert_called_once()
 
     def test_simulation_flag_passed_through(self):
         from librae.brokers.shioaji_adapter import ShioajiAdapter, ShioajiCredentials
