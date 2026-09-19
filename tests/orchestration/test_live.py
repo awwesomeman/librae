@@ -7,6 +7,7 @@ import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -413,6 +414,61 @@ def test_build_adapter_stays_read_only_without_credentials_in_the_environment() 
         _build_adapter("crypto", trading=False, instrument_type="spot")
 
     assert "apiKey" not in binance.call_args[0][0]
+
+
+def _build_shioaji_adapter(*, trading: bool) -> tuple[object, MagicMock]:
+    mock_api = MagicMock()
+    with (
+        patch(
+            "librae.brokers.shioaji_adapter._require_shioaji",
+            return_value=MagicMock(Shioaji=MagicMock(return_value=mock_api)),
+        ),
+        patch.dict(
+            os.environ,
+            {
+                "SHIOAJI_API_KEY": "k",
+                "SHIOAJI_SECRET_KEY": "s",
+                "SHIOAJI_PERSON_ID": "p",
+                "SHIOAJI_CA_PATH": "/path/to/ca",
+                "SHIOAJI_CA_PASSWORD": "pw",
+            },
+            clear=True,
+        ),
+    ):
+        return _build_adapter("shioaji", trading=trading), mock_api
+
+
+def _place_shioaji_order(adapter: object) -> dict:
+    adapter._resolve_contract = MagicMock(
+        return_value=SimpleNamespace(security_type="FUT", code="TXFR1", target_code="TXF202608")
+    )
+    with patch("librae.brokers.shioaji_adapter._require_shioaji", return_value=MagicMock()):
+        return adapter.place_order(
+            {
+                "symbol": "TXFR1",
+                "side": "buy",
+                "quantity": 1,
+                "order_type": "market",
+                "time_in_force": "ioc",
+                "continuous_alias": True,
+            }
+        )
+
+
+def test_build_adapter_gives_the_shioaji_order_adapter_its_certificate() -> None:
+    adapter, mock_api = _build_shioaji_adapter(trading=True)
+
+    mock_api.activate_ca.assert_called_once()
+    _place_shioaji_order(adapter)
+    mock_api.place_order.assert_called_once()
+
+
+def test_build_adapter_keeps_a_data_only_shioaji_adapter_off_the_certificate() -> None:
+    adapter, mock_api = _build_shioaji_adapter(trading=False)
+
+    mock_api.activate_ca.assert_not_called()
+    with pytest.raises(NotImplementedError, match="read-only"):
+        _place_shioaji_order(adapter)
 
 
 def test_data_adapters_are_not_shared_across_differing_instrument_types() -> None:

@@ -120,6 +120,14 @@ class ShioajiAdapter:
         submits real orders at all, this decides which Shioaji venue an
         adapter instance talks to. ``credentials.sandbox`` takes
         precedence when both are supplied, same as CryptoAdapter.
+    trading_enabled : bool
+        If False (default), the CA certificate is never touched and
+        ``place_order``/``get_position`` raise ``NotImplementedError`` —
+        market data needs no certificate, so a stale ``ca_path`` cannot
+        break a data-only caller. If True, the certificate is activated
+        during ``__init__`` and an unusable one fails the run at startup
+        rather than at its first order. Mirrors IBKRAdapter's flag of the
+        same name.
 
     Unlike CryptoAdapter, Shioaji **requires** login for all operations
     including market data. The adapter logs in during ``__init__``.
@@ -132,6 +140,8 @@ class ShioajiAdapter:
         self,
         credentials: ShioajiCredentials | None = None,
         simulation: bool = False,
+        *,
+        trading_enabled: bool = False,
     ) -> None:
         sj = _require_shioaji()
         creds = credentials or ShioajiCredentials.from_env("SHIOAJI")
@@ -153,12 +163,23 @@ class ShioajiAdapter:
         logger.info("Shioaji login successful (simulation=%s)", simulation)
 
         self._read_only = True
-        if creds.ca_path:
-            self._api.activate_ca(
-                ca_path=creds.ca_path,
-                ca_passwd=creds.ca_password.reveal(),
-                person_id=creds.person_id.reveal(),
-            )
+        if trading_enabled:
+            # login() has already succeeded, so any failure here must log out
+            # before it leaves the constructor or the session outlives its owner.
+            try:
+                if not creds.ca_path:
+                    raise ValueError(
+                        "Shioaji order placement requires a CA certificate: "
+                        "set SHIOAJI_CA_PATH, or drop trading_enabled for market data."
+                    )
+                self._api.activate_ca(
+                    ca_path=creds.ca_path,
+                    ca_passwd=creds.ca_password.reveal(),
+                    person_id=creds.person_id.reveal(),
+                )
+            except Exception:
+                self.close()
+                raise
             self._read_only = False
             logger.info("Shioaji CA activated — trading enabled")
 
@@ -385,8 +406,10 @@ class ShioajiAdapter:
     def _require_auth(self) -> None:
         if self._read_only:
             raise NotImplementedError(
-                "CA certificate not activated — ShioajiAdapter is in read-only mode. "
-                "Provide ca_path to enable trading."
+                "ShioajiAdapter is read-only — it was built for market data, so no CA "
+                "certificate was activated. Build it with trading_enabled=True to place "
+                "orders; a trading adapter activates the certificate at construction and "
+                "fails there when it is unusable."
             )
 
     def prepare_order(self, signal: dict) -> dict:
