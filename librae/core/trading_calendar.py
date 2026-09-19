@@ -27,6 +27,10 @@ ALWAYS_OPEN_CALENDAR = "24/7"
 TAIFEX_INDEX_CALENDAR = "XTAIFEX"
 TAIFEX_LATE_OPEN_CALENDAR = "XTAIFEX_1725"
 _TAIFEX_CALENDARS = frozenset({TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR})
+# Calendars whose segments already span the whole trading day: librae writes
+# the TAIFEX night and day segments itself (see _session_segments), and 24/7
+# has no outside to extend into.
+_FULL_DAY_CALENDARS = _TAIFEX_CALENDARS | {ALWAYS_OPEN_CALENDAR}
 _TAIPEI = "Asia/Taipei"
 
 
@@ -117,15 +121,15 @@ def session_label(value: object, calendar_id: str) -> date:
 def bucket_geometry_is_known(*, calendar_id: str, session_mode: str) -> bool:
     """Whether this calendar describes bucket geometry for this session mode.
 
-    A regular-session calendar says nothing about where an after-hours bar's
-    bucket opens or closes, so a feed carrying those hours has no geometry to
-    be held to and the nominal interval is all there is. ``24/7`` has no
-    outside to extend into, so it always describes its own.
+    A calendar whose segments already span the whole trading day describes
+    every bar a feed of it can carry, in either mode. The rest come from
+    ``exchange_calendars``, which exposes only open/break/close: no after-hours
+    geometry exists there, so an extended feed carries hours the calendar says
+    nothing about and the nominal interval is all there is.
 
-    One place on purpose: teaching this that a calendar models its own full
-    day (#249) has to move every consumer at once.
+    One place on purpose: this is what every consumer of that distinction asks.
     """
-    return session_mode == "regular" or calendar_id == ALWAYS_OPEN_CALENDAR
+    return session_mode == "regular" or calendar_id in _FULL_DAY_CALENDARS
 
 
 def validate_calendar_id(calendar_id: str) -> None:

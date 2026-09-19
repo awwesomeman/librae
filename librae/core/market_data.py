@@ -449,7 +449,8 @@ def _completion_floor(
     if calendar_sized and not geometry_known and not allow_extended_calendar_inference:
         raise ValueError(
             "available_at is required for extended-session calendar bars because "
-            f"calendar_id={subscription.calendar_id!r} does not define their close"
+            f"calendar_id={subscription.calendar_id!r} describes only its regular "
+            "sessions, so the extended day has no close to derive"
         )
     if not calendar_sized and not geometry_known:
         # The nominal fixed duration is conservative for a shortened final bucket.
