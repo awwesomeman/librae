@@ -634,6 +634,87 @@ def test_trade_script_accepts_optional_credentials_in_sim_mode(tmp_path: Path) -
     assert "--label io.librae.mode=sim" in final_run
 
 
+def _shioaji_credentials(tmp_path: Path, ca_path: str | None) -> Path:
+    credentials_file = tmp_path / "shioaji-main.env"
+    body = "SHIOAJI_API_KEY=k\nSHIOAJI_SECRET_KEY=s\nSHIOAJI_PERSON_ID=p\n"
+    if ca_path is not None:
+        body += f"SHIOAJI_CA_PATH={ca_path}\n"
+    credentials_file.write_text(body, encoding="utf-8")
+    return credentials_file
+
+
+@pytest.mark.parametrize(
+    "ca_path",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param("/etc/ssl/ca.pfx", id="outside-secrets"),
+        pytest.param(".secrets/../../ca.pfx", id="traversal"),
+    ],
+)
+def test_live_shioaji_refuses_a_certificate_it_cannot_vouch_for(
+    tmp_path: Path, ca_path: str | None
+) -> None:
+    """The .secrets/ prefix and the `..` rejection are what stop an arbitrary
+    host path being bind-mounted into the container, so they stay fatal for a
+    run that trades -- and they fire before Docker is touched at all."""
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=f"registry.example/librae-trade@sha256:{'1' * 64}",
+        mode="live",
+        credentials_file=_shioaji_credentials(tmp_path, ca_path),
+    )
+
+    assert result.returncode != 0
+    assert "SHIOAJI_CA_PATH must be a relative path under .secrets/" in result.stderr
+    assert docker_calls == []
+
+
+def test_live_shioaji_refuses_a_certificate_that_is_not_on_disk(tmp_path: Path) -> None:
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=f"registry.example/librae-trade@sha256:{'2' * 64}",
+        mode="live",
+        credentials_file=_shioaji_credentials(tmp_path, ".secrets/ca.pfx"),
+    )
+
+    assert result.returncode != 0
+    assert "Shioaji CA file not found" in result.stderr
+    assert docker_calls == []
+
+
+def test_live_shioaji_mounts_the_selected_account_certificate(tmp_path: Path) -> None:
+    (tmp_path / ".secrets").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".secrets" / "ca.pfx").write_text("certificate", encoding="utf-8")
+
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=f"registry.example/librae-trade@sha256:{'3' * 64}",
+        mode="live",
+        credentials_file=_shioaji_credentials(tmp_path, ".secrets/ca.pfx"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    final_run = next(call for call in docker_calls if call.startswith("run -d "))
+    assert f"-v {tmp_path / '.secrets' / 'ca.pfx'}:/app/.secrets/ca.pfx:ro" in final_run
+
+
+def test_sim_shioaji_starts_without_a_usable_certificate(tmp_path: Path) -> None:
+    """A sim run builds no order adapter, so the adapter never activates a
+    certificate; the credentials bundle it shares with live may still carry a
+    SHIOAJI_CA_PATH pointing at a file this host does not have."""
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=f"registry.example/librae-trade@sha256:{'4' * 64}",
+        mode="sim",
+        credentials_file=_shioaji_credentials(tmp_path, "/gone/ca.pfx"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    final_run = next(call for call in docker_calls if call.startswith("run -d "))
+    assert "ca.pfx" not in final_run
+    assert "--label io.librae.mode=sim" in final_run
+
+
 def test_sim_receives_the_same_runtime_revision_as_live(tmp_path: Path) -> None:
     """sim is the mode used to watch engine behaviour, so it is the mode that
     most needs to record which engine produced it. The image digest is
