@@ -29,7 +29,8 @@
 # authentication even for read-only market data (e.g. Shioaji). Copy
 # .env.secrets.example to a per-account file under the ignored .credentials/
 # directory on the machine that trades. Shioaji CA files remain under the
-# ignored .secrets/ directory; only the selected account's CA file is mounted.
+# ignored .secrets/ directory; a live run mounts the selected account's CA
+# file and refuses to start without it, and a sim run never asks for one.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -340,7 +341,10 @@ cmd_start() {
 
         local shioaji_api_key
         shioaji_api_key="$(read_env_file_value "${credentials_file}" "SHIOAJI_API_KEY")"
-        if [[ -n "${shioaji_api_key}" ]]; then
+        # Only a live run activates the certificate: a sim run builds no order
+        # adapter, so a mount there would be inert and a stale SHIOAJI_CA_PATH
+        # in the credentials bundle would block a data-only run for nothing.
+        if [[ "${mode}" == "live" && -n "${shioaji_api_key}" ]]; then
             local shioaji_ca_path
             shioaji_ca_path="$(read_env_file_value "${credentials_file}" "SHIOAJI_CA_PATH")"
             if [[ "${shioaji_ca_path}" != .secrets/* || "${shioaji_ca_path}" == *..* ]]; then
