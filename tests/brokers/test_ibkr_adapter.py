@@ -1660,8 +1660,15 @@ class TestResolveContractFutures:
     def test_future_requires_explicit_selection_mode(self):
         adapter = _make_adapter()
 
-        with pytest.raises(ValueError, match="exactly one"):
+        with pytest.raises(ValueError) as excinfo:
             adapter._resolve_contract("ES", security_type="FUT", exchange="CME")
+
+        message = str(excinfo.value)
+        assert "IBKR future requires exactly one of" in message
+        # The alias is IBKR's own nearest-contract selection, not a Shioaji R1/R2 suffix.
+        assert "the nearest non-expired dated contract" in message
+        assert "IBKR has no R1/R2 alias" in message
+        assert "contract_month='YYYYMM'" in message
 
     def test_future_rejects_month_and_continuous_alias_together(self):
         adapter = _make_adapter()
