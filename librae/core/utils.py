@@ -65,6 +65,26 @@ def validate_contract_month(contract_month: object) -> str | None:
     return contract_month
 
 
+def validate_futures_selector(
+    continuous_alias: bool,
+    contract_month: str | None,
+    *,
+    context: str,
+    alias_meaning: str,
+) -> None:
+    """Require exactly one futures selector, naming who refuses and what its alias means.
+
+    ``alias_meaning`` is venue-specific: what ``continuous_alias=True`` buys
+    differs per venue, so a caller who read another venue's path first does
+    not carry its convention over.
+    """
+    if continuous_alias == (contract_month is not None):
+        raise ValueError(
+            f"{context} requires exactly one of continuous_alias=True "
+            f"({alias_meaning}) or contract_month='YYYYMM'"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Timeframe utilities
 # ---------------------------------------------------------------------------

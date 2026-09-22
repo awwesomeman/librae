@@ -838,6 +838,22 @@ def test_exact_future_uses_shioaji_native_contract_code():
     adapter._api.list_positions.assert_called_once_with(account=adapter._api.futopt_account)
 
 
+def test_future_without_a_selector_is_refused_at_fetch_time():
+    adapter = _make_adapter(ca_activated=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        adapter._validate_contract_selection(
+            _rolling_contract(),
+            continuous_alias=False,
+            contract_month=None,
+        )
+
+    message = str(excinfo.value)
+    assert "Shioaji future requires exactly one of" in message
+    assert "the venue's native R1/R2 alias" in message
+    assert "contract_month='YYYYMM'" in message
+
+
 def test_exact_future_rejects_shioaji_delivery_month_mismatch():
     adapter = _make_adapter(ca_activated=True)
     contract = SimpleNamespace(

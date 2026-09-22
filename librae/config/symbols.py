@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from librae.core.run_config import RunConfig
     from librae.core.strategy import OrderIntent
 
-from librae.core.utils import floor_to_step, validate_contract_month
+from librae.core.utils import floor_to_step, validate_contract_month, validate_futures_selector
 
 type AdapterName = str
 type BrokerName = str
@@ -424,10 +424,15 @@ class SymbolInfo:
             "contract_monthly",
             "contract_quarterly",
         )
-        if dated_contract and self.continuous_alias == (self.contract_month is not None):
-            raise ValueError(
-                f"{self.symbol!r} dated contract requires exactly one of "
-                "continuous_alias=True or contract_month='YYYYMM'"
+        # security_type='FUT' also routes to a venue's futures path, whatever
+        # instrument_type claims, so it must carry a selector too — otherwise
+        # the entry configures cleanly and only the first fetch objects.
+        if dated_contract or self.security_type == "FUT":
+            validate_futures_selector(
+                self.continuous_alias,
+                self.contract_month,
+                context=f"{self.symbol!r} future",
+                alias_meaning="the venue's rolling contract alias",
             )
         if not dated_contract and self.contract_month is not None:
             raise ValueError(

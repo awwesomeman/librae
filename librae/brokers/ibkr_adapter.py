@@ -51,7 +51,7 @@ from librae.core.trading_calendar import (
     session_lookback_days,
     validate_calendar_id,
 )
-from librae.core.utils import floor_to_step, validate_contract_month
+from librae.core.utils import floor_to_step, validate_contract_month, validate_futures_selector
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import PositionRequest
 
@@ -1187,11 +1187,13 @@ class IBKRAdapter:
                     "exchange is required for security_type='FUT' (e.g. 'CME', "
                     "'NYMEX', 'COMEX') — futures aren't SMART-routed like stocks."
                 )
-            if continuous_alias == (contract_month is not None):
-                raise ValueError(
-                    "IBKR future requires exactly one of continuous_alias=True "
-                    "or contract_month='YYYYMM'"
-                )
+            validate_futures_selector(
+                continuous_alias,
+                contract_month,
+                context="IBKR future",
+                alias_meaning="the nearest non-expired dated contract; "
+                "IBKR has no R1/R2 alias and no continuous contract here",
+            )
         elif continuous_alias or contract_month is not None:
             raise ValueError("continuous_alias and contract_month are valid only for IBKR futures")
 

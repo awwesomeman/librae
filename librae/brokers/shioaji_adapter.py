@@ -41,7 +41,7 @@ from librae.core.trading_calendar import (
     TAIFEX_INDEX_CALENDAR,
     resample_session_ohlcv,
 )
-from librae.core.utils import floor_to_step, validate_contract_month
+from librae.core.utils import floor_to_step, validate_contract_month, validate_futures_selector
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import PositionRequest
 
@@ -778,11 +778,12 @@ class ShioajiAdapter:
                     "continuous_alias and contract_month are valid only for Shioaji futures"
                 )
             return
-        if continuous_alias == (contract_month is not None):
-            raise ValueError(
-                "Shioaji future requires exactly one of continuous_alias=True "
-                "or contract_month='YYYYMM'"
-            )
+        validate_futures_selector(
+            continuous_alias,
+            contract_month,
+            context="Shioaji future",
+            alias_meaning="the venue's native R1/R2 alias",
+        )
 
         code = str(getattr(contract, "code", "") or "")
         target_code = str(getattr(contract, "target_code", "") or "")

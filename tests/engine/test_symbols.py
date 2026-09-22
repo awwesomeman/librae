@@ -269,6 +269,95 @@ class TestInstrumentTypeValidation:
             )
 
 
+class TestFuturesSelectorAtRegistration:
+    """One selector rule, enforced where the entry is written, not at first fetch."""
+
+    @staticmethod
+    def _future(**overrides) -> SymbolInfo:
+        base = {
+            "symbol": "ES",
+            "market": "us_futures",
+            "data_source": "ibkr",
+            "instrument_type": "contract_quarterly",
+            "multiplier": 50.0,
+            "data_adapter": "ibkr",
+            "venue_symbol": "ES",
+            "currency": "USD",
+            "security_type": "FUT",
+            "exchange": "CME",
+        }
+        return SymbolInfo(**(base | overrides))
+
+    def test_neither_selector_is_refused_with_an_actionable_message(self):
+        with pytest.raises(ValueError) as excinfo:
+            self._future()
+
+        message = str(excinfo.value)
+        assert "'ES' future requires exactly one of" in message
+        assert "continuous_alias=True (the venue's rolling contract alias)" in message
+        assert "contract_month='YYYYMM'" in message
+
+    def test_each_selector_alone_registers(self):
+        assert self._future(continuous_alias=True).continuous_alias is True
+        assert self._future(contract_month="202612").contract_month == "202612"
+
+    def test_both_selectors_together_stay_refused(self):
+        with pytest.raises(ValueError, match="requires exactly one"):
+            self._future(continuous_alias=True, contract_month="202612")
+
+    def test_fut_security_type_needs_a_selector_whatever_instrument_type_claims(self):
+        # security_type='FUT' is what routes the fetch to the venue's futures
+        # path, so instrument_type='spot' does not exempt the entry.
+        with pytest.raises(ValueError, match="requires exactly one"):
+            self._future(instrument_type="spot", multiplier=1.0)
+
+        assert self._future(instrument_type="spot", multiplier=1.0, continuous_alias=True)
+
+    def test_run_configuration_refuses_the_route_before_any_fetch(self):
+        config = RunConfig(
+            strategy_name="x",
+            symbols=["ES"],
+            timeframe="1d",
+            market="us_futures",
+            data_source="ibkr",
+            mode="backtest",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "ES": {
+                    "data_adapter": "ibkr",
+                    "venue_symbol": "ES",
+                    "currency": "USD",
+                    "instrument_type": "spot",
+                    "security_type": "FUT",
+                    "exchange": "CME",
+                }
+            },
+            symbol_cost_overrides={"ES": {"multiplier": 50.0}},
+        )
+
+        with pytest.raises(ValueError, match="requires exactly one"):
+            resolve_symbol(config, "ES")
+
+    def test_instruments_that_carry_no_selector_stay_valid(self, registry):
+        # No perpetual ships in the registry; this is the shape CryptoAdapter
+        # discovery emits for one (it never sets security_type).
+        perpetual = SymbolInfo(
+            symbol="BTCUSDT_PERP",
+            market="crypto",
+            data_source="binance_spot",
+            instrument_type="contract_perpetual",
+            multiplier=1.0,
+            data_adapter="crypto",
+            venue_symbol="BTC/USDT:USDT",
+            currency="USDT",
+        )
+
+        assert perpetual.continuous_alias is False
+        assert perpetual.contract_month is None
+        assert registry["MU"].security_type == "STK"  # equity: not a futures route
+        assert registry["TXFR1"].continuous_alias is True  # TAIFEX alias, no security_type
+
+
 class TestMultiplierTickSizeValidation:
     def test_missing_multiplier_raises_for_contract_types(self):
         with pytest.raises(ValueError, match="multiplier"):
