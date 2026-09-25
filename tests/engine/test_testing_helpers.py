@@ -259,3 +259,11 @@ def test_validate_feature_causality_rejects_unusable_input(
 def test_validate_feature_causality_requires_frame_output() -> None:
     with pytest.raises(TypeError, match="DataFrame"):
         validate_feature_causality(lambda df: df["close"], _bars())  # type: ignore[arg-type,return-value]
+
+
+def test_validate_feature_causality_requires_unique_output_columns() -> None:
+    def feature_fn(df: pd.DataFrame) -> pd.DataFrame:
+        return pd.concat([df, df[["close"]]], axis=1)
+
+    with pytest.raises(ValueError, match=r"unique.*\['close'\]"):
+        validate_feature_causality(feature_fn, _bars())

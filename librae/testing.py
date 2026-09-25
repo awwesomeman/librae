@@ -113,6 +113,8 @@ def _features(
     output = feature_fn(bars.copy())
     if not isinstance(output, pd.DataFrame):
         raise TypeError("feature_fn must return a pandas DataFrame")
+    if duplicated := output.columns[output.columns.duplicated()].unique().tolist():
+        raise ValueError(f"feature_fn output columns must be unique; duplicated: {duplicated}")
     return output
 
 
