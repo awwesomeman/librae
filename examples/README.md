@@ -77,7 +77,8 @@ df.index = pd.MultiIndex.from_arrays(
 
 Live mode receives a plain per-symbol OHLCV frame and calls the strategy's
 `prepare_signals(df)`. Reusing the same feature function across backtest and
-live paths helps prevent research/production skew.
+live paths helps prevent research/production skew;
+`librae.testing.validate_feature_causality` checks that it reads no later bars.
 
 For exact validation, T → T+1 execution, incomplete baskets, and fill rules,
 read the [engine usage contract](../docs/guides/engine-usage.md).
