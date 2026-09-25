@@ -25,5 +25,7 @@ general industry practice and these docs disagree, these docs win.
 - **No history in docs or comments**: no issue/PR numbers, "fixed in",
   "previously", or "as of <date>". State the reason; history goes in the
   commit message.
-- **No new rule files**: change the canonical doc above instead of restating
-  a rule elsewhere.
+- **Verbose or repeated docs**: agents over-explain and restate. Before
+  writing, find the doc that already owns the concept and link to it; keep
+  new text short and scannable. This includes rules: change the canonical
+  doc above rather than restating a rule elsewhere.
