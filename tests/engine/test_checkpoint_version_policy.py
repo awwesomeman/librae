@@ -4,11 +4,11 @@ Rejecting an older checkpoint is deliberate: this document holds positions,
 cash, in-flight orders and the halted flag, so a silently defaulted field
 means the local book disagrees with the broker. Classifying the recent
 version bumps showed the provably-additive case is a minority, and
-misclassifying one produces exactly that divergence — so the rule stays exact
-equality (#209).
+misclassifying one produces exactly that divergence — so the rule is exact
+equality.
 
-What was worth fixing is the refusal. It reported two numbers and left the
-operator to work out what they meant, which one of them was, and what to do.
+The refusal therefore has to explain itself: which version is which, why
+nothing migrates automatically, and what the operator does next.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def _document(version: object) -> dict:
 
 
 class TestOlderCheckpointsAreStillRejected:
-    """The compatibility rule itself is unchanged."""
+    """Anything but an exact version match is refused."""
 
     @pytest.mark.parametrize(
         "version",
@@ -63,9 +63,8 @@ class TestTheRefusalIsActionable:
         assert "optional-infrastructure" in message
 
     def test_it_distinguishes_this_from_the_database_revision(self, message: str) -> None:
-        """Both were once called a "revision" in the same breath. A database
-        schema upgrade is the wrong tool here: nothing migrates a stored
-        checkpoint document."""
+        """Both are easily called a "revision". A database schema upgrade is
+        the wrong tool here: nothing migrates a stored checkpoint document."""
         assert "not the database schema revision" in message
         assert "does not transform a stored checkpoint" in message
 

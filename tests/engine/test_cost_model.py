@@ -42,7 +42,7 @@ def tw_futures_cost() -> CostModel:
 
 
 class TestFromMarket:
-    """multiplier is a required kwarg here — from_market() no longer gets
+    """multiplier is a required kwarg here — from_market() does not get
     it from MarketConfig (see librae/config/symbols.py). tick_size is
     optional and falls back to the market's own value when omitted."""
 
@@ -278,9 +278,9 @@ class TestTotalCost:
 
 
 # ── CostModel.from_config: per-symbol multiplier resolution ──────────────
-# Regression coverage for a real bug: market_config.py's tw_futures multiplier
-# (50, matching MXF) was silently applied to TXFR1 (real multiplier 200)
-# because from_config() never consulted the symbol registry at all.
+# from_config() must consult the symbol registry, or market_config.py's
+# tw_futures multiplier (50, matching MXF) is silently applied to TXFR1 (real
+# multiplier 200).
 
 
 class TestFromConfig:

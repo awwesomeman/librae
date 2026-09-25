@@ -189,7 +189,8 @@ class TestTheResolverIsTheOneRule:
 def test_every_built_in_broker_name_has_a_capability_table() -> None:
     """Unknown names pass silently, which is right for a caller's own adapter
     but wrong for a broker librae ships: adding one to orchestration without a
-    table would reopen #216 with no test failing."""
+    table would let a lifetime the venue rejects pass backtest and fail only at
+    submission, with no test failing."""
     from librae.orchestration.live import _DATA_ADAPTER_BY_BROKER
 
     built_in = set(_DATA_ADAPTER_BY_BROKER) | set(_DATA_ADAPTER_BY_BROKER.values())

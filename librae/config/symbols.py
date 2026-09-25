@@ -13,12 +13,12 @@ frameworks handle this (e.g. QuantConnect LEAN's
 symbol-properties-database.csv: a market-wide wildcard row for equities,
 an explicit row per specific futures contract).
 
-This registry used to live in a bundled symbols.yaml; it's a plain Python
-dict now — that file was never actually included in the built wheel (only
-.py files are, without extra packaging config), so `pip install librae`
-raised FileNotFoundError the moment get_symbol() ran for any built-in
-symbol. A handful of hardcoded entries needs no parser, no packaging
-config, and can't go missing from the wheel.
+This registry is a plain Python dict rather than a bundled symbols.yaml:
+the built wheel includes only .py files without extra packaging config, so
+a data file would be missing after `pip install librae` and get_symbol()
+would raise FileNotFoundError for any built-in symbol. A handful of
+hardcoded entries needs no parser, no packaging config, and can't go
+missing from the wheel.
 
 Registering your own symbol doesn't require editing this file. Cost fields
 belong in RunConfig.symbol_cost_overrides; venue/data fields belong in

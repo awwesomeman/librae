@@ -185,7 +185,7 @@ def test_database_enabled_sim_checkpoints_portfolio_weights_decision() -> None:
             data_adapter_overrides={"BTCUSDT": adapter},
         )
 
-    # Fixture bars sit at a fixed 2025-01-01, and simulation now fails closed
+    # Fixture bars sit at a fixed 2025-01-01, and simulation fails closed
     # on an observation past its expected close. Give the run a clock its own
     # data is current against: this test is about checkpointing the decision,
     # not about staleness.
@@ -206,7 +206,7 @@ def test_run_is_registered_before_first_checkpoint_write() -> None:
     accepting its first checkpoint (e.g. TimescaleLiveStateStore's foreign
     key to backtest_runs). register_run() must therefore run before
     LiveTrader's first internal persist, not after build_live_trader()
-    returns (issue #90) — MemoryLiveStateStore doesn't enforce this, so it
+    returns — MemoryLiveStateStore doesn't enforce this, so it
     can't catch a regression here; this fake does."""
     config = make_test_cfg(mode="sim")
     registered_run_ids: set[str] = set()
@@ -954,13 +954,12 @@ def test_live_ohlcv_write_preserves_session_identity() -> None:
 
 
 def test_live_ohlcv_analytics_write_records_and_propagates() -> None:
-    """This write is no longer best-effort (#198).
+    """This write is not best-effort.
 
     The sink declares durable delivery, and the engine reads a normal return
-    as acknowledgement, so swallowing here dropped the row the queue exists to
-    protect. Failure recording is unchanged — it still counts toward the alert
-    threshold — but the exception now reaches the engine, which keeps the row
-    queued and retries it.
+    as acknowledgement, so swallowing here would drop the row the queue exists
+    to protect. The failure still counts toward the alert threshold, and the
+    exception reaches the engine, which keeps the row queued and retries it.
     """
     config = make_test_cfg(mode="sim")
     callbacks = _TimescaleCallbacks(

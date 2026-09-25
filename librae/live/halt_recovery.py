@@ -1,9 +1,9 @@
 """Whether a halted run may start a new risk epoch, and why not.
 
 Readiness is a pure query over the book and its marks, so an operator or a
-health probe can read the blocking reason without provoking the exception
-that used to be the only way to obtain it. ``LiveTrader`` binds its own
-state; nothing here reads or mutates the engine.
+health probe can read the blocking reason without provoking an exception to
+obtain it. ``LiveTrader`` binds its own state; nothing here reads or mutates
+the engine.
 """
 
 from __future__ import annotations

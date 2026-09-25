@@ -1951,7 +1951,7 @@ def execute_order_intents(
         if price_raw is None or price_raw <= 0:
             # Not marketable on this event. A resting lifetime keeps the intent
             # eligible for the next one; every other value expires here, which
-            # is the historical one-shot behavior.
+            # is the default one-shot behavior.
             if action.time_in_force in RESTING_TIME_IN_FORCE:
                 resting_intents.append(action)
             continue
@@ -2243,12 +2243,11 @@ def _validate_scale_in_group_identity(
     """Refuse a same-side add whose group_id differs from the position's.
 
     One net position carries one group identity through its add, close,
-    trade, and financing records (issue #113), so it can only be scaled by
-    an intent of that identity -- grouped-to-ungrouped and ungrouped-to-
-    grouped included. Runs before any mutation so a violating intent
-    anywhere in the batch leaves the book untouched; venue attribution never
-    refuses a confirmed fill, which is why this lives at plan time and not
-    in apply_execution_fill.
+    trade, and financing records, so it can only be scaled by an intent of
+    that identity -- grouped-to-ungrouped and ungrouped-to-grouped included.
+    Runs before any mutation so a violating intent anywhere in the batch
+    leaves the book untouched; venue attribution never refuses a confirmed
+    fill, which is why this lives at plan time and not in apply_execution_fill.
     """
     for intent in intents:
         if intent.action not in ("long", "short"):
@@ -2783,9 +2782,9 @@ def execute_portfolio_weights(
     additions = [order.intent for order in state.orders if order.phase == "addition"]
 
     # WHY: a whole-book target is ungrouped by nature, so adding to a position
-    # a group opened would break the one-position-one-group invariant (issue
-    # #113). Refuse before the reductions this target would otherwise execute
-    # first, so the book is untouched. A symbol planned in both phases is a
+    # a group opened would break the one-position-one-group invariant. Refuse
+    # before the reductions this target would otherwise execute first, so the
+    # book is untouched. A symbol planned in both phases is a
     # flip, not a scale-in: its reduction carries the position's own group_id
     # out before the addition opens a fresh one.
     flipped = {intent.symbol for intent in reductions} & {intent.symbol for intent in additions}

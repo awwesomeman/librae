@@ -134,7 +134,7 @@ def _make_taifex_ohlcv_df(n: int = 5, start_hour: int = 0) -> pd.DataFrame:
 
     Librae models the TAIFEX night segment, which opens 07:00Z, so an
     extended-session feed of it is held to that geometry rather than to a
-    nominal hour (#249). _make_ohlcv_df's 2025-01-01 base is a TAIFEX holiday.
+    nominal hour. _make_ohlcv_df's 2025-01-01 base is a TAIFEX holiday.
     """
     frame = _make_ohlcv_df(n=n)
     frame["ts"] = pd.date_range(
@@ -394,7 +394,7 @@ class TestLiveExecutor:
     @pytest.mark.parametrize("symbol", ["BTCUSDT", "ETHUSDT"])
     def test_client_order_id_stays_within_broker_length_limit(self, symbol, event_type):
         """The readable id alone can already exceed Binance's 36-char limit
-        for ordinary symbols, regardless of strategy_name (issue #89)."""
+        for ordinary symbols, regardless of strategy_name."""
         ex = LiveExecutor(
             _zero_cost_model(),
             simulation=False,
@@ -3576,8 +3576,8 @@ class TestLiveTrader:
 
     def test_tw_futures_market_reconciles_via_market_currency_map(self):
         """Regression test: tw_futures/us_equity symbols don't contain '/'
-        (unlike CCXT pairs), so _reconcile_cash used to skip them even when
-        the adapter does have get_balance() — the market->currency map is
+        (unlike CCXT pairs), so a '/'-based currency lookup would skip them
+        even when the adapter does have get_balance() — the market->currency map is
         what makes reconciliation actually reach these adapters."""
         mock_order_adapter = _mock_order_adapter()
         mock_order_adapter.get_balance.return_value = {
@@ -3707,8 +3707,8 @@ class TestLiveTrader:
         assert runner._stale_alerted.get(subscription) is True
 
     def test_stop_loss_triggers_and_closes_position(self):
-        """Regression test: the live engine never called check_stop_targets,
-        so a strategy-set stop_price was stored on the position but never
+        """Regression test: the live engine must call check_stop_targets,
+        or a strategy-set stop_price is stored on the position but never
         enforced — a position could blow through its stop with no exit
         until the strategy itself issued a close."""
 
@@ -3737,11 +3737,11 @@ class TestLiveTrader:
         assert "BTCUSDT" not in runner._positions
 
     def test_feature_failure_fills_pending_action_at_correct_bar(self):
-        """Regression test: previously, a feature_fn exception returned
-        before popping/filling the previous bar's pending action, silently
-        deferring it to whichever LATER bar's feature computation happened
-        to succeed — filling at that bar's price instead of the intended
-        immediate-next-bar price."""
+        """Regression test: a feature_fn exception must not return before
+        popping/filling the previous bar's pending action, which would
+        silently defer it to whichever LATER bar's feature computation
+        happened to succeed — filling at that bar's price instead of the
+        intended immediate-next-bar price."""
         call_num = 0
         fill_prices: list[float] = []
 

@@ -1812,8 +1812,8 @@ class TestMultiAsset:
         """NEXT joins the universe two periods late. A strategy that
         self-checks readiness via ctx.available_symbols before proposing a
         group_id-tagged NEAR/NEXT pair must still be able to trade SOLO in the
-        meantime — the engine no longer queues an incomplete grouped
-        decision and blocks on_bar for everything else while it waits."""
+        meantime — the engine does not queue an incomplete grouped decision
+        and block on_bar for everything else while it waits."""
         timeline = pd.date_range("2025-01-01", periods=6, freq="h", tz="UTC")
         rows = []
         for i, ts in enumerate(timeline):
@@ -2140,10 +2140,10 @@ class TestMultiAsset:
         _assert_terminal_equity_reconciles(backtest, result, 1_000.0)
 
     def test_per_symbol_multiplier_resolved_independently_via_cfg(self) -> None:
-        """Regression: a multi-asset config= run used to build exactly one
+        """Regression: a multi-asset config= run must not build exactly one
         CostModel from cfg.symbol (symbols[0]) and apply it to every symbol
         — TXFR1 (multiplier=200) and MXFR1 (multiplier=50) in the same
-        tw_futures run would have silently shared TXFR1's multiplier."""
+        tw_futures run would silently share TXFR1's multiplier."""
         from librae.core.run_config import AccountConfig, RunConfig
 
         df = pd.concat(

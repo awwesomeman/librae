@@ -1,7 +1,7 @@
 """Tests for position scaling, partial close, and short positions.
 
-Covers executor unit tests (#1-5), short integration (#6-9),
-scaling integration (#10-14), and edge cases (#15-24).
+Covers executor unit tests, short integration, scaling integration, and
+edge cases.
 """
 
 from __future__ import annotations
@@ -120,12 +120,12 @@ def _run_actions(
 
 
 # ===========================================================================
-# Executor unit tests (#1-5)
+# Executor unit tests
 # ===========================================================================
 
 
 class TestScaleIntoPosition:
-    """#1, #2: scale_into_position updates avg price and accumulates costs."""
+    """scale_into_position updates avg price and accumulates costs."""
 
     def test_weighted_avg_price(self):
         cm = _zero_cost()
@@ -148,7 +148,7 @@ class TestScaleIntoPosition:
         assert pos.entry_commission == pytest.approx(initial_comm + fill.commission)
 
     def test_three_adds_weighted_mean(self):
-        """#11: buy 5@100, buy 3@120, buy 2@150 → avg = (500+360+300)/10 = 116."""
+        """Buy 5@100, buy 3@120, buy 2@150 → avg = (500+360+300)/10 = 116."""
         cm = _zero_cost()
         pos = _make_pos(entry_price=100.0, quantity=5.0, cm=cm)
 
@@ -160,7 +160,7 @@ class TestScaleIntoPosition:
 
 
 class TestReducePosition:
-    """#3: reduce_position pro-rates costs."""
+    """reduce_position pro-rates costs."""
 
     def test_pro_rates_costs(self):
         cm = _crypto_cost()
@@ -179,7 +179,7 @@ class TestReducePosition:
 
 
 class TestClosePosition:
-    """#4, #5: partial and full close."""
+    """Partial and full close."""
 
     def test_partial_close_pnl(self):
         cm = _zero_cost()
@@ -202,13 +202,13 @@ class TestClosePosition:
 
 
 # ===========================================================================
-# Short tests (#6-9)
+# Short tests
 # ===========================================================================
 
 
 class TestShortPositions:
     def test_short_profitable(self):
-        """#6: sell@100, close@90 → profit."""
+        """Sell@100, close@90 → profit."""
         cm = _zero_cost()
         pos = _make_pos(side="short", entry_price=100.0, quantity=1.0, cm=cm)
         pnl, proceeds, _ = close_position(pos, 90.0, cm)
@@ -217,7 +217,7 @@ class TestShortPositions:
         assert proceeds == pytest.approx(110.0)  # collateral 100 + profit 10
 
     def test_short_losing(self):
-        """#7: sell@100, close@110 → loss."""
+        """Sell@100, close@110 → loss."""
         cm = _zero_cost()
         pos = _make_pos(side="short", entry_price=100.0, quantity=1.0, cm=cm)
         pnl, proceeds, _ = close_position(pos, 110.0, cm)
@@ -226,7 +226,7 @@ class TestShortPositions:
         assert proceeds == pytest.approx(90.0)  # collateral 100 - loss 10
 
     def test_short_round_trip_zero_cost(self):
-        """#8: short round-trip at same price → cash unchanged."""
+        """Short round-trip at same price → cash unchanged."""
         cm = _zero_cost()
         initial_cash = 100_000.0
         outlay = cm.estimate_entry_outlay(100.0, 1.0, side="short")
@@ -238,7 +238,7 @@ class TestShortPositions:
         assert cash_after_entry + proceeds == pytest.approx(initial_cash)
 
     def test_short_close_tax_symmetric(self):
-        """#9: tax is symmetric — buy-to-cover also incurs tax."""
+        """Tax is symmetric — buy-to-cover also incurs tax."""
         cm = _tw_futures_cost()
         pos = _make_pos(side="short", entry_price=20000.0, quantity=1.0, cm=cm)
         pnl, _, _ = close_position(pos, 19900.0, cm)
@@ -248,13 +248,13 @@ class TestShortPositions:
 
 
 # ===========================================================================
-# Scaling integration tests (#10-14)
+# Scaling integration tests
 # ===========================================================================
 
 
 class TestScalingIntegration:
     def test_long_scale_and_close(self):
-        """#10: buy@100, add@120, close@130 → correct PnL."""
+        """Buy@100, add@120, close@130 → correct PnL."""
         positions: dict[str, PositionState] = {}
         actions = [OrderIntent(action="long", symbol="TEST", quantity=10.0)]
         result = _run_actions(actions, positions, prices={"TEST": 100.0})
@@ -283,7 +283,7 @@ class TestScalingIntegration:
         assert result3.trades[0].gross_pnl == pytest.approx((130.0 - expected_avg) * 15.0)
 
     def test_scale_partial_close_then_full(self):
-        """#12: add, partial close, then close rest."""
+        """Add, partial close, then close rest."""
         cm = _zero_cost()
         positions: dict[str, PositionState] = {}
         _run_actions(
@@ -316,7 +316,7 @@ class TestScalingIntegration:
         assert result2.trades[0].gross_pnl == pytest.approx(180.0)  # (130-100)*6
 
     def test_two_partial_then_full_no_penny_leak(self):
-        """#13: cumulative PnL from partials matches single full close."""
+        """Cumulative PnL from partials matches single full close."""
         cm = _zero_cost()
 
         # Single full close
@@ -335,7 +335,7 @@ class TestScalingIntegration:
         assert total_pnl == pytest.approx(pnl_full.net_pnl)
 
     def test_short_scale_partial_close(self):
-        """#14: short scaling + partial close."""
+        """Short scaling + partial close."""
         cm = _zero_cost()
         positions: dict[str, PositionState] = {}
 
@@ -369,13 +369,13 @@ class TestScalingIntegration:
 
 
 # ===========================================================================
-# Edge cases (#15-24)
+# Edge cases
 # ===========================================================================
 
 
 class TestEdgeCases:
     def test_scale_without_quantity_rejected(self, caplog):
-        """#15: scaling requires explicit quantity — must warn, not just
+        """Scaling requires explicit quantity — must warn, not just
         silently no-op, since this is a strategy action being dropped."""
         positions: dict[str, PositionState] = {}
         _run_actions(
@@ -394,7 +394,7 @@ class TestEdgeCases:
         assert any("requires explicit quantity" in r.message for r in caplog.records)
 
     def test_buy_while_short_rejected(self):
-        """#16: opposite-side action rejected."""
+        """Opposite-side action rejected."""
         positions: dict[str, PositionState] = {}
         _run_actions(
             [OrderIntent(action="short", symbol="TEST", quantity=5.0)],
@@ -411,7 +411,7 @@ class TestEdgeCases:
         assert result.cash_delta == 0.0
 
     def test_partial_close_clamps_to_position(self):
-        """#17: close more than held → clamp to full close."""
+        """Close more than held → clamp to full close."""
         cm = _zero_cost()
         pos = _make_pos(quantity=10.0, cm=cm)
         pnl, _, fully_closed = close_position(pos, 110.0, cm, quantity=999.0)
@@ -420,7 +420,7 @@ class TestEdgeCases:
         assert pnl.gross_pnl == pytest.approx(100.0)  # (110-100)*10, not *999
 
     def test_zero_quantity_close_rejected(self):
-        """#18: close with quantity=0 does nothing."""
+        """Close with quantity=0 does nothing."""
         cm = _zero_cost()
         pos = _make_pos(cm=cm)
         _pnl, proceeds, fully_closed = close_position(pos, 110.0, cm, quantity=0.0)
@@ -429,7 +429,7 @@ class TestEdgeCases:
         assert proceeds == 0.0
 
     def test_tiny_quantity_pnl_non_negative_costs(self):
-        """#19: very small fractional quantity → costs are non-negative."""
+        """Very small fractional quantity → costs are non-negative."""
         cm = _crypto_cost()
         pos = _make_pos(entry_price=100.0, quantity=1e-8, cm=cm)
         pnl, _proceeds, _ = close_position(pos, 110.0, cm)
@@ -438,7 +438,7 @@ class TestEdgeCases:
         assert pnl.slippage >= 0
 
     def test_scale_insufficient_cash_rejected(self):
-        """#20: scaling rejected when cash insufficient."""
+        """Scaling rejected when cash insufficient."""
         positions: dict[str, PositionState] = {}
         _run_actions(
             [OrderIntent(action="long", symbol="TEST", quantity=10.0)],
@@ -458,7 +458,7 @@ class TestEdgeCases:
         assert result.cash_delta == 0.0
 
     def test_multi_symbol_independence(self):
-        """#21: scaling A doesn't affect B."""
+        """Scaling A doesn't affect B."""
         positions: dict[str, PositionState] = {}
         prices = {"A": 100.0, "B": 200.0}
         cm = _zero_cost()
@@ -484,7 +484,7 @@ class TestEdgeCases:
         assert positions["B"].quantity == 3.0  # unchanged
 
     def test_equity_with_scaled_position(self):
-        """#22: MTM correct after scaling."""
+        """MTM correct after scaling."""
         from librae.core.executor import side_multiplier
 
         cm = _zero_cost()
@@ -503,7 +503,7 @@ class TestEdgeCases:
         assert equity_contribution == pytest.approx(current_price * 15.0)
 
     def test_force_close_scaled_position(self):
-        """#23: force-close uses avg entry price."""
+        """Force-close uses avg entry price."""
         cm = _zero_cost()
         pos = _make_pos(entry_price=100.0, quantity=10.0, cm=cm)
         scale_into_position(pos, _make_fill(price=120.0, quantity=10.0, cm=cm), cm)
@@ -515,7 +515,7 @@ class TestEdgeCases:
         assert pnl.gross_pnl == pytest.approx((130.0 - expected_avg) * 20.0)  # 400
 
     def test_long_only_regression(self):
-        """#24: existing long-only pattern works identically."""
+        """Existing long-only pattern works identically."""
         positions: dict[str, PositionState] = {}
         cm = _zero_cost()
 
@@ -699,9 +699,9 @@ class TestMarginRate:
 
 class TestSizePosition:
     """_size_position must fully deploy cash even when min_commission (a flat
-    per-trade floor, not a per-unit cost) is set — regression coverage for a
-    bug where pricing 1 unit and extrapolating linearly treated the floor as
-    if it were charged on every unit, undersizing the position."""
+    per-trade floor, not a per-unit cost) is set — pricing 1 unit and
+    extrapolating linearly would treat the floor as if it were charged on
+    every unit, undersizing the position."""
 
     def test_rate_based_commission_with_floor_uses_full_cash(self):
         cm = CostModel(

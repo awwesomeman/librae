@@ -631,8 +631,8 @@ class TestPlaceOrder:
             )
 
     def test_place_order_rejects_market_order_with_day(self):
-        """Confirms the existing TAIFEX market+ROD rejection (op_code 9938)
-        is still enforced now that time_in_force is an explicit field."""
+        """Confirms the TAIFEX market+ROD rejection (op_code 9938) is enforced
+        with time_in_force as an explicit field."""
         adapter = _make_adapter(ca_activated=True)
         adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
 
@@ -1007,7 +1007,7 @@ class TestLifecycle:
 
 class TestInit:
     """ShioajiAdapter.__init__ itself — the fixtures above all bypass it via
-    __new__, so login/CA-activation/read_only were never actually tested."""
+    __new__, so without these login/CA-activation/read_only go untested."""
 
     def _mock_sj(self, mock_api: MagicMock) -> MagicMock:
         mock_sj = MagicMock()

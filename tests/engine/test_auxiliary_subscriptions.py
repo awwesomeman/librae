@@ -6,9 +6,9 @@ already refuses ("primary_subscriptions must contain one identity per
 symbol"). Extra frequencies are therefore auxiliary: read-only context the
 strategy reads through ``ctx.market_data``, never a source of fills.
 
-Backtest has supported this since the mixed-frequency replay work; these
-tests are about closing the gap in live, where a strategy previously had to
-resample inside itself and pay warmup for the finer bars.
+Backtest supports this through mixed-frequency replay; these tests cover
+live, where a strategy would otherwise have to resample inside itself and pay
+warmup for the finer bars.
 """
 
 from __future__ import annotations
@@ -182,8 +182,7 @@ class TestLiveExposesAuxiliaryHistory:
 
 def test_the_strategy_config_file_reaches_run_config(tmp_path, monkeypatch) -> None:
     """A documented YAML key build_run never reads is silently dropped, with
-    no error and an unchanged config_hash — the bug calendar_id had in #210
-    and optional_symbols had in #218."""
+    no error and an unchanged config_hash."""
     import sys
     import textwrap
 
@@ -370,8 +369,8 @@ class TestAuxiliaryCannotBreakTheCycle:
             if timeframe == "D1":
                 return auxiliary_fetch()
             if symbol in optional:
-                # An optional symbol that never delivers: the #218 scenario,
-                # and the one that reached a batch-only precondition.
+                # An optional symbol that never delivers: the case that can
+                # reach a batch-only precondition.
                 return self._bars(0, "h", "2025-01-01T00:00Z")
             return self._bars(6, "h", "2025-01-01T00:00Z")
 
@@ -397,7 +396,7 @@ class TestAuxiliaryCannotBreakTheCycle:
 
     def test_unusable_auxiliary_rows_do_not_stop_the_primary(self) -> None:
         """Normalization runs on auxiliary data too; a duplicate timestamp
-        used to escape the poll cycle and skip the primary's execution."""
+        must not escape the poll cycle and skip the primary's execution."""
         import pandas as pd
 
         def duplicated():
@@ -593,7 +592,7 @@ class TestStalledAuxiliaryIsReported:
 
 def test_a_malformed_auxiliary_entry_reports_the_key(tmp_path, monkeypatch) -> None:
     """A bare string is the natural mistake, since optional_symbols one line
-    above is a list of plain strings. It used to escape as a TypeError naming
+    above is a list of plain strings. It must not escape as a TypeError naming
     neither the key nor the file."""
     import sys
     import textwrap

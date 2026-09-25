@@ -1,10 +1,10 @@
 """Resampler output must survive both cadence gates, on every calendar.
 
-The resampler, ``validate_bar_cadence`` and the backtest loader each used to
-decide where a bar closed, so a series librae produced could be rejected by
+If the resampler, ``validate_bar_cadence`` and the backtest loader each
+decided where a bar closed, a series librae produced could be rejected by
 librae. These tests run the whole path end to end; the calendars with more
-than one segment per session are the ones that used to fail, and
-``XTAIFEX_1725`` is here because it is the one that never did.
+than one segment per session are the ones at risk, and ``XTAIFEX_1725`` is
+here as a known-good control.
 
 Whether the calendar describes the geometry at all is a per-series question
 answered by ``bucket_geometry_is_known``, so every matrix here runs in both
@@ -29,8 +29,8 @@ SYMBOL = "SYM"
 # sessions describes none of the feed's geometry, so these series fall back to
 # the nominal interval and the short gap a truncated bucket leaves still reads
 # as an overlap. Every entry is a library-backed calendar: librae writes the
-# TAIFEX segments itself, so both XTAIFEX timeframes that used to sit here take
-# the geometry path in either mode now.
+# TAIFEX segments itself, so XTAIFEX takes the geometry path in either mode and
+# is absent here.
 REJECTED_UNDER_EXTENDED = frozenset(
     {
         ("XTKS", "H2"),
@@ -223,9 +223,9 @@ def test_a_series_on_its_own_phase_is_accepted(feed: str, session_mode: str) -> 
 
 @pytest.mark.parametrize("session_mode", ("regular", "extended"))
 def test_out_of_session_bar_still_loads(session_mode: str) -> None:
-    """The loader accepted bars outside every segment before #248 and still
-    does. The write path rejects them through ``_completion_floor``;
-    tightening the loader to match is a separate decision, not this issue's.
+    """The loader accepts bars outside every segment. The write path rejects
+    them through ``_completion_floor``; tightening the loader to match is a
+    separate decision.
     """
     index = _resampled("XNYS", "H1").index.insert(0, pd.Timestamp("2024-06-03T00:00Z"))
 

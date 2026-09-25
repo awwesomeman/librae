@@ -261,8 +261,7 @@ class TestOptionalSubscriptionDeclaration:
 
     def test_the_strategy_config_file_reaches_run_config(self, tmp_path, monkeypatch) -> None:
         """A documented YAML key that build_run never reads is silently
-        dropped: no error, unchanged config_hash, every symbol still required.
-        calendar_id had exactly this bug (#210)."""
+        dropped: no error, unchanged config_hash, every symbol still required."""
         import sys
         import textwrap
 
@@ -296,8 +295,8 @@ class TestDataReadinessGate:
 
     Unit-scoped on purpose. Reaching this gate end-to-end is hard to arrange
     honestly, because the warmup gate and the rolling OHLCV cache both keep a
-    partial cycle from getting here first — see the note on sim/live parity in
-    the PR. Its single call site is the poll cycle.
+    partial cycle from getting here first. Its single call site is the poll
+    cycle.
     """
 
     @staticmethod
@@ -402,8 +401,8 @@ class TestOptionalSymbolsReleaseTheWarmupGate:
 
 class TestSimulationHoldsOnStaleRequiredData:
     """Simulation runs against a live feed, so wall-clock staleness means the
-    same thing it does in live. It used to skip the stale check and evaluate
-    on the last known bars; live and sim now fail closed identically.
+    same thing it does in live. Skipping the stale check would evaluate on
+    the last known bars; live and sim fail closed identically.
 
     (Backtest is unaffected: it replays history, where staleness relative to
     wall clock has no meaning, and never reaches the poll cycle.)
@@ -496,8 +495,8 @@ class TestOptionalSymbolAcrossWarmupCycles:
         from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
 
         # BTC starts short of warmup so the first cycle reports incomplete
-        # warmup; the "warmup ready" summary on the next cycle is what used to
-        # raise KeyError for a symbol the cache never got a key for.
+        # warmup; the "warmup ready" summary on the next cycle must not raise
+        # KeyError for a symbol the cache has no key for.
         state = {"btc": 1, "eth": 0}
         seen: list[tuple[str, ...]] = []
 
@@ -524,9 +523,8 @@ class TestOptionalSymbolAcrossWarmupCycles:
         # is reported and the next cycle will print the "warmup ready" summary.
         runner._poll_cycle()
         # Cycle 2: the required feed completes while the optional one still has
-        # nothing. This is the cycle that used to raise KeyError, because that
-        # summary indexed the cache for every symbol and the optional one never
-        # got a key.
+        # nothing. This cycle would raise KeyError if that summary indexed the
+        # cache for every symbol, since the optional one has no key yet.
         state["btc"] = 6
         runner._poll_cycle()
         # Cycle 3: the optional feed arrives, but short of the requirement.

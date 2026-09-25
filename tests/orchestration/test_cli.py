@@ -156,8 +156,8 @@ class TestParseWithConfig:
 class TestResolveMarketAndDataSource:
     """Regression tests: an unregistered symbol universe (e.g. a
     stock-picking strategy over tickers not in librae/config/symbols.py)
-    used to silently fall back to market='crypto'/data_source='binance_spot'
-    when config.yaml didn't set them — the run would still complete, just
+    must not silently fall back to market='crypto'/data_source='binance_spot'
+    when config.yaml doesn't set them — the run would still complete, just
     with crypto's cost/margin assumptions silently applied to equities."""
 
     def test_registered_symbol_infers_market(self):

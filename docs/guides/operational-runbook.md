@@ -3,11 +3,10 @@
 This is the evidence record for the "Live broker" promotion stage in the
 [strategy readiness checklist](strategy-readiness.md): a named operator,
 alerting, and a rehearsed kill/recovery procedure, before any strategy is
-promoted to live capital. It tracks
-[issue #86](https://github.com/awwesomeman/librae/issues/86)'s definition of
-done. `deploy/`'s Docker/Compose surface is documented separately in
-[Optional infrastructure](optional-infrastructure.md); this guide is the
-operational procedures layered on top of it, not a restatement of it.
+promoted to live capital. `deploy/`'s Docker/Compose surface is documented
+separately in [Optional infrastructure](optional-infrastructure.md); this
+guide is the operational procedures layered on top of it, not a restatement
+of it.
 
 ## Operator and escalation
 

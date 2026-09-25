@@ -191,7 +191,7 @@ class OrderIntent:
         time_in_force: Order lifetime — "day" (rest until the instrument's
             session ends), "gtc" (rest until cancelled), "ioc" (fill what is
             available now, cancel the remainder), or "fok" (fill the entire
-            quantity now or cancel it all). None keeps the historical
+            quantity now or cancel it all). None keeps the default
             one-event opportunity and resolves per order type at the broker
             (see LiveExecutor.OrderRequest).
 

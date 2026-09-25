@@ -517,7 +517,7 @@ class TestTheCheckpointRecordsWhatTheSinkAccepted:
     statements leaves the rest of the suite green. Persisting first records
     rows the sink already took, so a crash before the next checkpoint
     restarts with them still queued — harmless to redeliver, but they hold
-    headroom against MAX_PENDING_OHLCV, whose overflow now drops rows.
+    headroom against MAX_PENDING_OHLCV, whose overflow drops rows.
     """
 
     @staticmethod

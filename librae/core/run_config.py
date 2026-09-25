@@ -400,20 +400,20 @@ class RunConfig:
     # per SymbolInfo and is only required where session-boundary awareness is
     # actually used (intraday ADV, session-aware resampling).
     # Subscriptions the strategy can run without. Everything else blocks
-    # evaluation until its data is ready, which is the historical behaviour and
-    # stays the default. Declared per run rather than on the instrument or the
-    # subscription: the same instrument can be load-bearing for one strategy
-    # and a nice-to-have for another, so this is policy, not identity.
+    # evaluation until its data is ready, which is the default. Declared per
+    # run rather than on the instrument or the subscription: the same
+    # instrument can be load-bearing for one strategy and a nice-to-have for
+    # another, so this is policy, not identity.
     optional_symbols: tuple[str, ...] = ()
     # Extra read-only frequencies for symbols already in the run, reached
-    # through ``ctx.market_data``. Live previously had no way to express these,
-    # so a strategy needing daily context while executing hourly had to
-    # resample inside itself and pay warmup for the finer bars.
+    # through ``ctx.market_data``. Without them, a strategy needing daily
+    # context while executing hourly has to resample inside itself and pay
+    # warmup for the finer bars.
     auxiliary_subscriptions: tuple[AuxiliarySubscription, ...] = ()
     calendar_id: str | None = None
     # Run-wide market-data subscription identity. ``extended`` includes all
-    # sessions exposed by the source and preserves the historical adapter
-    # default; ``regular`` requests only the venue's regular session.
+    # sessions exposed by the source and is the adapter default; ``regular``
+    # requests only the venue's regular session.
     session_mode: MarketDataSessionMode = "extended"
 
     # === Non-result policies (excluded from config_hash) ===
@@ -634,9 +634,9 @@ class RunConfig:
                     "data_source": self.data_source,
                     "mode": self.mode,
                     "broker": self.broker,
-                    # ``extended`` was the implicit historical default. Omit
-                    # it to preserve compatible live checkpoint/cache keys
-                    # while making any non-default session a distinct input.
+                    # ``extended`` is the implicit default. Omitting it keeps
+                    # live checkpoint/cache keys compatible with configs that
+                    # never set it, while any other session is a distinct input.
                     **(
                         {"session_mode": self.session_mode}
                         if self.session_mode != "extended"

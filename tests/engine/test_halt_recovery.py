@@ -90,8 +90,8 @@ class TestReadinessIsObservable:
         assert readiness.required_action
 
     def test_a_stale_mark_blocks_reset(self) -> None:
-        """A dead feed's last price is not a valuation. Reset used to succeed
-        on it, because only the mark's presence was checked."""
+        """A dead feed's last price is not a valuation. Checking only the
+        mark's presence would let reset succeed on it."""
         readiness = _halted_runner(
             marks={"BTCUSDT": 100.0},
             last_bar_ts={"BTCUSDT": datetime(2024, 12, 20, tzinfo=UTC)},
