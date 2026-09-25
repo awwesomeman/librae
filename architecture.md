@@ -132,7 +132,8 @@ notifier, or state store. An unused integration therefore cannot break
 stays at the composition boundary.
 
 Static integration contracts live in `librae.integrations`; offline bar,
-order-adapter, and execution-report checks live in `librae.testing`. Reference
+order-adapter, execution-report, and feature look-ahead checks live in
+`librae.testing`. Reference
 implementations live in the regular `librae.brokers`, `librae.db`,
 `librae.notifications`, `librae.orchestration`, and `librae.app` packages.
 The distribution exposes only the `librae` top-level namespace. The former
@@ -346,7 +347,7 @@ librae/
 ├── artifacts.py              format-neutral manifest + tabular research/export boundary
 ├── data.py                   explicit caller-side bar normalization
 ├── integrations.py           stable public protocols and broker value types
-├── testing.py                offline third-party adapter conformance helpers
+├── testing.py                offline adapter and feature-causality conformance helpers
 │
 ├── backtest/                 backtest runtime
 │   ├── engine.py             Backtest — bar-by-bar execution + optional position snapshots + build_output()

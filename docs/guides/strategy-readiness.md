@@ -28,8 +28,9 @@ account and therefore follows the broker-confirmed execution path.
       fundamentals are point-in-time; no current constituent list or revised
       value is projected backward.
 - [ ] Feature windows are grouped by symbol, contain only information through
-      bar T, and are not pre-shifted to imitate execution. Librae owns the
-      simulated T to T+1 delay.
+      bar T (checked offline by `librae.testing.validate_feature_causality`),
+      and are not pre-shifted to imitate execution. Librae owns the simulated
+      T to T+1 delay.
 - [ ] Missing bars, duplicate timestamps, stale data, volume units, currency,
       multiplier, tick size, and trading calendar behavior are explicitly
       tested.
