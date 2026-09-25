@@ -370,6 +370,7 @@ class TestPlaceOrder:
                 "quantity": 2.9,
                 "order_type": "limit",
                 "time_in_force": "day",
+                "position_effect": "open",
                 "price": 20_000.0,
                 "price_increment": 1.0,
                 "continuous_alias": True,
@@ -392,6 +393,7 @@ class TestPlaceOrder:
                 "quantity": 1.0,
                 "order_type": "limit",
                 "time_in_force": "day",
+                "position_effect": "open",
                 "price": 20_000.5,
                 "continuous_alias": True,
             }
@@ -413,6 +415,7 @@ class TestPlaceOrder:
                     "quantity": 1.0,
                     "order_type": "limit",
                     "time_in_force": "day",
+                    "position_effect": "open",
                     "price": 20_000.5,
                     "price_increment": 1.0,
                     "continuous_alias": True,
@@ -431,6 +434,7 @@ class TestPlaceOrder:
                     "quantity": 1.0,
                     "order_type": "limit",
                     "time_in_force": "day",
+                    "position_effect": "open",
                     "price": 20_000.0,
                     "price_increment": 1.0,
                     "continuous_alias": True,
@@ -451,6 +455,7 @@ class TestPlaceOrder:
                     "quantity": 1.0,
                     "order_type": "market",
                     "time_in_force": "ioc",
+                    "position_effect": "open",
                 }
             )
 
@@ -471,6 +476,7 @@ class TestPlaceOrder:
                     "quantity": 1,
                     "order_type": "limit",
                     "time_in_force": "day",
+                    "position_effect": "open",
                     "price": 17000,
                     "continuous_alias": True,
                 }
@@ -508,6 +514,7 @@ class TestPlaceOrder:
                     "quantity": 1000,
                     "order_type": "market",
                     "time_in_force": "ioc",
+                    "position_effect": "open",
                 }
             )
 
@@ -536,6 +543,7 @@ class TestPlaceOrder:
                     "quantity": 1,
                     "order_type": "market",
                     "time_in_force": "ioc",
+                    "position_effect": "open",
                     "client_order_id": "strategy-TXFR1-open-20260101T000000",
                     "continuous_alias": True,
                 }
@@ -565,6 +573,7 @@ class TestPlaceOrder:
                     "quantity": 1,
                     "order_type": "market",
                     "time_in_force": "ioc",
+                    "position_effect": "open",
                     "continuous_alias": True,
                 }
             )
@@ -594,6 +603,7 @@ class TestPlaceOrder:
                     "quantity": 1,
                     "order_type": "limit",
                     "time_in_force": "fok",
+                    "position_effect": "open",
                     "price": 17000,
                     "continuous_alias": True,
                 }
@@ -625,6 +635,7 @@ class TestPlaceOrder:
                     "quantity": 1,
                     "order_type": "limit",
                     "time_in_force": "gtc",
+                    "position_effect": "open",
                     "price": 17000,
                     "continuous_alias": True,
                 }
@@ -648,6 +659,7 @@ class TestPlaceOrder:
                     "quantity": 1,
                     "order_type": "market",
                     "time_in_force": "day",
+                    "position_effect": "open",
                     "continuous_alias": True,
                 }
             )
@@ -1122,6 +1134,7 @@ class TestInit:
                     "quantity": 1,
                     "order_type": "limit",
                     "time_in_force": "day",
+                    "position_effect": "open",
                     "price": 20_000,
                     "continuous_alias": True,
                 }

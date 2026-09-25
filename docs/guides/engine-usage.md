@@ -419,7 +419,9 @@ Quantity feasibility does not diverge. `SymbolInfo.quantity_step` and
 toward zero before cash, volume, and risk checks in both modes. Grouped legs
 must preserve their relative scale after rounding. Live adapters remain the
 final authority for current venue-specific precision and minimums, and their
-prepared result is checked again before submission.
+prepared result is checked again before submission. Short feasibility does not
+diverge either: a short intent or negative weight on crypto spot fails decision
+preflight on the emitting bar in every mode (`SymbolInfo.can_short`).
 
 OHLCV caches are sorted and deduplicated. Mode-specific backlog handling is
 defined under data staleness below. Both modes advance a durable per-symbol
@@ -991,9 +993,9 @@ When no order or grouped execution is active, the checks repeat every
   flat: broker exposure alone cannot reconstruct the engine's cash, accumulated
   entry costs, or risk epoch, so a non-flat first run halts and requires the
   matching checkpoint or an operator flatten. Crypto spot uses base-asset
-  balance inventory, not the derivatives-only positions endpoint. Ordinary
-  spot also rejects opening/adding a short, while a sell that reduces or closes
-  owned inventory remains valid.
+  balance inventory, not the derivatives-only positions endpoint. A sell that
+  reduces or closes owned inventory is valid; opening or adding a short is
+  refused in every mode (see quantity and short feasibility above).
 - **Cash** (`_reconcile_cash`, for adapters exposing `get_balance()`): warns
   only, never overwrites. A Telegram alert fires once discrepancy exceeds
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total

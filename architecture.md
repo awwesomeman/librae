@@ -245,6 +245,7 @@ Grafana dashboards consume the same multiplier.
   `contract_month`. Position reconciliation checks alias and target codes
   through `futopt_account`.
 - `CryptoAdapter` keeps the CCXT unified symbol as `venue_symbol`. A delivery future must set `contract_month`, checked against CCXT market `expiry`; spot and perpetual markets cannot carry that field. Binance continuous klines remain a data/research API and are explicitly rejected by order/position paths instead of being mistaken for an orderable contract.
+- On a CCXT contract market, `CryptoAdapter` sends every `reduce`/`close` order (including a flip's reduction leg) with CCXT's unified `reduceOnly`, so a stale local book makes the venue refuse the exit instead of opening opposite exposure; spot and `open`/`add` orders never carry it. The derivatives account must be in one-way (net) position mode: the engine holds one net position per instrument and never sends `positionSide`, and Binance USD-M rejects `reduceOnly` in hedge mode while requiring `positionSide` there (source: Binance USD-M Futures REST API, New Order; ccxt `binance.create_order` docstring).
 
 ### Broker symbol discovery
 
@@ -590,6 +591,15 @@ authority. Adapters may impose more specific current venue rules and their
 prepared request is validated again. Dynamic exchange precision,
 minimum-notional discovery, and price-band tick schedules stay adapter-owned
 rather than being frozen into `SymbolInfo`.
+
+`SymbolInfo.can_short` is the same kind of fact: false for crypto spot, whose
+orders sell owned inventory, which `CryptoAdapter.prepare_order` refuses to
+open short. Decision preflight rejects a short intent or negative target
+weight on such a symbol in every mode, and restoring a runtime checkpoint
+whose pending decision does so fails; equity spot and contracts short
+normally. A config's `market` is a declaration for every unregistered symbol
+that does not override it, so one declared spot in a crypto run is refused; a
+direct `Backtest` symbol with no registered metadata is unrestricted.
 
 For a live run, set one run-wide `broker` or compatible per-symbol
 `instrument_overrides.<symbol>.broker` values. Registered symbol metadata may

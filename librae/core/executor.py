@@ -3488,6 +3488,7 @@ def validate_strategy_decision(
     bars: dict[str, dict[str, float]],
     positions: dict[str, PositionState],
     broker_for: Callable[[str], str | None] | None = None,
+    can_short: Callable[[str], bool] | None = None,
 ) -> None:
     """Validate one strategy return value before it enters engine state.
 
@@ -3602,6 +3603,40 @@ def validate_strategy_decision(
     unknown = symbols - universe
     if unknown:
         raise ValueError(f"strategy decision contains unknown symbols: {sorted(unknown)}")
+    # A short on an instrument that cannot hold one is never executable, so
+    # it fails on the emitting bar in every mode rather than filling in
+    # simulation and failing only at live order preparation.
+    if can_short is not None:
+        refused = refused_short_symbols(
+            decision, primary_symbol=primary_symbol, can_short=can_short
+        )
+        if refused:
+            remedy = (
+                "set a non-negative target weight"
+                if isinstance(decision, PortfolioWeights)
+                else "reduce a long with action='close'"
+            )
+            raise ValueError(
+                f"strategy decision shorts {refused}, which cannot open or add to a short "
+                f"(crypto spot sells owned inventory); {remedy}, or declare the "
+                "instrument_type via instrument_overrides if this is a contract"
+            )
+
+
+def refused_short_symbols(
+    decision: StrategyDecision,
+    *,
+    primary_symbol: str,
+    can_short: Callable[[str], bool],
+) -> list[str]:
+    """Return the symbols this decision would short although they cannot be shorted."""
+    if isinstance(decision, PortfolioWeights):
+        shorted = {symbol for symbol, weight in decision.weights.items() if weight < -EPSILON}
+    else:
+        shorted = {
+            intent.symbol or primary_symbol for intent in decision if intent.action == "short"
+        }
+    return sorted(symbol for symbol in shorted if not can_short(symbol))
 
 
 def _intent_fill_timing(

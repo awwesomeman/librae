@@ -45,6 +45,7 @@ from librae.core.executor import (
     order_side_is_tradable,
     partition_pending_decision,
     queue_market_exit_all,
+    refused_short_symbols,
     validate_exposure_transition,
     validate_strategy_decision,
 )
@@ -1047,6 +1048,22 @@ class LiveTrader:
             raise ValueError("runtime state account does not match this run")
         if state.execution_identity != self._execution_identity:
             raise RuntimeError("runtime state execution identity does not match this broker route")
+        # A checkpoint bypasses decision preflight, and one written by an
+        # engine that let simulation short crypto spot may still queue one.
+        # A held short is left alone: closing it is a buy.
+        restored_decisions = [("pending decision", state.pending_decision)]
+        if state.live_rebalance is not None:
+            restored_decisions.append(("live rebalance", state.live_rebalance.targets))
+        for label, decision in restored_decisions:
+            refused = refused_short_symbols(
+                decision, primary_symbol=self._symbols[0], can_short=self._can_short
+            )
+            if refused:
+                raise ValueError(
+                    f"runtime checkpoint {label} shorts {refused}, which cannot open or add "
+                    "to a short (crypto spot sells owned inventory); perform an explicit "
+                    "checkpoint migration that removes it before resuming"
+                )
         self._cash = state.cash
         self._positions = state.positions
         self._last_prices = state.last_prices
@@ -4200,6 +4217,7 @@ class LiveTrader:
             bars=bars,
             positions=self._positions,
             broker_for=self._config.broker_for,
+            can_short=self._can_short,
         )
         intent = self._without_halted_account(intent)
         self._period_index += 1
@@ -4303,6 +4321,10 @@ class LiveTrader:
     def _get_min_notional(self, symbol: str) -> float | None:
         """Return the shared entry-order minimum, when configured."""
         return self._instruments[symbol].min_notional
+
+    def _can_short(self, symbol: str) -> bool:
+        """Apply the shared instrument short restriction before broker preparation."""
+        return self._instruments[symbol].can_short
 
     def _apply_financing_cash_flows(
         self,
