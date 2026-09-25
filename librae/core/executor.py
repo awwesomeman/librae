@@ -3592,18 +3592,36 @@ def validate_strategy_decision(
     # it fails on the emitting bar in every mode rather than filling in
     # simulation and failing only at live order preparation.
     if can_short is not None:
-        if isinstance(decision, PortfolioWeights):
-            shorted = {symbol for symbol, weight in decision.weights.items() if weight < -EPSILON}
-        else:
-            shorted = {
-                intent.symbol or primary_symbol for intent in decision if intent.action == "short"
-            }
-        refused = sorted(symbol for symbol in shorted if not can_short(symbol))
+        refused = refused_short_symbols(
+            decision, primary_symbol=primary_symbol, can_short=can_short
+        )
         if refused:
+            remedy = (
+                "set a non-negative target weight"
+                if isinstance(decision, PortfolioWeights)
+                else "reduce a long with action='close'"
+            )
             raise ValueError(
                 f"strategy decision shorts {refused}, which cannot open or add to a short "
-                "(crypto spot sells owned inventory); reduce a long with action='close'"
+                f"(crypto spot sells owned inventory); {remedy}, or declare the "
+                "instrument_type via instrument_overrides if this is a contract"
             )
+
+
+def refused_short_symbols(
+    decision: StrategyDecision,
+    *,
+    primary_symbol: str,
+    can_short: Callable[[str], bool],
+) -> list[str]:
+    """Return the symbols this decision would short although they cannot be shorted."""
+    if isinstance(decision, PortfolioWeights):
+        shorted = {symbol for symbol, weight in decision.weights.items() if weight < -EPSILON}
+    else:
+        shorted = {
+            intent.symbol or primary_symbol for intent in decision if intent.action == "short"
+        }
+    return sorted(symbol for symbol in shorted if not can_short(symbol))
 
 
 def _intent_fill_timing(

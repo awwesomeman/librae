@@ -98,6 +98,56 @@ class TestCryptoSpotRefusesShorts:
                 can_short=lambda _symbol: spot.can_short,
             )
 
+    @pytest.mark.parametrize(
+        ("decision", "remedy", "wrong_remedy"),
+        [
+            (
+                [OrderIntent(action="short", symbol="BTCUSDT", quantity=1.0)],
+                "reduce a long with action='close'",
+                "target weight",
+            ),
+            (
+                PortfolioWeights({"BTCUSDT": -0.5}),
+                "set a non-negative target weight",
+                "action='close'",
+            ),
+        ],
+    )
+    def test_the_remedy_fits_the_decision_type(self, decision, remedy, wrong_remedy) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            validate_strategy_decision(
+                decision,
+                {"BTCUSDT"},
+                primary_symbol="BTCUSDT",
+                bars={"BTCUSDT": {"close": 100.0}},
+                positions={},
+                can_short=lambda _symbol: False,
+            )
+
+        message = str(excinfo.value)
+        assert "(crypto spot sells owned inventory)" in message
+        assert remedy in message
+        assert wrong_remedy not in message
+        assert "instrument_overrides" in message
+
+    def test_a_config_market_declares_unregistered_spot_symbols(self) -> None:
+        config = make_test_cfg(
+            mode="backtest",
+            symbols=["COIN"],
+            instrument_overrides={
+                "COIN": {
+                    "data_adapter": "crypto",
+                    "instrument_type": "spot",
+                    "currency": "USDT",
+                    "calendar_id": "24/7",
+                }
+            },
+            symbol_cost_overrides={"COIN": {"multiplier": 1.0}},
+        )
+
+        with pytest.raises(ValueError, match=r"shorts \['COIN'\]"):
+            Backtest(_bars("COIN"), _EnterThenClose("short"), config=config).run()
+
     def test_a_long_round_trip_still_runs(self) -> None:
         result = _run("BTCUSDT", _EnterThenClose("long"), currency="USDT")
 

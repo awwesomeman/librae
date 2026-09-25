@@ -445,7 +445,9 @@ class SymbolInfo:
 
         Crypto spot orders sell owned inventory with no borrow, which is why
         CryptoAdapter.prepare_order refuses a spot short open. Equity spot can
-        be sold short on margin, and contracts short natively.
+        be sold short on margin, and contracts short natively. A config's
+        ``market`` is a declaration for every unregistered symbol that does
+        not override it, so one declared spot in a crypto run is refused.
         """
         return not (self.market == "crypto" and self.instrument_type == "spot")
 

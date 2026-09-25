@@ -594,9 +594,11 @@ rather than being frozen into `SymbolInfo`.
 `SymbolInfo.can_short` is the same kind of fact: false for crypto spot, whose
 orders sell owned inventory, which `CryptoAdapter.prepare_order` refuses to
 open short. Decision preflight rejects a short intent or negative target
-weight on such a symbol in every mode; equity spot and contracts short
-normally, and a direct `Backtest` symbol with no registered metadata is
-unrestricted.
+weight on such a symbol in every mode, and restoring a runtime checkpoint
+whose pending decision does so fails; equity spot and contracts short
+normally. A config's `market` is a declaration for every unregistered symbol
+that does not override it, so one declared spot in a crypto run is refused; a
+direct `Backtest` symbol with no registered metadata is unrestricted.
 
 For a live run, set one run-wide `broker` or compatible per-symbol
 `instrument_overrides.<symbol>.broker` values. Registered symbol metadata may
