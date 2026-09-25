@@ -115,6 +115,10 @@ open). Protection for a resting limit begins on the
 next observed bar. This conservative rule prevents a target reached before the
 entry from being recorded as profit without introducing an invented intrabar
 path model.
+Once protected, a take-profit already crossed at the bar open fills at the
+open, since the open is the first observable price; past the open a same-bar
+collision resolves conservatively, stop-loss before take-profit (see
+`resolve_stop_exit`).
 
 The same limit applies to an existing position: when a pending decision would
 fill at a non-open price on a bar where that position's protection triggers,
@@ -699,9 +703,10 @@ exceeded `RunConfig.runtime.poll_seconds`.
   it caps size rather than pricing a fill. The session-level ADV cap below is
   bounded by `adv_lookback_sessions`; this one is not.
   Missing volume rejects the fill. Constrained exits are explicit partial
-  fills and retain the remaining position for a later observed bar. Once
-  stop-market or liquidation has triggered, its remainder stays an active
-  market exit. A terminal backtest that cannot finish exits raises.
+  fills and retain the remaining position for a later observed bar. Once a
+  bar crosses the stop or liquidation level, the remainder stays an active
+  market exit, even when a take-profit crossed at the open filled first. A
+  terminal backtest that cannot finish exits raises.
 - `adv_lookback_sessions` + `max_adv_participation_rate`: optional session
   capacity budget. ADV is the mean total volume of exactly N completed trading
   sessions before the active session; it never contains active-session volume.
@@ -958,7 +963,7 @@ netting.
 
 ## Margin / liquidation simulation
 
-`CostModel.maintenance_margin_rate` (default 0 = off, following the same "belongs to the market/instrument, not `config.params`" convention as `volume_impact_ticks`, configured via `market_config.py`/`symbols.py`/`cost_overrides`). In backtest/sim, `resolve_stop_exit` checks every bar whether a position has hit the modeled liquidation price; if so it force-closes with `REASON_LIQUIDATION`, using conservative gap-through logic. The liquidation check takes priority over stop-loss/take-profit. Live does not replay this completed-bar touch as a market order: venue margin/liquidation and broker-native protective orders are authoritative.
+`CostModel.maintenance_margin_rate` (default 0 = off, following the same "belongs to the market/instrument, not `config.params`" convention as `volume_impact_ticks`, configured via `market_config.py`/`symbols.py`/`cost_overrides`). In backtest/sim, `resolve_stop_exit` checks every bar whether a position has hit the modeled liquidation price; if so it force-closes with `REASON_LIQUIDATION`, using conservative gap-through logic. Past the bar open, the liquidation check takes priority over stop-loss/take-profit. Live does not replay this completed-bar touch as a market order: venue margin/liquidation and broker-native protective orders are authoritative.
 
 The formula is a simplified isolated-margin approximation: long
 `entry*(1 + maintenance_margin_rate - margin_rate)`, short

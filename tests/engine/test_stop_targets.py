@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -122,10 +123,51 @@ class TestResolveStopExit:
         bar = {"open": 98.0, "high": 111.0, "low": 94.0, "close": 100.0}
         assert resolve_stop_exit(pos, bar, _zero_cost()) == (95.0, REASON_STOP_LOSS)
 
+    def test_long_take_profit_crossed_at_open_wins_over_later_stop(self):
+        """The resting target was marketable at the open, before the bar fell through the stop."""
+        pos = _make_pos(side="long", stop=95.0, tp=110.0)
+        bar = {"open": 115.0, "high": 116.0, "low": 94.0, "close": 96.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (115.0, REASON_TAKE_PROFIT)
+
+    def test_short_take_profit_crossed_at_open_wins_over_later_stop(self):
+        pos = _make_pos(side="short", stop=105.0, tp=90.0)
+        bar = {"open": 85.0, "high": 106.0, "low": 84.0, "close": 104.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (85.0, REASON_TAKE_PROFIT)
+
+    def test_long_take_profit_crossed_at_open_wins_over_later_liquidation(self):
+        pos = _make_pos(side="long", tp=110.0)
+        bar = {"open": 115.0, "high": 116.0, "low": 90.0, "close": 91.0}
+        assert resolve_stop_exit(pos, bar, _leveraged_cost()) == (115.0, REASON_TAKE_PROFIT)
+
+    def test_short_take_profit_crossed_at_open_wins_over_later_liquidation(self):
+        pos = _make_pos(side="short", tp=90.0)
+        bar = {"open": 85.0, "high": 110.0, "low": 84.0, "close": 109.0}
+        assert resolve_stop_exit(pos, bar, _leveraged_cost()) == (85.0, REASON_TAKE_PROFIT)
+
+    def test_short_stop_wins_when_both_hit_same_bar(self):
+        pos = _make_pos(side="short", stop=105.0, tp=90.0)
+        bar = {"open": 102.0, "high": 106.0, "low": 89.0, "close": 100.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (105.0, REASON_STOP_LOSS)
+
+    def test_long_stop_crossed_at_open_fills_at_open_despite_target_touch(self):
+        pos = _make_pos(side="long", stop=95.0, tp=110.0)
+        bar = {"open": 90.0, "high": 111.0, "low": 89.0, "close": 100.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (90.0, REASON_STOP_LOSS)
+
     def test_no_trigger_returns_none(self):
         pos = _make_pos(side="long", stop=95.0, tp=110.0)
         bar = {"open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
         assert resolve_stop_exit(pos, bar, _zero_cost()) is None
+
+    def test_short_no_trigger_returns_none(self):
+        pos = _make_pos(side="short", stop=105.0, tp=90.0)
+        bar = {"open": 100.0, "high": 102.0, "low": 98.0, "close": 99.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) is None
+
+    def test_stop_touched_exactly_triggers(self):
+        pos = _make_pos(side="long", stop=95.0)
+        bar = {"open": 98.0, "high": 99.0, "low": 95.0, "close": 96.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (95.0, REASON_STOP_LOSS)
 
     def test_no_stop_or_target_set_returns_none(self):
         pos = _make_pos(side="long")
@@ -214,6 +256,136 @@ class TestResolveStopExit:
         assert remainder.events[0].event_type == "close"
         assert remainder.events[0].price == pytest.approx(97.0)
         assert positions == {}
+
+    @pytest.mark.parametrize(
+        ("side", "cost_model", "gap_bar", "next_bar", "pending_reason"),
+        [
+            (
+                "long",
+                _zero_cost(),
+                {"open": 115.0, "high": 116.0, "low": 94.0, "close": 96.0},
+                {"open": 100.0, "high": 105.0, "low": 97.0, "close": 101.0},
+                REASON_STOP_LOSS,
+            ),
+            (
+                "short",
+                _zero_cost(),
+                {"open": 85.0, "high": 106.0, "low": 84.0, "close": 104.0},
+                {"open": 100.0, "high": 103.0, "low": 95.0, "close": 99.0},
+                REASON_STOP_LOSS,
+            ),
+            (
+                "long",
+                _leveraged_cost(),
+                {"open": 115.0, "high": 116.0, "low": 90.0, "close": 91.0},
+                {"open": 100.0, "high": 105.0, "low": 97.0, "close": 101.0},
+                REASON_LIQUIDATION,
+            ),
+            (
+                "short",
+                _leveraged_cost(),
+                {"open": 85.0, "high": 110.0, "low": 84.0, "close": 109.0},
+                {"open": 100.0, "high": 103.0, "low": 97.0, "close": 99.0},
+                REASON_LIQUIDATION,
+            ),
+        ],
+        ids=["long-stop", "short-stop", "long-liquidation", "short-liquidation"],
+    )
+    def test_partial_take_profit_at_open_queues_later_breach_for_remainder(
+        self, side, cost_model, gap_bar, next_bar, pending_reason
+    ):
+        """OCO: the target fills what it can at the open; the later breach
+        on the same bar takes the remainder at the next open."""
+        stop = 95.0 if side == "long" else 105.0
+        tp = 110.0 if side == "long" else 90.0
+        pos = _make_pos(side=side, stop=stop if pending_reason == REASON_STOP_LOSS else None, tp=tp)
+        pos.quantity = 10.0
+        positions = {"TEST": pos}
+
+        def run(bar, day):
+            return check_stop_targets(
+                positions,
+                {"TEST": {**bar, "volume": 20.0}},
+                datetime(2026, 1, day, tzinfo=UTC),
+                get_cost_model=lambda _symbol: cost_model,
+                max_bar_volume_participation_rate=0.25,
+            )
+
+        result = run(gap_bar, 2)
+        assert (result.events[0].reason, result.events[0].price) == (
+            REASON_TAKE_PROFIT,
+            gap_bar["open"],
+        )
+        assert result.events[0].fill_quantity == pytest.approx(5.0)
+        assert positions["TEST"].pending_market_exit_reason == pending_reason
+
+        remainder = run(next_bar, 3)
+        assert remainder.events[0].event_type == "close"
+        assert (remainder.events[0].reason, remainder.events[0].price) == (
+            pending_reason,
+            next_bar["open"],
+        )
+        assert positions == {}
+
+    @pytest.mark.parametrize(
+        ("bar_extra", "cost_model", "participation_rate"),
+        [
+            ({"volume": 100.0, "can_buy": False, "can_sell": True}, _zero_cost(), None),
+            ({"volume": 0.0}, replace(_zero_cost(), volume_impact_ticks=1.0), None),
+            ({"volume": 0.0}, _zero_cost(), 0.25),
+        ],
+        ids=["untradable", "impact-volume-unavailable", "zero-volume-budget"],
+    )
+    def test_deferred_take_profit_at_open_keeps_later_stop_breach_pending(
+        self, bar_extra, cost_model, participation_rate
+    ):
+        pos = _make_pos(side="short", stop=105.0, tp=90.0)
+        positions = {"TEST": pos}
+        bar = {"open": 85.0, "high": 106.0, "low": 84.0, "close": 104.0, **bar_extra}
+
+        result = check_stop_targets(
+            positions,
+            {"TEST": bar},
+            datetime(2026, 1, 2, tzinfo=UTC),
+            get_cost_model=lambda _symbol: cost_model,
+            max_bar_volume_participation_rate=participation_rate,
+        )
+
+        assert result.events == []
+        assert positions["TEST"].pending_market_exit_reason == REASON_STOP_LOSS
+
+    def test_partial_pending_exit_keeps_its_reason_on_a_stop_breach(self):
+        pos = _make_pos(side="long", stop=95.0, tp=110.0)
+        pos.quantity = 10.0
+        pos.pending_market_exit_reason = REASON_FORCE_CLOSE
+        positions = {"TEST": pos}
+
+        result = check_stop_targets(
+            positions,
+            {"TEST": {"open": 98.0, "high": 99.0, "low": 94.0, "close": 96.0, "volume": 20.0}},
+            datetime(2026, 1, 2, tzinfo=UTC),
+            get_cost_model=lambda _symbol: _zero_cost(),
+            max_bar_volume_participation_rate=0.25,
+        )
+
+        assert result.events[0].reason == REASON_FORCE_CLOSE
+        assert positions["TEST"].pending_market_exit_reason == REASON_FORCE_CLOSE
+
+    def test_partial_take_profit_without_breach_queues_nothing(self):
+        pos = _make_pos(side="long", stop=95.0, tp=110.0)
+        pos.quantity = 10.0
+        positions = {"TEST": pos}
+
+        check_stop_targets(
+            positions,
+            {"TEST": {"open": 115.0, "high": 116.0, "low": 112.0, "close": 113.0, "volume": 20.0}},
+            datetime(2026, 1, 2, tzinfo=UTC),
+            get_cost_model=lambda _symbol: _zero_cost(),
+            max_bar_volume_participation_rate=0.25,
+        )
+
+        assert positions["TEST"].quantity == pytest.approx(5.0)
+        assert positions["TEST"].pending_market_exit_reason is None
 
     def test_adverse_locked_limit_keeps_stop_exit_pending(self):
         pos = _make_pos(side="long", stop=95.0)
