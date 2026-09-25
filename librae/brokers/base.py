@@ -123,6 +123,10 @@ def validate_order_signal(signal: Mapping[str, Any]) -> None:
         raise ValueError("order_type must be 'market' or 'limit'")
     if signal.get("time_in_force") not in ("day", "gtc", "ioc", "fok"):
         raise ValueError("time_in_force must be 'day', 'gtc', 'ioc', or 'fok'")
+    # Adapters derive exit safety from it (e.g. reduce-only), so a missing or
+    # misspelled value must not degrade silently into an unguarded order.
+    if signal.get("position_effect") not in ("open", "add", "reduce", "close"):
+        raise ValueError("position_effect must be 'open', 'add', 'reduce', or 'close'")
     try:
         quantity = float(signal["quantity"])
     except (KeyError, TypeError, ValueError) as exc:

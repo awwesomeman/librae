@@ -75,6 +75,8 @@ def test_drop_incomplete_monthly_uses_last_exchange_session_close(
         ({"time_in_force": "gtd"}, "time_in_force"),
         ({"quantity": 0}, "quantity"),
         ({"order_type": "limit"}, "limit price"),
+        ({"position_effect": "exit"}, "position_effect"),
+        ({"position_effect": "closed"}, "position_effect"),
     ],
 )
 def test_validate_order_signal_rejects_ambiguous_orders(overrides, match):
@@ -84,11 +86,26 @@ def test_validate_order_signal_rejects_ambiguous_orders(overrides, match):
         "quantity": 1.0,
         "order_type": "market",
         "time_in_force": "ioc",
+        "position_effect": "open",
     }
     signal.update(overrides)
 
     with pytest.raises(ValueError, match=match):
         validate_order_signal(signal)
+
+
+def test_validate_order_signal_requires_position_effect():
+    """Adapters derive reduce-only from it, so omitting it must not pass."""
+    with pytest.raises(ValueError, match="position_effect"):
+        validate_order_signal(
+            {
+                "symbol": "TEST",
+                "side": "sell",
+                "quantity": 1.0,
+                "order_type": "market",
+                "time_in_force": "ioc",
+            }
+        )
 
 
 def test_validate_order_signal_accepts_explicit_market_order():
@@ -99,5 +116,6 @@ def test_validate_order_signal_accepts_explicit_market_order():
             "quantity": 1.0,
             "order_type": "market",
             "time_in_force": "ioc",
+            "position_effect": "open",
         }
     )

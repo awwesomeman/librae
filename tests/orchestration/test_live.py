@@ -450,6 +450,7 @@ def _place_shioaji_order(adapter: object) -> dict:
                 "quantity": 1,
                 "order_type": "market",
                 "time_in_force": "ioc",
+                "position_effect": "open",
                 "continuous_alias": True,
             }
         )
