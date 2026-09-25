@@ -701,9 +701,10 @@ exceeded `RunConfig.runtime.poll_seconds`.
   it caps size rather than pricing a fill. The session-level ADV cap below is
   bounded by `adv_lookback_sessions`; this one is not.
   Missing volume rejects the fill. Constrained exits are explicit partial
-  fills and retain the remaining position for a later observed bar. Once
-  stop-market or liquidation has triggered, its remainder stays an active
-  market exit. A terminal backtest that cannot finish exits raises.
+  fills and retain the remaining position for a later observed bar. Once a
+  bar crosses the stop or liquidation level, the remainder stays an active
+  market exit, even when a take-profit crossed at the open filled first. A
+  terminal backtest that cannot finish exits raises.
 - `adv_lookback_sessions` + `max_adv_participation_rate`: optional session
   capacity budget. ADV is the mean total volume of exactly N completed trading
   sessions before the active session; it never contains active-session volume.

@@ -963,6 +963,25 @@ def apply_execution_fill(
 # ---------------------------------------------------------------------------
 
 
+def _crossed_market_exit(
+    pos: PositionState,
+    high: float,
+    low: float,
+    cost_model: CostModel,
+) -> tuple[float, str] | None:
+    """(level, reason) of the first stop-market level — liquidation, then
+    stop-loss — that the bar's range crosses, or None."""
+    is_long = pos.side == "long"
+    levels = (
+        (cost_model.liquidation_price(pos.entry_price, pos.side), REASON_LIQUIDATION),
+        (pos.stop_price, REASON_STOP_LOSS),
+    )
+    for level, reason in levels:
+        if level is not None and (low <= level if is_long else high >= level):
+            return level, reason
+    return None
+
+
 def resolve_stop_exit(
     pos: PositionState,
     bar: dict[str, float],
@@ -1001,18 +1020,10 @@ def resolve_stop_exit(
     if tp is not None and (open_ >= tp if is_long else open_ <= tp):
         return open_, REASON_TAKE_PROFIT
 
-    liq_price = cost_model.liquidation_price(pos.entry_price, pos.side)
-    if liq_price is not None:
-        triggered = low <= liq_price if is_long else high >= liq_price
-        if triggered:
-            fill = min(liq_price, open_) if is_long else max(liq_price, open_)
-            return fill, REASON_LIQUIDATION
-
-    if pos.stop_price is not None:
-        triggered = low <= pos.stop_price if is_long else high >= pos.stop_price
-        if triggered:
-            fill = min(pos.stop_price, open_) if is_long else max(pos.stop_price, open_)
-            return fill, REASON_STOP_LOSS
+    crossed = _crossed_market_exit(pos, high, low, cost_model)
+    if crossed is not None:
+        level, reason = crossed
+        return (min(level, open_) if is_long else max(level, open_)), reason
 
     if tp is not None and (high >= tp if is_long else low <= tp):
         return tp, REASON_TAKE_PROFIT
@@ -1059,10 +1070,15 @@ def check_stop_targets(
         if hit is None:
             continue
         price, reason = hit
+        # A take-profit filled at the open can leave a later stop breach for the remainder.
+        market_exit_reason = None
+        if pos.pending_market_exit_reason is None:
+            crossed = _crossed_market_exit(pos, bar["high"], bar["low"], cost_model)
+            market_exit_reason = crossed[1] if crossed is not None else None
         close_side: Literal["buy", "sell"] = "sell" if pos.side == "long" else "buy"
         if not order_side_is_tradable(bar, close_side):
-            if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
-                pos.pending_market_exit_reason = reason
+            if market_exit_reason is not None:
+                pos.pending_market_exit_reason = market_exit_reason
             runtime_events.append(
                 _skipped(ts, "protective_exit_deferred", symbol=sym, exit_reason=reason)
             )
@@ -1074,8 +1090,8 @@ def check_stop_targets(
             continue
         bar_volume = get_volume(sym) if get_volume else bar.get("volume")
         if _impact_volume_unavailable(cost_model, bar_volume):
-            if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
-                pos.pending_market_exit_reason = reason
+            if market_exit_reason is not None:
+                pos.pending_market_exit_reason = market_exit_reason
             runtime_events.append(
                 _skipped(
                     ts,
@@ -1101,8 +1117,8 @@ def check_stop_targets(
         if get_executable_quantity is not None and close_quantity > EPSILON:
             close_quantity = get_executable_quantity(sym, close_quantity)
         if close_quantity <= EPSILON:
-            if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
-                pos.pending_market_exit_reason = reason
+            if market_exit_reason is not None:
+                pos.pending_market_exit_reason = market_exit_reason
             runtime_events.append(
                 _skipped(ts, "protective_exit_deferred", symbol=sym, exit_reason=reason)
             )
@@ -1130,8 +1146,8 @@ def check_stop_targets(
         if fully_closed:
             del positions[sym]
         else:
-            if reason in (REASON_LIQUIDATION, REASON_STOP_LOSS):
-                pos.pending_market_exit_reason = reason
+            if market_exit_reason is not None:
+                pos.pending_market_exit_reason = market_exit_reason
             reduce_position(pos, close_quantity)
 
     return ExecutionResult(
