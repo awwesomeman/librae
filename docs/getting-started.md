@@ -309,28 +309,5 @@ enabling a database, monitoring, or broker integration.
 
 ## Contributing to this repository
 
-Set up all development integrations you intend to test:
-
-```bash
-uv sync --extra test --extra dev --extra db --extra crypto-live
-git config core.hooksPath .githooks
-```
-
-Standard editable installation is also supported when the caller does not use
-the repository's `uv` environment:
-
-```bash
-python -m pip install --editable .
-```
-
-Add `--extra tw-live`, `--extra us-live`, or `--extra viz` only when needed.
-Run commands through `uv run`:
-
-```bash
-uv run pytest tests/ -q
-uv run ruff check .
-uv run ruff format --check .
-```
-
-The pre-commit hook runs the Ruff checks. Tests that exercise external
-boundaries use mocks unless explicitly documented otherwise.
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for the development setup, checks,
+and conventions.
