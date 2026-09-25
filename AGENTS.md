@@ -24,7 +24,8 @@ general industry practice and these docs disagree, these docs win.
   committing as the machine default.
 - **No history in docs or comments**: no issue/PR numbers, "fixed in",
   "previously", or "as of <date>". State the reason; history goes in the
-  commit message.
+  commit message. Exceptions (historical dirs, evidence dates) are in
+  [CONTRIBUTING rule 2](CONTRIBUTING.md#writing-docs-and-comments).
 - **Verbose or repeated docs**: agents over-explain and restate. Before
   writing, find the doc that already owns the concept and link to it; keep
   new text short and scannable. This includes rules: change the canonical
