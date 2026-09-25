@@ -4200,6 +4200,7 @@ class LiveTrader:
             bars=bars,
             positions=self._positions,
             broker_for=self._config.broker_for,
+            can_short=self._can_short,
         )
         intent = self._without_halted_account(intent)
         self._period_index += 1
@@ -4303,6 +4304,10 @@ class LiveTrader:
     def _get_min_notional(self, symbol: str) -> float | None:
         """Return the shared entry-order minimum, when configured."""
         return self._instruments[symbol].min_notional
+
+    def _can_short(self, symbol: str) -> bool:
+        """Apply the shared instrument short restriction before broker preparation."""
+        return self._instruments[symbol].can_short
 
     def _apply_financing_cash_flows(
         self,

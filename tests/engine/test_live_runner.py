@@ -2777,6 +2777,9 @@ class TestLiveTrader:
             config=_test_cfg(
                 symbols=["NEAR", "NEXT", "SOLO"],
                 warmup_periods=1,
+                # The short leg must be shortable; crypto spot is not.
+                instrument_overrides={"NEXT": {"instrument_type": "contract_perpetual"}},
+                symbol_cost_overrides={"NEXT": {"multiplier": 1.0}},
             ),
         )
 
@@ -3108,6 +3111,25 @@ class TestLiveTrader:
             quantity=1.0,
             notional=103.5,
         )
+
+    def test_sim_refuses_a_crypto_spot_short(self):
+        class ShortStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                return [OrderIntent(action="short", symbol=ctx.symbol, quantity=1.0)]
+
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            return _make_ohlcv_df(n=5, start_hour=call_num)
+
+        notifier = MagicMock(enabled=True)
+        runner = self._make_runner(strategy=ShortStrategy(), fetcher=fetcher, notifier=notifier)
+        runner.run(max_iterations=3)
+
+        notifier.send_signal.assert_not_called()
+        assert runner._positions == {}
 
     def test_status_interval_requires_notifier(self):
         with pytest.raises(ValueError, match="requires a notifier"):

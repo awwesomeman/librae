@@ -217,14 +217,15 @@ class TestRuntimeEvents:
     """Operationally skipped decisions reach the output, not just the logger."""
 
     def test_skipped_decision_is_reported(self) -> None:
-        df = _make_df()
+        # A contract: a crypto spot short is refused before it can reach this skip.
+        df = _make_df(symbol="BTCUSDT_QUARTERLY")
         bt = Backtest(df, LongThenReverseWhileOpen(), data_source="test")
         bt.run()
         output = bt.build_output()
 
         skips = [e for e in output.runtime_events if e.event_type == "decision_skipped"]
         assert [e.detail["reason"] for e in skips] == ["opposite_side"]
-        assert skips[0].symbol == "BTCUSDT"
+        assert skips[0].symbol == "BTCUSDT_QUARTERLY"
 
     def test_clean_run_reports_no_events(self) -> None:
         df = _make_df()
