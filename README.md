@@ -117,8 +117,8 @@ from historical decisions, plans, research, and operational learnings.
 
 ## Development
 
-See [Getting started](docs/getting-started.md#contributing-to-this-repository)
-for environment setup and the test/lint commands.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and the code, doc,
+and commit conventions. Coding agents start at [AGENTS.md](AGENTS.md).
 
 ## License
 

@@ -7,9 +7,6 @@
 > Optional Grafana, Docker, and VM operations are documented in
 > `docs/guides/optional-infrastructure.md`. Usage examples and runtime
 > behavior are documented in `docs/guides/engine-usage.md`.
->
-> **Language**: use English outside `docs/`; preserve each existing document's
-> language. Keep current-state descriptions concise.
 
 ## Compatibility Policy Before 1.0
 
@@ -893,7 +890,5 @@ keeps the earliest value on a primary-key conflict.
 3. Record a changed naming rule in `docs/decisions/`, then keep only the new
    current state here.
 
-Repo-wide documentation writing conventions (drift-prone content, conciseness,
-one canonical home per concept) live in [`docs/README.md`](docs/README.md#writing-conventions),
-not here — that's the canonical index for how docs in this repo relate to
-each other.
+Repo-wide writing rules for docs and comments live in
+[CONTRIBUTING.md](CONTRIBUTING.md#writing-docs-and-comments).
