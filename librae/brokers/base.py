@@ -7,10 +7,9 @@ that are identical across adapters; credential loading lives in
 librae.config.env so notification adapters can share it without depending
 on brokers.
 
-(No async ABC layer — MarketDataAdapter/OrderAdapter/AccountAdapter plus
-canonical L1Quote/TradeTick/Bar/Order/Fill/Position types — lives here: no
-adapter implements one, and it would put a second, incompatible
-"OrderAdapter" next to the real one in librae/live/executor.py.)
+Adapters are plain duck-typed classes with no shared async ABC layer. No
+adapter would implement one, and its OrderAdapter would sit next to the
+incompatible real one in librae/live/executor.py.
 """
 
 from __future__ import annotations

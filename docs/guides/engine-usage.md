@@ -1084,9 +1084,9 @@ replays history, where staleness relative to wall clock has no meaning, and
 never reaches the poll cycle.
 
 `RunConfig.optional_symbols` names the subscriptions a strategy can run
-without. Everything else is required and blocks strategy evaluation until it
-has a usable observation, which is the default;
-reconciliation, order monitoring and heartbeat keep running while it is held.
+without. Every other subscription is required and blocks strategy evaluation
+until it has a usable observation; reconciliation, order monitoring and
+heartbeat keep running while it is held.
 An optional subscription is stepped over with a diagnostic and cannot hold the
 warmup gate either. It is a run policy rather than instrument or subscription
 identity — the same instrument can be load-bearing for one strategy and a
