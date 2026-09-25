@@ -15,6 +15,9 @@ general industry practice and these docs disagree, these docs win.
 
 ## Where agent defaults go wrong here
 
+- **Scope creep**: don't add a feature because it seems useful or fits the
+  task nearby. Check it against the product boundary in `architecture.md`;
+  if it is unclear whether Librae should own it, ask.
 - **No AI attribution** in commits or squash messages: no `Co-Authored-By`,
   no "Generated with", no `Signed-off-by`.
 - **Commit identity**: if `git config user.email` is empty, ask instead of

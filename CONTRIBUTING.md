@@ -31,6 +31,15 @@ otherwise.
 
 ## Changing code
 
+- Place every new feature against the
+  [product boundary](architecture.md#product-position-and-system-boundaries)
+  first. If the caller, a strategy project, or an external tool owns it, don't
+  add it to Librae: expose the smallest extension point (injected callable,
+  adapter, public type) or document the caller's responsibility. Moving the
+  boundary is a design decision: record it in `docs/decisions/` and
+  `architecture.md` before writing the code.
+- Build for a concrete need, not a speculative one. Extract shared code only
+  for real duplication at two or more call sites.
 - Follow the [compatibility policy](architecture.md#compatibility-policy-before-10)
   and the [failure handling policy](architecture.md#failure-handling-policy).
 - Fix the class of problem, not the one instance, and keep the diff minimal.
@@ -50,9 +59,9 @@ Applies to every doc except `docs/plans/`, `docs/research/`, and
    instead, so the doc can't silently fall out of sync.
 2. **No history in current-state text.** Don't cite issue or PR numbers, or
    write "added in", "fixed in", "previously", or "as of <date>". State the
-   reason itself; the history belongs in the commit message. A date that
-   stamps evidence (rule 5) and a link to a dated record in `decisions/` or
-   `learnings/` are fine.
+   reason itself; the history belongs in the commit message. `decisions/`
+   and `learnings/` record history and are exempt; elsewhere, a date that
+   stamps evidence (rule 5) and a link to a dated record there are fine.
 3. **Concise and scannable.** Short paragraphs/bullets, one point per line,
    no padding.
 4. **One canonical home per concept.** If two docs would describe the same
