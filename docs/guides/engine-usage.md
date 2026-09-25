@@ -226,7 +226,8 @@ the first unavailable execution event; a positive value is a strict upper
 bound. Backtests also raise when the sample ends while deferred. Live targets
 persist the delay count and wait for a coherent new completed-bar snapshot;
 broker-resting time is bounded separately by `live_order_timeout_seconds`.
-By default, liquidity-constrained fills retain the historical one-bar behavior.
+By default (`"discard"`), a liquidity-constrained fill's unfilled residual is
+dropped after its bar.
 Set `rebalance_residual_policy="defer_all"` or `"defer_symbols"` to retain
 unfilled portfolio quantities across bars. The former waits when any residual
 symbol is unavailable; the latter lets independently tradable symbols progress.
@@ -485,9 +486,9 @@ extended-session stock bars use a deliberately conservative
 not-earlier-than-next-session-open usability boundary. This is not presented
 as IBKR's actual publication timestamp. It can delay the value by one session
 but the IBKR adapter and live ingestion cache cannot expose a partial
-after-hours daily bar. Caller-owned historical backtest inputs still need the
-general availability-frontier contract tracked separately from this adapter
-policy in GitHub issue #166. IBKR native futures daily bars fail closed: their
+after-hours daily bar. Caller-owned historical backtest inputs are outside
+this adapter policy and still need the general availability-frontier contract.
+IBKR native futures daily bars fail closed: their
 settlement close may arrive hours later or be revised, so fetch completed
 intraday bars and resample by calendar session instead.
 The same settlement policy applies to native futures W/M bars. Native IBKR W/M
@@ -763,7 +764,7 @@ exceeded `RunConfig.runtime.poll_seconds`.
   regardless of its time-in-force.
 
 `OrderIntent.time_in_force` (`"day"` / `"gtc"` / `"ioc"` / `"fok"`) sets the
-order's lifetime. Leaving it unset (`None`) keeps the historical one-event
+order's lifetime. Leaving it unset (`None`) keeps the default one-event
 opportunity and resolves per order type at the broker rather than to one fixed
 default: market orders resolve to `"ioc"` (a resting market order is
 nonsensical everywhere) and limit orders resolve to `"day"`.
@@ -1050,7 +1051,7 @@ Freshness is judged against the **next observation's expected close** for that
 subscription's own timeframe and calendar, not a fixed wall-clock age. So a
 Friday XNYS daily bar is not late until Monday's session closes, a holiday
 does not make a feed look dead, and DST moves the boundary with the venue.
-`STALE_DATA_TOLERANCE_BARS` is now bounded publication slack applied *after*
+`STALE_DATA_TOLERANCE_BARS` is bounded publication slack applied *after*
 that boundary — wall-clock on purpose, because it models a feed publishing a
 completed bar late rather than extra market time. `librae/core/readiness.py`
 holds the evaluator; it is pure, so backtest and live reach the same verdict
@@ -1083,9 +1084,9 @@ replays history, where staleness relative to wall clock has no meaning, and
 never reaches the poll cycle.
 
 `RunConfig.optional_symbols` names the subscriptions a strategy can run
-without. Everything else is required and blocks strategy evaluation until it
-has a usable observation, which is the default and the historical behaviour;
-reconciliation, order monitoring and heartbeat keep running while it is held.
+without. Every other subscription is required and blocks strategy evaluation
+until it has a usable observation; reconciliation, order monitoring and
+heartbeat keep running while it is held.
 An optional subscription is stepped over with a diagnostic and cannot hold the
 warmup gate either. It is a run policy rather than instrument or subscription
 identity — the same instrument can be load-bearing for one strategy and a
@@ -1148,8 +1149,9 @@ exist, so a daily auxiliary is not pulled once per hourly poll.
 ## OHLCV audit delivery
 
 The runtime advances its watermark and lands the checkpoint before the audit
-row is written, so a failed write used to be lost outright: the writer treats
-an equal row version as an idempotent no-op, and nothing re-delivered it.
+row is written, so without a queue a failed write would be lost outright: the
+writer treats an equal row version as an idempotent no-op, and nothing else
+re-delivers it.
 
 A sink that declares `durable_ohlcv_delivery = True` gets at-least-once
 delivery. The row is queued in the checkpoint before it is offered and removed

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Alert-delivery rehearsal — issue #86 DoD: "Alert delivery (Telegram,
-database, stale-data) is exercised end to end with an injected failure,
-confirming the operator actually receives the alert."
+"""Alert-delivery rehearsal: exercises alert delivery (Telegram, database,
+stale-data) end to end with an injected failure, confirming the operator
+actually receives the alert.
 
 Drives a real ``LiveTrader`` (mode=sim, no broker/DB needed) through the same
 ``_notify``/``_check_staleness`` engine code paths production uses, plus
@@ -139,9 +139,9 @@ def rehearse_poll_error(notifier: TelegramAdapter) -> None:
 def rehearse_db_write(notifier: TelegramAdapter) -> None:
     """A failing analytics sink — 3 consecutive DB-write failures alert.
 
-    The DB-write retry/alert threshold now lives in
-    ``librae.orchestration.live._TimescaleCallbacks`` (the engine itself no
-    longer owns analytics persistence), so this drives that wrapper directly
+    The DB-write retry/alert threshold lives in
+    ``librae.orchestration.live._TimescaleCallbacks`` (the engine itself does
+    not own analytics persistence), so this drives that wrapper directly
     instead of standing up a real broken DB connection.
     """
     print("[db-write] expect '[ops_rehearsal] DB Write Failing' in Telegram...")

@@ -301,9 +301,9 @@ class TestRenderUnifiedDashboard:
         assert panel["fieldConfig"]["defaults"]["custom"]["filterable"] is True
 
     def test_runtime_events_panel_reads_runtime_events(self):
-        """runtime_events (state_recovered/decision_skipped) previously had
-        no Grafana panel despite being written to the DB — the only way to
-        see it was querying the table directly."""
+        """runtime_events (state_recovered/decision_skipped) are written to
+        the DB, so they need a Grafana panel — otherwise the only way to see
+        them is querying the table directly."""
         d = render_unified_dashboard()
         panel = next(p for p in d["panels"] if p["title"] == "Runtime Events")
         sql = panel["targets"][0]["rawSql"]
@@ -524,8 +524,7 @@ class TestTargetSqlMatchesTheSchema:
     """Dashboard SQL is never executed by the suite, so a column renamed on
     the schema side leaves every panel selecting the old name showing a red
     error triangle — which reads as "no data" — until someone opens that
-    panel. position_events.pnl -> realized_pnl did exactly that, unnoticed
-    for five months.
+    panel.
     """
 
     def test_the_parser_reads_every_table_in_the_schema(self) -> None:

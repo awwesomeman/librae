@@ -885,9 +885,9 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     assert "from librae.db.schema import require_current_schema" in preflight_block
     assert "require_current_schema(cursor)" in preflight_block
     assert 'local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?' in script
-    # The DSN still reaches both containers, but by name: it used to be
-    # spelled `-e TIMESCALE_DSN="${trade_timescale_dsn}"`, which put a
-    # password on a world-readable command line. See the dedicated test below.
+    # The DSN reaches both containers by name: spelling it
+    # `-e TIMESCALE_DSN="${trade_timescale_dsn}"` would put a password on a
+    # world-readable command line. See the dedicated test below.
     assert 'TIMESCALE_DSN="${trade_timescale_dsn}" \\\n    docker run --rm' in script
     assert 'TIMESCALE_DSN="${trade_timescale_dsn}" \\\n    TELEGRAM_BOT_TOKEN=' in script
     assert script.count("-e TIMESCALE_DSN\n") == 1

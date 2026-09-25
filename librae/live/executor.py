@@ -528,7 +528,7 @@ class LiveExecutor:
         # WHY: venue normalization may round a size down to a lot step but
         # never up. Librae's pre-trade checks ran on the requested size, and
         # with no RiskPolicy limit set nothing downstream would notice an
-        # enlargement, so the comparison has to be made here (issue #108).
+        # enlargement, so the comparison has to be made here.
         if quantity > request.quantity + EPSILON:
             raise ValueError(
                 f"order preparation cannot increase quantity: requested "

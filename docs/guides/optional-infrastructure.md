@@ -104,13 +104,12 @@ expressed by adding a value there. The flag is checkpointed before the cancel
 call, which is what lets a restart resume an unresolved cancellation rather
 than lose it.
 
-`config_hash` changed representation, and the change reaches further than the
-database. Hash-included mappings are now encoded with explicit type
-tags instead of a `default=str` fallback, and a timeframe is hashed in its
-canonical form, so a configuration that hashed one way before this revision
-hashes another way after it — including one written only in ccxt timeframe
-form. A backtest cache entry keyed on the old hash simply stops matching and
-the run recomputes.
+`config_hash` encodes hash-included mappings with explicit type tags instead
+of a `default=str` fallback, and hashes a timeframe in its canonical form, so a
+configuration written in ccxt timeframe form hashes like its canonical
+spelling. Any change to that encoding changes every hash, and the effect
+reaches beyond the database: a backtest cache entry keyed on a different hash
+stops matching and the run recomputes.
 
 A live or sim deployment needs an operator decision before a configuration
 identity change. Sim uses `sim:config_hash`; live additionally includes the
@@ -135,7 +134,7 @@ Live execution is different: it requires durable runtime state. When
 constructing `LiveTrader` directly, inject your own durable `state_store`; the
 in-memory implementation is intended for deterministic tests only.
 
-That is now enforced rather than advised. A store declares
+Librae enforces this rather than advising it. A store declares
 `restart_durable: bool` — whether its writes survive the process — and live
 startup refuses anything that does not declare `True`. The persistence methods
 alone cannot express this, since a dictionary satisfies them, so a store that
@@ -311,7 +310,7 @@ Paper trading uses `mode=live` with a broker's paper endpoint and therefore
 still permits broker-confirmed orders. `mode=sim` is the supported no-order
 path and does not exercise acknowledgements, partial fills, rejections, or
 broker fees. `--mode live --dry-run` is rejected because `--dry-run` only
-suppresses persistence and notifications; it was never an order kill switch.
+suppresses persistence and notifications; it is not an order kill switch.
 
 ## Notifications and custom sinks
 

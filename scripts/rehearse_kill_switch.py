@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Kill-switch rehearsal — issue #86 DoD: halt()/reset_halt() rehearsed
-against a running paper session.
+"""Kill-switch rehearsal: halt()/reset_halt() against a running paper
+session.
 
 Runs a real LiveTrader against Binance sandbox (Demo Trading, mode=live),
 places one small resting order, then calls the operator controls from

@@ -9,12 +9,12 @@ acceptable default for large, homogeneous universes like equities/crypto
 spot pairs — override per-symbol in librae/config/symbols.py when precision
 matters).
 
-This registry used to live in a bundled markets.yaml; it's a plain Python
-dict now — that file was never actually included in the built wheel (only
-.py files are, without extra packaging config), so `pip install librae`
-raised FileNotFoundError the moment get_market() ran for any built-in
-market. A handful of hardcoded entries needs no parser, no packaging
-config, and can't go missing from the wheel.
+This registry is a plain Python dict rather than a bundled markets.yaml:
+the built wheel includes only .py files without extra packaging config, so
+a data file would be missing after `pip install librae` and get_market()
+would raise FileNotFoundError for any built-in market. A handful of
+hardcoded entries needs no parser, no packaging config, and can't go
+missing from the wheel.
 
 Registering your own market doesn't require editing this file at all:
 get_market(name, markets={...}) / CostModel.from_config(config, markets={...})

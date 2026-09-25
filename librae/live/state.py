@@ -457,10 +457,11 @@ class PendingOhlcvDelivery:
     """One audit row accepted by the runtime but not yet acknowledged.
 
     The runtime advances its watermark and lands the checkpoint before the
-    audit write is attempted, so a failed write used to be lost outright: the
-    writer treats an equal row version as an idempotent no-op, and nothing
-    re-delivers it. Carrying the pending row in the same checkpoint makes the
-    queue land atomically with the watermark it belongs to.
+    audit write is attempted, so without this record a failed write would be
+    lost outright: the writer treats an equal row version as an idempotent
+    no-op, and nothing else re-delivers it. Carrying the pending row in the
+    same checkpoint makes the queue land atomically with the watermark it
+    belongs to.
 
     ``identity`` is the exact subscription, the bar timestamp, and the row
     version. A correction shares its timestamp with the bar it replaces, so

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Restore a db_backup.sh dump into the reference TimescaleDB Compose service
-# (quant_timescaledb) — issue #86 DoD companion to db_backup.sh. Exercise this
-# at least once (e.g. against a scratch container) before trusting the
-# backup: an untested backup is not a disaster-recovery procedure.
+# (quant_timescaledb). Exercise this at least once (e.g. against a scratch
+# container) before trusting the backup: an untested backup is not a
+# disaster-recovery procedure.
 #
 # Usage:
 #   ./deploy/db_restore.sh <dump_file>

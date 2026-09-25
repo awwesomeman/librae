@@ -705,9 +705,9 @@ class ShioajiAdapter:
 
         Verified against a live Shioaji sandbox session on 2026-07-26:
         ``margin()`` returns ``Margin(equity=..., available_margin=...,
-        risk_indicator=...)`` — ``equity``, not ``equity_amount`` as
-        previously assumed (that name never matched, so ``total``/``used``
-        silently fell back to 0 regardless of actual account equity).
+        risk_indicator=...)`` — ``equity``, not ``equity_amount`` (reading
+        that name would silently set ``total``/``used`` to 0 regardless of
+        actual account equity).
         """
         self._require_auth()
         if currency != "TWD":

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Back up the reference TimescaleDB Compose service (quant_timescaledb) with
-# pg_dump's custom format — issue #86 DoD: "TimescaleDB backup and restore is
-# documented and exercised at least once against the reference deploy/
-# Compose setup." Pairs with db_restore.sh.
+# pg_dump's custom format. Pairs with db_restore.sh.
 #
 # Usage:
 #   ./deploy/db_backup.sh [output_dir]   # default: ./backups (gitignored)

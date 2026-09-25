@@ -1918,10 +1918,10 @@ class LiveTrader:
         why is not.
 
         Every open position needs a mark that is both present and current.
-        Presence alone was the old bar, which let a reset revalue the book on
-        a price a dead feed last produced days ago; freshness reuses the same
-        per-subscription evaluator the runtime uses for market data (#175), so
-        a closed market is not mistaken for a stalled one.
+        Presence alone would let a reset revalue the book on a price a dead
+        feed last produced days ago; freshness reuses the same
+        per-subscription evaluator the runtime uses for market data, so a
+        closed market is not mistaken for a stalled one.
         """
         return halt_recovery.evaluate_reset_readiness(
             active_orders=self._active_orders,
@@ -2012,7 +2012,7 @@ class LiveTrader:
             if self._check_staleness(symbol, latest_ts):
                 logger.warning("Skipping stale frame for %s at %s", symbol, latest_ts)
                 continue
-            # warmup_ready no longer waits on an optional symbol, so an optional
+            # warmup_ready does not wait on an optional symbol, so an optional
             # one can still be short of history here. Omitting it is what
             # "stepped over" has to mean: a strategy handed one bar would
             # compute indicators over one bar.
