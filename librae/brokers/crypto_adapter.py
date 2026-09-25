@@ -73,6 +73,10 @@ def _decimal_places_tick(raw_precision: object) -> float | None:
     return tick_size if isfinite(tick_size) and tick_size > 0 else None
 
 
+def _is_contract(market: dict) -> bool:
+    return bool(market.get("contract") or market.get("type") in ("future", "swap", "option"))
+
+
 def _require_ccxt() -> object:
     """Import and return ccxt, raising a friendly error if missing."""
     try:
@@ -643,10 +647,7 @@ class CryptoAdapter:
         reference_price = price or signal.get("reference_price")
         if reference_price is not None:
             raw_contract_size = market.get("contractSize")
-            is_contract = bool(
-                market.get("contract") or market.get("type") in ("future", "swap", "option")
-            )
-            if is_contract and raw_contract_size is None:
+            if _is_contract(market) and raw_contract_size is None:
                 raise ValueError(f"{symbol} derivative is missing contractSize")
             contract_size = float(raw_contract_size or 1.0)
             if contract_size <= 0:
@@ -681,14 +682,16 @@ class CryptoAdapter:
         ``"GTC"`` — a market order carries no lifetime parameter), optionally
         ``price`` for limit orders, and optionally ``client_order_id``
         (forwarded as ccxt's unified ``clientOrderId`` param, exchange-side
-        dedup/audit).
+        dedup/audit). A contract-market ``position_effect`` of ``"reduce"`` or
+        ``"close"`` is sent with ccxt's unified ``reduceOnly`` param.
         """
         self._require_auth()
         validate_order_signal(signal)
         self._exchange.load_markets()
+        market = self._exchange.market(signal["symbol"])
         self._validate_contract_selection(
             signal["symbol"],
-            self._exchange.market(signal["symbol"]),
+            market,
             continuous_alias=signal.get("continuous_alias", False),
             contract_month=signal.get("contract_month"),
         )
@@ -707,6 +710,10 @@ class CryptoAdapter:
             ]
         if signal.get("client_order_id"):
             params["clientOrderId"] = signal["client_order_id"]
+        if _is_contract(market) and signal.get("position_effect") in ("reduce", "close"):
+            # A stale local book must not let an exit open opposite exposure;
+            # the venue refuses the order instead.
+            params["reduceOnly"] = True
         result = self._exchange.create_order(
             symbol=signal["symbol"],
             type=order_type,

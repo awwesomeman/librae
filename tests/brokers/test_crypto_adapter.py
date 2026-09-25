@@ -957,6 +957,42 @@ def test_place_order_without_client_order_id_omits_param(authed_adapter, mock_cc
     assert "clientOrderId" not in mock_ccxt_exchange.create_order.call_args.kwargs["params"]
 
 
+@pytest.mark.parametrize(
+    ("market", "position_effect", "reduce_only"),
+    [
+        ({"symbol": "BTC/USDT:USDT", "type": "swap", "contract": True}, "close", True),
+        ({"symbol": "BTC/USDT:USDT", "type": "swap", "contract": True}, "reduce", True),
+        ({"symbol": "BTC/USDT:USDT", "type": "swap", "contract": True}, "open", False),
+        ({"symbol": "BTC/USDT:USDT", "type": "swap", "contract": True}, "add", False),
+        ({"symbol": "BTC/USDT", "type": "spot", "spot": True}, "close", False),
+        ({"symbol": "BTC/USDT", "type": "spot", "spot": True}, "reduce", False),
+    ],
+)
+def test_place_order_sends_contract_exits_reduce_only(
+    authed_adapter, mock_ccxt_exchange, market, position_effect, reduce_only
+):
+    """A stale local book must not let a derivative exit open opposite exposure."""
+    mock_ccxt_exchange.market.return_value = market
+    mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "open"}
+
+    authed_adapter.place_order(
+        {
+            "symbol": market["symbol"],
+            "side": "sell",
+            "quantity": 0.01,
+            "order_type": "market",
+            "time_in_force": "ioc",
+            "position_effect": position_effect,
+        }
+    )
+
+    params = mock_ccxt_exchange.create_order.call_args.kwargs["params"]
+    if reduce_only:
+        assert params["reduceOnly"] is True
+    else:
+        assert "reduceOnly" not in params
+
+
 def test_place_order_backfills_missing_fee_from_trades(authed_adapter, mock_ccxt_exchange):
     # binanceusdm's create_order()/fetchOrder() never include fee, unlike
     # spot; commission is only available per-fill via fetch_my_trades().
