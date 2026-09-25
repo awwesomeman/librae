@@ -1482,6 +1482,11 @@ class Backtest:
         instrument = self._instruments.get(symbol)
         return instrument.min_notional if instrument is not None else None
 
+    def _can_short(self, symbol: str) -> bool:
+        """Apply the instrument's short restriction; unknown direct symbols stay unrestricted."""
+        instrument = self._instruments.get(symbol)
+        return instrument.can_short if instrument is not None else True
+
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
         direct_mixed = self._config is None and bool(
@@ -1896,6 +1901,7 @@ class Backtest:
                     bars=strategy_bars,
                     positions=positions,
                     broker_for=(self._config.broker_for if self._config is not None else None),
+                    can_short=self._can_short,
                 )
                 new_decision = self._without_halted_account(new_decision, halted)
                 # Fail on the emitting bar, not mid-run: a day limit with no

@@ -439,6 +439,18 @@ class SymbolInfo:
                 f"{self.symbol!r} contract_month is valid only for monthly/quarterly contracts"
             )
 
+    @property
+    def can_short(self) -> bool:
+        """Whether a short may be opened or added.
+
+        Crypto spot orders sell owned inventory with no borrow, which is why
+        CryptoAdapter.prepare_order refuses a spot short open. Equity spot can
+        be sold short on margin, and contracts short natively. A config's
+        ``market`` is a declaration for every unregistered symbol that does
+        not override it, so one declared spot in a crypto run is refused.
+        """
+        return not (self.market == "crypto" and self.instrument_type == "spot")
+
     def normalize_quantity(self, quantity: float) -> float:
         """Round a requested quantity toward zero and enforce its minimum."""
         if (

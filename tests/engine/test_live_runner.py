@@ -36,7 +36,7 @@ from librae.core.strategy import (
 from librae.live.engine import LiveTrader, _market_data_calendar_id, _market_data_route_owner
 from librae.live.execution_identity import ExecutionIdentity
 from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
-from librae.live.state import MemoryLiveStateStore, TrackedOrder
+from librae.live.state import LiveRebalance, MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import build_live_trader
 
 from tests.conftest import make_test_cfg
@@ -2777,6 +2777,9 @@ class TestLiveTrader:
             config=_test_cfg(
                 symbols=["NEAR", "NEXT", "SOLO"],
                 warmup_periods=1,
+                # The short leg must be shortable; crypto spot is not.
+                instrument_overrides={"NEXT": {"instrument_type": "contract_perpetual"}},
+                symbol_cost_overrides={"NEXT": {"multiplier": 1.0}},
             ),
         )
 
@@ -3108,6 +3111,104 @@ class TestLiveTrader:
             quantity=1.0,
             notional=103.5,
         )
+
+    def test_sim_refuses_a_crypto_spot_short(self, caplog):
+        class ShortStrategy(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                return [OrderIntent(action="short", symbol=ctx.symbol, quantity=1.0)]
+
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            return _make_ohlcv_df(n=5, start_hour=call_num)
+
+        notifier = MagicMock(enabled=True)
+        runner = self._make_runner(strategy=ShortStrategy(), fetcher=fetcher, notifier=notifier)
+        with caplog.at_level(logging.ERROR, logger="librae.live.engine"):
+            runner.run(max_iterations=3)
+
+        assert runner._consecutive_errors == 3
+        assert "cannot open or add to a short" in caplog.text
+        notifier.send_signal.assert_not_called()
+        assert runner._positions == {}
+
+    def _checkpoint(self, store: MemoryLiveStateStore) -> None:
+        """Write one sim checkpoint for the default config."""
+        self._make_runner(state_store=store).run(max_iterations=1)
+
+    def test_restoring_a_crypto_spot_short_pending_decision_fails(self):
+        store = MemoryLiveStateStore()
+        self._checkpoint(store)
+        (state,) = store._states.values()
+        state.pending_decision = [OrderIntent(action="short", symbol="BTCUSDT", quantity=1.0)]
+
+        with pytest.raises(ValueError, match="runtime checkpoint pending decision shorts"):
+            self._make_runner(state_store=store)
+
+    def test_restoring_a_crypto_spot_negative_target_fails(self):
+        store = MemoryLiveStateStore()
+        self._checkpoint(store)
+        (state,) = store._states.values()
+        state.pending_decision = PortfolioWeights({"BTCUSDT": -0.5})
+
+        with pytest.raises(ValueError, match="runtime checkpoint pending decision shorts"):
+            self._make_runner(state_store=store)
+
+    def test_restoring_a_crypto_spot_negative_live_rebalance_target_fails(self):
+        store = MemoryLiveStateStore()
+        self._checkpoint(store)
+        (state,) = store._states.values()
+        state.live_rebalance = LiveRebalance(
+            targets=PortfolioWeights({"BTCUSDT": -0.5}),
+            reference_prices={"BTCUSDT": 100.0},
+            reference_volumes={"BTCUSDT": 1_000.0},
+            lagged_adv_by_symbol={},
+            decided_at=TEST_CLOCK_NOW,
+        )
+
+        with pytest.raises(ValueError, match="runtime checkpoint live rebalance shorts"):
+            self._make_runner(state_store=store)
+
+    def test_a_restored_crypto_spot_short_position_can_still_be_closed(self):
+        store = MemoryLiveStateStore()
+        self._checkpoint(store)
+        (state,) = store._states.values()
+        state.positions = {
+            "BTCUSDT": PositionState(
+                symbol="BTCUSDT",
+                side="short",
+                entry_price=100.0,
+                quantity=1.0,
+                entry_at=TEST_CLOCK_NOW,
+                periods_held=1,
+                entry_commission=0.0,
+                entry_slippage=0.0,
+                entry_tax=0.0,
+                total_entry_cost=100.0,
+            )
+        }
+
+        class CloseHeld(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                if ctx.symbol in ctx.positions:
+                    return [OrderIntent(action="close", symbol=ctx.symbol)]
+                return []
+
+        call_num = 0
+
+        def fetcher(*args, **kwargs):
+            nonlocal call_num
+            call_num += 1
+            return _make_ohlcv_df(n=5, start_hour=call_num)
+
+        runner = self._make_runner(strategy=CloseHeld(), fetcher=fetcher, state_store=store)
+        assert runner._positions["BTCUSDT"].side == "short"
+        runner.run(max_iterations=3)
+
+        assert runner._positions == {}
+        assert runner._trade_count == 1
 
     def test_status_interval_requires_notifier(self):
         with pytest.raises(ValueError, match="requires a notifier"):
