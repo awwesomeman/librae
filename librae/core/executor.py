@@ -971,19 +971,18 @@ def resolve_stop_exit(
     """Check whether this bar's range triggers pos's liquidation, stop-loss,
     or take-profit.
 
-    Liquidation is checked first: it's the hardest, most conservative
-    constraint a real exchange enforces — if it triggers, no soft stop
-    order would have executed first in reality, so it always wins over a
-    stop/TP that would also trigger the same bar. It's modeled the same
-    way as stop_price: fills at the *worse* of (liquidation_price, bar
-    open) to capture gap-through risk. Disabled (never triggers) unless
-    cost_model.maintenance_margin_rate is set — see CostModel.liquidation_price.
+    Liquidation and stop_price are modeled as stop-market orders: they fill
+    at the *worse* of the level and the bar open, to capture gap-through
+    risk. Liquidation is disabled (never triggers) unless
+    cost_model.maintenance_margin_rate is set — see
+    CostModel.liquidation_price. take_profit_price is modeled as a limit
+    order: it fills at the target once touched, or at a better open.
 
-    Otherwise: stop_price is modeled as a stop-market order (worse-of-gap
-    fill); take_profit_price is modeled as a limit order (target price once
-    touched, or a better opening price after a favorable gap). Stop-loss is
-    checked before take-profit — if both would trigger on the same bar, the
-    conservative outcome wins.
+    The open is the bar's first observable price, so a target already
+    crossed there fills first. Past the open, OHLCV cannot order the
+    extremes, so the conservative outcome wins: liquidation (an exchange
+    enforces it ahead of any resting order), then stop-loss, then
+    take-profit.
     A previously triggered, volume-limited market exit continues at this
     bar's open without checking the trigger level again.
 
@@ -996,6 +995,11 @@ def resolve_stop_exit(
 
     if pos.pending_market_exit_reason is not None:
         return open_, pos.pending_market_exit_reason
+
+    tp = pos.take_profit_price
+    # With the target beyond entry, a liquidation or stop level short of it is uncrossed here.
+    if tp is not None and (open_ >= tp if is_long else open_ <= tp):
+        return open_, REASON_TAKE_PROFIT
 
     liq_price = cost_model.liquidation_price(pos.entry_price, pos.side)
     if liq_price is not None:
@@ -1010,13 +1014,8 @@ def resolve_stop_exit(
             fill = min(pos.stop_price, open_) if is_long else max(pos.stop_price, open_)
             return fill, REASON_STOP_LOSS
 
-    if pos.take_profit_price is not None:
-        triggered = high >= pos.take_profit_price if is_long else low <= pos.take_profit_price
-        if triggered:
-            fill = (
-                max(pos.take_profit_price, open_) if is_long else min(pos.take_profit_price, open_)
-            )
-            return fill, REASON_TAKE_PROFIT
+    if tp is not None and (high >= tp if is_long else low <= tp):
+        return tp, REASON_TAKE_PROFIT
 
     return None
 

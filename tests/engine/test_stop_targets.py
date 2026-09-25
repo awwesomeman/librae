@@ -122,6 +122,32 @@ class TestResolveStopExit:
         bar = {"open": 98.0, "high": 111.0, "low": 94.0, "close": 100.0}
         assert resolve_stop_exit(pos, bar, _zero_cost()) == (95.0, REASON_STOP_LOSS)
 
+    def test_long_take_profit_crossed_at_open_wins_over_later_stop(self):
+        """The resting target was marketable at the open, before the bar fell through the stop."""
+        pos = _make_pos(side="long", stop=95.0, tp=110.0)
+        bar = {"open": 115.0, "high": 116.0, "low": 94.0, "close": 96.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (115.0, REASON_TAKE_PROFIT)
+
+    def test_short_take_profit_crossed_at_open_wins_over_later_stop(self):
+        pos = _make_pos(side="short", stop=105.0, tp=90.0)
+        bar = {"open": 85.0, "high": 106.0, "low": 84.0, "close": 104.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (85.0, REASON_TAKE_PROFIT)
+
+    def test_long_take_profit_crossed_at_open_wins_over_later_liquidation(self):
+        pos = _make_pos(side="long", tp=110.0)
+        bar = {"open": 115.0, "high": 116.0, "low": 90.0, "close": 91.0}
+        assert resolve_stop_exit(pos, bar, _leveraged_cost()) == (115.0, REASON_TAKE_PROFIT)
+
+    def test_short_stop_wins_when_both_hit_same_bar(self):
+        pos = _make_pos(side="short", stop=105.0, tp=90.0)
+        bar = {"open": 102.0, "high": 106.0, "low": 89.0, "close": 100.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (105.0, REASON_STOP_LOSS)
+
+    def test_long_stop_crossed_at_open_fills_at_open_despite_target_touch(self):
+        pos = _make_pos(side="long", stop=95.0, tp=110.0)
+        bar = {"open": 90.0, "high": 111.0, "low": 89.0, "close": 100.0}
+        assert resolve_stop_exit(pos, bar, _zero_cost()) == (90.0, REASON_STOP_LOSS)
+
     def test_no_trigger_returns_none(self):
         pos = _make_pos(side="long", stop=95.0, tp=110.0)
         bar = {"open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0}
