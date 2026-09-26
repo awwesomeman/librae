@@ -334,6 +334,12 @@ def _bind_market_data_source(
 _MISSING_MARKET_DATA_CAPABILITY = object()
 
 
+def _validated_reason(reason: object, label: str) -> str:
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError(f"{label} reason must be a non-empty string")
+    return reason.strip()
+
+
 def _market_data_capability(source: object, name: str) -> str | None:
     """Read one explicitly declared source capability without trusting ``__getattr__``."""
     declaration = getattr_static(source, name, _MISSING_MARKET_DATA_CAPABILITY)
@@ -2041,10 +2047,9 @@ class LiveTrader:
         as long as that cycle's broker and market-data calls, and applies
         before the next one.
         """
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("halt reason must be a non-empty string")
+        reason = _validated_reason(reason, "halt")
         with self._cycle_lock:
-            self._halt_live(title="Manual Halt", message=reason.strip())
+            self._halt_live(title="Manual Halt", message=reason)
 
     def request_halt(self, reason: str = "operator requested halt") -> None:
         """Ask the polling loop to halt as ``halt`` does, without waiting.
@@ -2053,9 +2058,7 @@ class LiveTrader:
         request. The loop applies it first thing in its next cycle, before
         any order work or a pending flatten. A restart drops a pending one.
         """
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("halt reason must be a non-empty string")
-        self._halt_requests.put(reason.strip())
+        self._halt_requests.put(_validated_reason(reason, "halt"))
 
     def request_flatten(self, reason: str = "operator requested flatten") -> None:
         """Ask the polling loop to close every position and halt, as a drawdown breach does.
@@ -2065,11 +2068,10 @@ class LiveTrader:
         cancelling any working order. A halted account refuses it, and the
         request is not persisted, so a restart drops a pending one.
         """
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("flatten reason must be a non-empty string")
+        reason = _validated_reason(reason, "flatten")
         with self._flatten_request_lock:
             self._flatten_request_sequence += 1
-            self._flatten_request = (self._flatten_request_sequence, reason.strip())
+            self._flatten_request = (self._flatten_request_sequence, reason)
 
     def halt_reset_readiness(self) -> HaltResetReadiness:
         """Whether ``reset_halt`` would be allowed, and why not.
@@ -2077,7 +2079,8 @@ class LiveTrader:
         A query, never a mutation: health tooling and an operator should be
         able to see the blocking reason without provoking an exception to
         obtain it. Remaining halted is always safe; being unable to find out
-        why is not.
+        why is not. Safe from any thread; it waits for the cycle in progress,
+        as ``halt`` does.
 
         Every open position needs a mark that is both present and current.
         Presence alone would let a reset revalue the book on a price a dead
