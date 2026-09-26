@@ -5,6 +5,7 @@ All tests use mocks — no real API calls.
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -35,11 +36,9 @@ def _position_request(symbol: str) -> PositionRequest:
     )
 
 
-def test_missing_ccxt_names_install_extra():
-    with (
-        patch.dict("sys.modules", {"ccxt": None}),
-        pytest.raises(ImportError, match="crypto-live"),
-    ):
+def test_missing_ccxt_names_install_extra(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ccxt", None)
+    with pytest.raises(ImportError, match="crypto-live"):
         _require_ccxt()
 
 
@@ -1461,15 +1460,33 @@ _CLASSIFYING_CALLS = {
 
 
 @pytest.mark.parametrize("call", sorted(_CLASSIFYING_CALLS))
-def test_errors_pass_through_unchanged_without_ccxt(authed_adapter, mock_ccxt_exchange, call):
+def test_errors_pass_through_unchanged_without_ccxt(
+    authed_adapter, mock_ccxt_exchange, monkeypatch, call
+):
+    monkeypatch.setitem(sys.modules, "ccxt", None)
     method, invoke = _CLASSIFYING_CALLS[call]
     original = RuntimeError("boom")
     getattr(mock_ccxt_exchange, method).side_effect = original
 
-    with patch.dict("sys.modules", {"ccxt": None}), pytest.raises(RuntimeError) as raised:
+    with pytest.raises(RuntimeError) as raised:
         invoke(authed_adapter)
 
     assert raised.value is original
+
+
+@pytest.mark.parametrize("call", sorted(_CLASSIFYING_CALLS))
+def test_successful_calls_never_import_ccxt(authed_adapter, mock_ccxt_exchange, monkeypatch, call):
+    # A None entry makes any import of ccxt raise ImportError, with or without the SDK.
+    monkeypatch.setitem(sys.modules, "ccxt", None)
+    mock_ccxt_exchange.fetch_balance.return_value = {
+        "USDT": {"free": 1.0, "used": 0.0, "total": 1.0}
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = "0.001"
+    mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "open"}
+
+    _CLASSIFYING_CALLS[call][1](authed_adapter)
+
+    assert sys.modules["ccxt"] is None
 
 
 def test_cancel_order_returns_refreshed_cumulative_state(authed_adapter, mock_ccxt_exchange):
