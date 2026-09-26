@@ -193,6 +193,7 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert "./deploy/trade.sh restart smoke-ci" in workflow
     assert "touch /tmp/librae-crash-requested" in workflow
     assert "halt signalled a restarted runner before it was ready" in workflow
+    assert "halted runner was not restarted after a crash" in workflow
     assert "./deploy/trade.sh inspect failing-ci" in workflow
     assert "librae-account-lease-owner" in workflow
     assert 'io.librae.account_id" }}' in workflow
@@ -582,12 +583,28 @@ def _halt(tmp_path: Path, **kwargs) -> tuple[subprocess.CompletedProcess[str], l
     )
 
 
+_SIGNAL_RUNNER = "exec quant_smoke-main python -c import os, signal; os.kill(1, signal.SIGUSR1)"
+
+
+def _signalled(docker_calls: list[str]) -> bool:
+    return _SIGNAL_RUNNER in docker_calls or any(call.startswith("kill") for call in docker_calls)
+
+
 def test_trade_script_halt_signals_a_ready_deployment(tmp_path: Path) -> None:
     result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main")
 
     assert result.returncode == 0, result.stderr
-    assert "kill --signal USR1 quant_smoke-main" in docker_calls
+    assert _SIGNAL_RUNNER in docker_calls
     assert not any(call.startswith(("stop", "rm", "run", "start")) for call in docker_calls)
+
+
+def test_trade_script_halt_never_uses_docker_kill(tmp_path: Path) -> None:
+    # `docker kill` marks the container manually stopped, so the restart
+    # policy would no longer restart a halted runner that later crashes.
+    result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main")
+
+    assert result.returncode == 0, result.stderr
+    assert not any(call.startswith("kill") for call in docker_calls)
 
 
 def test_trade_script_halt_refuses_a_deployment_that_is_not_ready(tmp_path: Path) -> None:
@@ -595,7 +612,7 @@ def test_trade_script_halt_refuses_a_deployment_that_is_not_ready(tmp_path: Path
 
     assert result.returncode != 0
     assert "not ready" in result.stderr
-    assert not any(call.startswith("kill") for call in docker_calls)
+    assert not _signalled(docker_calls)
 
 
 def test_trade_script_halt_refuses_a_restarted_runner_before_it_marks_ready(
@@ -607,7 +624,7 @@ def test_trade_script_halt_refuses_a_restarted_runner_before_it_marks_ready(
 
     assert result.returncode != 0
     assert "not ready; nothing was signalled" in result.stderr
-    assert not any(call.startswith("kill") for call in docker_calls)
+    assert not _signalled(docker_calls)
 
 
 def test_trade_script_halt_refuses_an_unmanaged_container(tmp_path: Path) -> None:
@@ -618,7 +635,7 @@ def test_trade_script_halt_refuses_an_unmanaged_container(tmp_path: Path) -> Non
     assert result.returncode != 0
     assert "smoke-main is not a managed deployment; nothing was signalled" in result.stderr
     assert "Stop the old deployment" not in result.stderr
-    assert not any(call.startswith("kill") for call in docker_calls)
+    assert not _signalled(docker_calls)
 
 
 def test_trade_script_halt_refuses_an_unknown_deployment(tmp_path: Path) -> None:
@@ -626,7 +643,7 @@ def test_trade_script_halt_refuses_an_unknown_deployment(tmp_path: Path) -> None
 
     assert result.returncode != 0
     assert "quant_smoke-main not found" in result.stderr
-    assert not any(call.startswith("kill") for call in docker_calls)
+    assert not _signalled(docker_calls)
 
 
 def test_trade_script_rejects_strategy_account_mismatch_before_replacement(

@@ -287,16 +287,26 @@ jobs:
               quant_smoke-ci
           )" = "${TRADE_IMAGE_REF}"
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
-          # Crash before any halt: after `docker kill --signal USR1` the restart
-          # policy did not restart the next exit (Docker Engine 29.4.0,
-          # observed 2026-09-26).
+          ./deploy/trade.sh halt smoke-ci
+          for attempt in $(seq 1 10); do
+            docker exec quant_smoke-ci test -f /tmp/librae-halt-requested && break
+            sleep 1
+          done
+          docker exec quant_smoke-ci test -f /tmp/librae-halt-requested
+          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
+          # Crash the halted runner: the restart policy must still restart it,
+          # and the restarted container must not read ready before its runner.
+          docker exec quant_smoke-ci rm /tmp/librae-halt-requested
           docker exec quant_smoke-ci touch /tmp/librae-crash-requested
           for attempt in $(seq 1 30); do
             state="$(docker inspect --format '{{.State.Status}} {{.RestartCount}}' quant_smoke-ci)"
             [[ "${state}" == "running 1" ]] && break
             sleep 1
           done
-          test "${state}" = "running 1"
+          if [[ "${state}" != "running 1" ]]; then
+            echo "halted runner was not restarted after a crash (${state})" >&2
+            exit 1
+          fi
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=failed"
           if ./deploy/trade.sh halt smoke-ci; then
             echo "halt signalled a restarted runner before it was ready" >&2
@@ -308,13 +318,6 @@ jobs:
             ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running" >/dev/null && break
             sleep 1
           done
-          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
-          ./deploy/trade.sh halt smoke-ci
-          for attempt in $(seq 1 10); do
-            docker exec quant_smoke-ci test -f /tmp/librae-halt-requested && break
-            sleep 1
-          done
-          docker exec quant_smoke-ci test -f /tmp/librae-halt-requested
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
           ./deploy/trade.sh restart smoke-ci | grep -Fx "phase=running"
           if ./deploy/trade.sh start failing-ci ci-fail USD failing sim 60; then

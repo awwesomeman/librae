@@ -762,7 +762,12 @@ cmd_halt() {
         echo "${container} is not ready; nothing was signalled. Retry once inspect reports phase=running." >&2
         return 1
     fi
-    docker kill --signal USR1 "${container}" >/dev/null
+    # Signal the runner from inside, not with `docker kill`: after
+    # `docker kill --signal USR1` the unless-stopped policy did not restart
+    # the container's next exit, while a signal sent through `docker exec`
+    # left it restarting (Docker Engine 29.4.0, observed 2026-09-26).
+    docker exec "${container}" \
+        python -c 'import os, signal; os.kill(1, signal.SIGUSR1)'
     echo "Halt requested for ${container}; its next poll cycle applies it."
 }
 
