@@ -447,6 +447,32 @@ def test_fetch_ohlcv_stops_when_the_venue_ignores_since():
     assert venue.fetch_ohlcv.call_count == 2
 
 
+def test_funding_since_walks_every_settlement_to_now_in_pages():
+    venue = PagedVenue(10, funding_days=400)
+    since = venue.funding_ts[0] - 1
+
+    df = _paged_adapter(venue).fetch_funding_rate_history("BTC/USDT:USDT", limit=None, since=since)
+
+    assert _ms(df["ts"]) == venue.funding_ts
+    assert len(venue.funding_ts) > PAGE
+    assert venue.funding_calls == [
+        (since, PAGE),
+        (venue.funding_ts[PAGE - 1] + 1, PAGE),
+        (venue.funding_ts[-1] + 1, PAGE),
+    ]
+
+
+def test_funding_since_keeps_its_limit_as_a_cap():
+    venue = PagedVenue(10, funding_days=400)
+
+    df = _paged_adapter(venue).fetch_funding_rate_history(
+        "BTC/USDT:USDT", limit=2, since=venue.funding_ts[5]
+    )
+
+    assert _ms(df["ts"]) == venue.funding_ts[5:7]
+    assert venue.funding_calls == [(venue.funding_ts[5], 2)]
+
+
 # ---------------------------------------------------------------------------
 # Test 3: read-only mode raises NotImplementedError on place_order
 # ---------------------------------------------------------------------------

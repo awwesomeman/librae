@@ -8,8 +8,13 @@ from typing import ClassVar
 
 import pandas as pd
 import pytest
+from librae.brokers.crypto_adapter import CryptoAdapter
 from librae.config.symbols import SymbolInfo
-from librae.live.engine import _bind_market_data_source
+from librae.core.run_config import ExecutionPolicy
+from librae.live.engine import LiveTrader, _bind_market_data_source
+
+from tests.conftest import make_test_cfg
+from tests.crypto_venue import PAGE, PagedVenue
 
 
 def _instrument(instrument_type: str) -> SymbolInfo:
@@ -27,7 +32,7 @@ def _instrument(instrument_type: str) -> SymbolInfo:
 
 class _FakeCryptoAdapter:
     def __init__(self) -> None:
-        self.funding_calls: list[tuple[str, int]] = []
+        self.funding_calls: list[tuple[str, int | None, int | None]] = []
 
     def fetch_ohlcv(self, symbol, timeframe, limit, *, drop_incomplete=False, **_kwargs):
         return pd.DataFrame(
@@ -44,13 +49,14 @@ class _FakeCryptoAdapter:
     funding_ts = "2026-01-01T08:00:00Z"
 
     def fetch_funding_rate_history(self, symbol, limit=100, *, since=None):
-        self.funding_calls.append((symbol, limit))
-        return pd.DataFrame(
+        self.funding_calls.append((symbol, since, limit))
+        funding = pd.DataFrame(
             {
                 "ts": pd.to_datetime([self.funding_ts], utc=True),
                 "funding_rate": [0.0001],
             }
         )
+        return funding[funding["ts"] >= pd.Timestamp(since, unit="ms", tz="UTC")]
 
 
 def test_perpetual_instrument_gets_funding_rate_merged_onto_bars():
@@ -61,7 +67,9 @@ def test_perpetual_instrument_gets_funding_rate_merged_onto_bars():
 
     assert bars["funding_rate"].isna().tolist() == [True, False]
     assert bars["funding_rate"].iloc[1] == 0.0001
-    assert adapter.funding_calls == [("BTC/USDT:USDT", 2)]
+    # By time from the window's first bar, less the merge tolerance; never the bar count.
+    first_bar_ms = int(pd.Timestamp("2026-01-01T00:00:00Z").timestamp() * 1000)
+    assert adapter.funding_calls == [("BTC/USDT:USDT", first_bar_ms - 60_000, None)]
 
 
 def test_spot_instrument_does_not_fetch_funding():
@@ -105,6 +113,17 @@ def test_funding_settling_just_before_the_bar_merges_onto_that_bar():
     bars = fetcher("BTC-PERP", "8h", 2)
 
     assert bars["funding_rate"].isna().tolist() == [True, False]
+
+
+def test_funding_settling_just_before_the_first_bar_is_still_requested():
+    class _BeforeFirstBarAdapter(_FakeCryptoAdapter):
+        funding_ts = "2025-12-31T23:59:59.997Z"
+
+    fetcher = _bind_market_data_source(_BeforeFirstBarAdapter(), _instrument("contract_perpetual"))
+
+    bars = fetcher("BTC-PERP", "8h", 2)
+
+    assert bars["funding_rate"].isna().tolist() == [False, True]
 
 
 def test_funding_far_from_any_bar_is_not_attributed():
@@ -268,3 +287,56 @@ def test_a_failing_funding_endpoint_still_yields_bars(caplog):
 
     assert len(bars) == 2
     assert "funding_rate" not in bars.columns
+
+
+# ---------------------------------------------------------------------------
+# A warmup longer than one venue page, through the real crypto adapter
+# ---------------------------------------------------------------------------
+
+
+def test_long_perpetual_warmup_fills_and_carries_every_settlement():
+    venue = PagedVenue(40_000, funding_days=200)
+    adapter = CryptoAdapter.__new__(CryptoAdapter)
+    adapter._exchange = venue
+    adapter._read_only = True
+    adapter._exchange_id = "binanceusdm"
+    config = make_test_cfg(
+        symbols=["BTCUSDTPERP"],
+        timeframe="M5",
+        execution=ExecutionPolicy(max_bar_volume_participation_rate=None, warmup_periods=9000),
+        instrument_overrides={
+            "BTCUSDTPERP": {
+                "instrument_type": "contract_perpetual",
+                "venue_symbol": "BTC/USDT:USDT",
+                "currency": "USDT",
+                "calendar_id": "24/7",
+            }
+        },
+        symbol_cost_overrides={"BTCUSDTPERP": {"multiplier": 1.0}},
+    )
+    trader = LiveTrader(
+        lambda *_args, **_kwargs: [],
+        lambda frame: frame,
+        config=config,
+        adapter=adapter,
+        on_bar=None,
+        on_position_event=None,
+        on_ohlcv=None,
+        on_heartbeat=None,
+        on_signal_outcome=None,
+        warmup_fetcher=None,
+    )
+
+    bars = trader._fetch_with_cache("BTCUSDTPERP")
+
+    assert trader.warmup_ready
+    assert len(bars) == 9000
+    first, last = bars["ts"].iloc[0], bars["ts"].iloc[-1]
+    in_window = [
+        ts
+        for ts in pd.to_datetime(venue.funding_ts, unit="ms", utc=True)
+        if first - pd.Timedelta("1min") <= ts <= last + pd.Timedelta("1min")
+    ]
+    assert len(in_window) > 90
+    assert bars["funding_rate"].notna().sum() == len(in_window)
+    assert all(limit == PAGE for _since, limit in venue.funding_calls)

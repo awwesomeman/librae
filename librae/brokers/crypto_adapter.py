@@ -107,6 +107,10 @@ _PLACEMENT_REFUSALS = _ORDER_REFUSALS | _ACCOUNT_REFUSALS
 # (its maxLimit). Other exchanges are unverified; a smaller venue page costs
 # only extra requests, since a walk ends on an empty page, not a short one.
 _OHLCV_PAGE = 1000
+# Binance USD-M GET /fapi/v1/fundingRate, public endpoint, 2026-09-27:
+# limit=1000 returned 1000 rows; limit=1001 returned
+# {"code":"99099990","errorData":"illegal params."}.
+_FUNDING_PAGE = 1000
 
 
 def _is_ccxt_error(exc: BaseException, family: str = "BaseError") -> bool:
@@ -558,7 +562,7 @@ class CryptoAdapter:
     def fetch_funding_rate_history(
         self,
         symbol: str,
-        limit: int = 100,
+        limit: int | None = 100,
         *,
         since: int | None = None,
     ) -> pd.DataFrame:
@@ -571,8 +575,24 @@ class CryptoAdapter:
         Returns columns: ``[ts, funding_rate]`` where ``ts`` is the
         UTC-aware payment ``datetime`` and ``funding_rate`` is the decimal
         rate paid at that settlement (positive = longs pay shorts).
+
+        Without ``since`` this is one request for the latest ``limit``
+        settlements. With it, settlements from ``since`` are walked forward
+        in pages the endpoint accepts, up to ``limit``, or to now when
+        ``limit`` is None.
         """
-        raw = self._exchange.fetch_funding_rate_history(symbol, since=since, limit=limit)
+        if since is None:
+            raw = self._exchange.fetch_funding_rate_history(symbol, since=None, limit=limit)
+        else:
+            page_size = _FUNDING_PAGE if limit is None else min(limit, _FUNDING_PAGE)
+            raw = _walk_forward(
+                lambda cursor: self._exchange.fetch_funding_rate_history(
+                    symbol, since=cursor, limit=page_size
+                ),
+                since,
+                lambda row: row["timestamp"],
+                limit,
+            )
         df = pd.DataFrame(raw)
         if df.empty:
             return pd.DataFrame(columns=["ts", "funding_rate"])
