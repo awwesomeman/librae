@@ -22,6 +22,8 @@ from librae.live.executor import (
     PositionRequest,
 )
 
+from tests.crypto_venue import PAGE, PagedVenue
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -349,6 +351,100 @@ def test_fetch_funding_rate_history_empty(readonly_adapter, mock_ccxt_exchange):
 
     assert list(df.columns) == ["ts", "funding_rate"]
     assert df.empty
+
+
+# ---------------------------------------------------------------------------
+# History longer than one venue page
+# ---------------------------------------------------------------------------
+
+
+def _paged_adapter(venue: PagedVenue) -> CryptoAdapter:
+    adapter = CryptoAdapter.__new__(CryptoAdapter)
+    adapter._exchange = venue
+    adapter._read_only = True
+    adapter._exchange_id = "binanceusdm"
+    return adapter
+
+
+def _ms(ts: pd.Series) -> list[int]:
+    return [int(value.timestamp() * 1000) for value in ts]
+
+
+def test_fetch_ohlcv_pages_forward_to_the_most_recent_bars(monkeypatch, caplog):
+    # A None entry makes any import of ccxt raise ImportError, with or without the SDK.
+    monkeypatch.setitem(sys.modules, "ccxt", None)
+    venue = PagedVenue(20_000)
+
+    df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000)
+
+    assert _ms(df["ts"]) == venue.bar_ts[-9000:]
+    assert all(limit <= PAGE for _since, limit in venue.ohlcv_calls)
+    sinces = [since for since, _limit in venue.ohlcv_calls]
+    assert sinces == sorted(sinces) and None not in sinces
+    # Ten full pages reach the forming bar; one more request finds nothing newer.
+    assert len(venue.ohlcv_calls) == 11
+    assert "requested" not in caplog.text
+
+
+def test_fetch_ohlcv_still_returns_the_newest_bars_across_an_outage_gap():
+    venue = PagedVenue(20_000)
+    venue.bar_ts = venue.bar_ts[:-5000] + venue.bar_ts[-4950:]
+
+    df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000)
+
+    assert _ms(df["ts"]) == venue.bar_ts[-9000:]
+
+
+def test_fetch_ohlcv_within_one_page_is_a_single_request():
+    venue = PagedVenue(20_000)
+
+    df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=PAGE)
+
+    assert _ms(df["ts"]) == venue.bar_ts[-PAGE:]
+    assert venue.ohlcv_calls == [(None, PAGE)]
+
+
+def test_fetch_ohlcv_drops_the_forming_bar_after_assembling_pages():
+    venue = PagedVenue(20_000)
+
+    df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000, drop_incomplete=True)
+
+    assert _ms(df["ts"]) == venue.bar_ts[-9000:-1]
+
+
+def test_fetch_ohlcv_warns_when_the_venue_has_less_history(caplog):
+    venue = PagedVenue(2500)
+
+    df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000)
+
+    assert _ms(df["ts"]) == venue.bar_ts
+    assert len(venue.ohlcv_calls) == 4
+    assert "returned 2500 bars (requested 9000)" in caplog.text
+
+
+def test_fetch_ohlcv_pages_forward_from_since():
+    venue = PagedVenue(20_000)
+    since = venue.bar_ts[100]
+
+    df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=2500, since=since)
+
+    assert _ms(df["ts"]) == venue.bar_ts[100:2600]
+    assert [call[0] for call in venue.ohlcv_calls] == [
+        since,
+        venue.bar_ts[1099] + 1,
+        venue.bar_ts[2099] + 1,
+    ]
+
+
+def test_fetch_ohlcv_stops_when_the_venue_ignores_since():
+    venue = PagedVenue(20_000)
+    newest = [[ts, 1.0, 1.0, 1.0, 1.0, 1.0] for ts in venue.bar_ts[-PAGE:]]
+    venue.fetch_ohlcv = MagicMock(return_value=newest)
+
+    df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000)
+
+    assert _ms(df["ts"]) == venue.bar_ts[-PAGE:]
+    assert venue.fetch_ohlcv.call_count == 2
 
 
 # ---------------------------------------------------------------------------

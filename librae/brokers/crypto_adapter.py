@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 import logging
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
@@ -30,7 +31,7 @@ from librae.config.symbols import (
     InstrumentKind,
     canonicalize_price_to_increment,
 )
-from librae.core.utils import validate_contract_month
+from librae.core.utils import interval_to_timedelta, validate_contract_month
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import (
     BrokerUnavailableError,
@@ -102,6 +103,11 @@ _ACCOUNT_REFUSALS = frozenset(
 )
 _PLACEMENT_REFUSALS = _ORDER_REFUSALS | _ACCOUNT_REFUSALS
 
+# ccxt 4.5.66 binance.fetch_ohlcv clamps every candle request to 1000 rows
+# (its maxLimit). Other exchanges are unverified; a smaller venue page costs
+# only extra requests, since a walk ends on an empty page, not a short one.
+_OHLCV_PAGE = 1000
+
 
 def _is_ccxt_error(exc: BaseException, family: str = "BaseError") -> bool:
     """Whether ``exc`` is an instance of ccxt's ``family`` error class.
@@ -113,6 +119,30 @@ def _is_ccxt_error(exc: BaseException, family: str = "BaseError") -> bool:
     """
     ccxt = sys.modules.get("ccxt")
     return ccxt is not None and isinstance(exc, getattr(ccxt, family))
+
+
+def _walk_forward[T](
+    fetch_page: Callable[[int], list[T]],
+    since: int,
+    ts: Callable[[T], int],
+    limit: int | None,
+) -> list[T]:
+    """Request pages forward from ``since`` until ``limit`` rows or a page adds none.
+
+    Rows before the cursor are dropped, so a venue that ignores ``since`` or
+    repeats a page ends the walk. Every continuing request advances the
+    cursor, and none is sent past the time the walk began.
+    """
+    end = int(time.time() * 1000)
+    rows: list[T] = []
+    cursor = since
+    while cursor <= end and (limit is None or len(rows) < limit):
+        page = sorted((row for row in fetch_page(cursor) if ts(row) >= cursor), key=ts)
+        if not page:
+            break
+        rows.extend(page)
+        cursor = ts(page[-1]) + 1
+    return rows if limit is None else rows[:limit]
 
 
 def _is_account_refusal(exc: BaseException) -> bool:
@@ -465,6 +495,10 @@ class CryptoAdapter:
     ) -> pd.DataFrame:
         """Fetch OHLCV candles and return a standardised DataFrame.
 
+        A ``limit`` above one venue page is fetched page by page: forward
+        from ``since``, or without it from far enough back to end on the
+        newest ``limit`` bars.
+
         Args:
             symbol: Trading pair (e.g. "BTC/USDT").
             timeframe: Candle interval (e.g. "1h", "1d").
@@ -488,12 +522,22 @@ class CryptoAdapter:
                 continuous_alias=continuous_alias,
                 contract_month=contract_month,
             )
-        raw = self._exchange.fetch_ohlcv(
-            symbol,
-            timeframe=timeframe,
-            limit=limit,
-            since=since,
-        )
+        if limit <= _OHLCV_PAGE:
+            raw = self._exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit, since=since)
+        else:
+
+            def page(cursor: int) -> list[list]:
+                return self._exchange.fetch_ohlcv(
+                    symbol, timeframe=timeframe, limit=_OHLCV_PAGE, since=cursor
+                )
+
+            if since is None:
+                # 1% extra reaches past short venue outages inside the window.
+                span = (limit + limit // 100) * interval_to_timedelta(timeframe)
+                start = int(time.time() * 1000) - span // pd.Timedelta(milliseconds=1)
+                raw = _walk_forward(page, start, lambda row: row[0], None)[-limit:]
+            else:
+                raw = _walk_forward(page, since, lambda row: row[0], limit)
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
         df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
 
