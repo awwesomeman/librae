@@ -875,9 +875,9 @@ adapter at submission.
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
   confirmed broker fills; a close below the venue minimum is skipped as above,
-  and the breach alert names what remains open. The halt persists across restart, emergency exits
-  remain active while halted, and broker orders must reach a terminal state
-  before `reset_halt()` is allowed. After operator review, `reset_halt()` starts
+  and the breach alert names what remains open. The halt persists across
+  restart, emergency exits remain active while halted, and broker orders must
+  reach a terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts
   a new risk epoch.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
   clears pending strategy decisions, and cancels tracked live broker orders.

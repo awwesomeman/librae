@@ -208,10 +208,10 @@ behavior is in
 
 ## Unclosable remainders
 
-A **Close Below Venue Minimum: <symbol>** alert means an exit was skipped
-because the adapter refused its size as below the venue's minimum amount,
-notional, or lot. Every other order in that decision, or in the flatten, still
-went out. The skip is recorded each time as a `decision_skipped` runtime event
+A **Close Below Venue Minimum** alert (its title names the symbol) means an
+exit was skipped because the adapter refused its size as below the venue's
+minimum amount, notional, or lot. Every other order in that decision, or in
+the flatten, still went out. The skip is recorded each time as a `decision_skipped` runtime event
 with reason `close_below_venue_minimum`; the alert repeats only when the held
 quantity changes.
 
