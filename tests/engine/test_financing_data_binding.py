@@ -14,7 +14,7 @@ from librae.core.run_config import ExecutionPolicy
 from librae.live.engine import LiveTrader, _bind_market_data_source
 
 from tests.conftest import make_test_cfg
-from tests.crypto_venue import PAGE, PagedVenue
+from tests.crypto_venue import NOW, PAGE, PagedVenue
 
 
 def _instrument(instrument_type: str) -> SymbolInfo:
@@ -294,8 +294,8 @@ def test_a_failing_funding_endpoint_still_yields_bars(caplog):
 # ---------------------------------------------------------------------------
 
 
-def test_long_perpetual_warmup_fills_and_carries_every_settlement():
-    venue = PagedVenue(40_000, funding_days=200)
+def test_long_perpetual_warmup_fills_and_carries_every_settlement(monkeypatch):
+    venue = PagedVenue(monkeypatch, 40_000, funding_days=200)
     adapter = CryptoAdapter.__new__(CryptoAdapter)
     adapter._exchange = venue
     adapter._read_only = True
@@ -325,6 +325,7 @@ def test_long_perpetual_warmup_fills_and_carries_every_settlement():
         on_heartbeat=None,
         on_signal_outcome=None,
         warmup_fetcher=None,
+        clock=NOW.to_pydatetime,
     )
 
     bars = trader._fetch_with_cache("BTCUSDTPERP")

@@ -103,9 +103,10 @@ _ACCOUNT_REFUSALS = frozenset(
 )
 _PLACEMENT_REFUSALS = _ORDER_REFUSALS | _ACCOUNT_REFUSALS
 
+# Page sizes below are sent only to binance* exchange ids. Other venues are
+# unverified, so their pages carry no limit and the venue picks its default.
 # ccxt 4.5.66 binance.fetch_ohlcv clamps every candle request to 1000 rows
-# (its maxLimit). Other exchanges are unverified; a smaller venue page costs
-# only extra requests, since a walk ends on an empty page, not a short one.
+# (its maxLimit).
 _OHLCV_PAGE = 1000
 # Binance USD-M GET /fapi/v1/fundingRate, public endpoint, 2026-09-27:
 # limit=1000 returned 1000 rows; limit=1001 returned
@@ -125,17 +126,24 @@ def _is_ccxt_error(exc: BaseException, family: str = "BaseError") -> bool:
     return ccxt is not None and isinstance(exc, getattr(ccxt, family))
 
 
+# Not ccxt's params={"paginate": True}: in ccxt 4.5.66
+# fetch_paginated_call_deterministic stops after paginationCalls pages
+# (default 10; silently, or BadRequest with `until`), and
+# binance.fetch_funding_rate_history steps it by a hard-coded 8h.
 def _walk_forward[T](
     fetch_page: Callable[[int], list[T]],
     since: int,
     ts: Callable[[T], int],
     limit: int | None,
+    empty_page_span: int | None = None,
 ) -> list[T]:
-    """Request pages forward from ``since`` until ``limit`` rows or a page adds none.
+    """Request pages forward from ``since`` until ``limit`` rows or the data runs out.
 
     Rows before the cursor are dropped, so a venue that ignores ``since`` or
-    repeats a page ends the walk. Every continuing request advances the
-    cursor, and none is sent past the time the walk began.
+    repeats a page ends the walk. An empty page ends it too, unless
+    ``empty_page_span`` says how far that page reached: the cursor then
+    steps past it. Every request moves the cursor forward, and none is sent
+    past the time the walk began.
     """
     end = int(time.time() * 1000)
     rows: list[T] = []
@@ -143,7 +151,10 @@ def _walk_forward[T](
     while cursor <= end and (limit is None or len(rows) < limit):
         page = sorted((row for row in fetch_page(cursor) if ts(row) >= cursor), key=ts)
         if not page:
-            break
+            if empty_page_span is None:
+                break
+            cursor += empty_page_span
+            continue
         rows.extend(page)
         cursor = ts(page[-1]) + 1
     return rows if limit is None else rows[:limit]
@@ -486,6 +497,10 @@ class CryptoAdapter:
     # Market data
     # ------------------------------------------------------------------
 
+    def _binance_page(self, page: int) -> int | None:
+        """A verified Binance page size, or None to leave another venue's default."""
+        return page if self._exchange_id.startswith("binance") else None
+
     def fetch_ohlcv(
         self,
         symbol: str,
@@ -529,19 +544,25 @@ class CryptoAdapter:
         if limit <= _OHLCV_PAGE:
             raw = self._exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit, since=since)
         else:
+            page_limit = self._binance_page(_OHLCV_PAGE)
 
             def page(cursor: int) -> list[list]:
                 return self._exchange.fetch_ohlcv(
-                    symbol, timeframe=timeframe, limit=_OHLCV_PAGE, since=cursor
+                    symbol, timeframe=timeframe, limit=page_limit, since=cursor
                 )
 
+            interval_ms = interval_to_timedelta(timeframe) // pd.Timedelta(milliseconds=1)
+            # ccxt 4.5.66 binance.fetch_ohlcv ends an inverse-market request at
+            # since + limit x interval (it cites ccxt#8454), so an empty page
+            # there may precede listing or sit inside an outage: step past it.
+            empty_span = page_limit * interval_ms if page_limit else None
             if since is None:
                 # 1% extra reaches past short venue outages inside the window.
-                span = (limit + limit // 100) * interval_to_timedelta(timeframe)
-                start = int(time.time() * 1000) - span // pd.Timedelta(milliseconds=1)
-                raw = _walk_forward(page, start, lambda row: row[0], None)[-limit:]
+                start = int(time.time() * 1000) - (limit + limit // 100) * interval_ms
+                raw = _walk_forward(page, start, lambda row: row[0], None, empty_span)
+                raw = raw[-limit:]
             else:
-                raw = _walk_forward(page, since, lambda row: row[0], limit)
+                raw = _walk_forward(page, since, lambda row: row[0], limit, empty_span)
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
         df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
 
@@ -584,7 +605,8 @@ class CryptoAdapter:
         if since is None:
             raw = self._exchange.fetch_funding_rate_history(symbol, since=None, limit=limit)
         else:
-            page_size = _FUNDING_PAGE if limit is None else min(limit, _FUNDING_PAGE)
+            cap = self._binance_page(_FUNDING_PAGE)
+            page_size = limit if cap is None else min(limit or cap, cap)
             raw = _walk_forward(
                 lambda cursor: self._exchange.fetch_funding_rate_history(
                     symbol, since=cursor, limit=page_size

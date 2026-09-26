@@ -358,11 +358,11 @@ def test_fetch_funding_rate_history_empty(readonly_adapter, mock_ccxt_exchange):
 # ---------------------------------------------------------------------------
 
 
-def _paged_adapter(venue: PagedVenue) -> CryptoAdapter:
+def _paged_adapter(venue: PagedVenue, exchange_id: str = "binanceusdm") -> CryptoAdapter:
     adapter = CryptoAdapter.__new__(CryptoAdapter)
     adapter._exchange = venue
     adapter._read_only = True
-    adapter._exchange_id = "binanceusdm"
+    adapter._exchange_id = exchange_id
     return adapter
 
 
@@ -373,7 +373,7 @@ def _ms(ts: pd.Series) -> list[int]:
 def test_fetch_ohlcv_pages_forward_to_the_most_recent_bars(monkeypatch, caplog):
     # A None entry makes any import of ccxt raise ImportError, with or without the SDK.
     monkeypatch.setitem(sys.modules, "ccxt", None)
-    venue = PagedVenue(20_000)
+    venue = PagedVenue(monkeypatch, 20_000)
 
     df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000)
 
@@ -386,8 +386,8 @@ def test_fetch_ohlcv_pages_forward_to_the_most_recent_bars(monkeypatch, caplog):
     assert "requested" not in caplog.text
 
 
-def test_fetch_ohlcv_still_returns_the_newest_bars_across_an_outage_gap():
-    venue = PagedVenue(20_000)
+def test_fetch_ohlcv_still_returns_the_newest_bars_across_an_outage_gap(monkeypatch):
+    venue = PagedVenue(monkeypatch, 20_000)
     venue.bar_ts = venue.bar_ts[:-5000] + venue.bar_ts[-4950:]
 
     df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000)
@@ -395,8 +395,38 @@ def test_fetch_ohlcv_still_returns_the_newest_bars_across_an_outage_gap():
     assert _ms(df["ts"]) == venue.bar_ts[-9000:]
 
 
-def test_fetch_ohlcv_within_one_page_is_a_single_request():
-    venue = PagedVenue(20_000)
+def test_inverse_walk_steps_past_empty_pages_before_listing_and_in_outages(monkeypatch, caplog):
+    # Listed 4000 bars ago with a 1500-bar outage; the walk starts 9090 bars back
+    # and every capped page before listing or inside the outage comes back empty.
+    venue = PagedVenue(monkeypatch, 4000, inverse=True)
+    venue.bar_ts = venue.bar_ts[:500] + venue.bar_ts[2000:]
+
+    df = _paged_adapter(venue, "binancecoinm").fetch_ohlcv("BTC/USD:BTC", "5m", limit=9000)
+
+    assert _ms(df["ts"]) == venue.bar_ts
+    # A whole page per empty step: five before listing, one in the outage,
+    # one past the forming bar, plus four pages with bars.
+    assert len(venue.ohlcv_calls) == 11
+    assert "returned 2500 bars (requested 9000)" in caplog.text
+
+
+def test_non_binance_pages_send_no_page_limit(monkeypatch):
+    venue = PagedVenue(monkeypatch, 20_000)
+    adapter = _paged_adapter(venue, "bybit")
+
+    bars = adapter.fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000)
+    funding = adapter.fetch_funding_rate_history(
+        "BTC/USDT:USDT", limit=None, since=venue.funding_ts[0]
+    )
+
+    assert _ms(bars["ts"]) == venue.bar_ts[-9000:]
+    assert _ms(funding["ts"]) == venue.funding_ts
+    assert {limit for _since, limit in venue.ohlcv_calls} == {None}
+    assert {limit for _since, limit in venue.funding_calls} == {None}
+
+
+def test_fetch_ohlcv_within_one_page_is_a_single_request(monkeypatch):
+    venue = PagedVenue(monkeypatch, 20_000)
 
     df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=PAGE)
 
@@ -404,16 +434,16 @@ def test_fetch_ohlcv_within_one_page_is_a_single_request():
     assert venue.ohlcv_calls == [(None, PAGE)]
 
 
-def test_fetch_ohlcv_drops_the_forming_bar_after_assembling_pages():
-    venue = PagedVenue(20_000)
+def test_fetch_ohlcv_drops_the_forming_bar_after_assembling_pages(monkeypatch):
+    venue = PagedVenue(monkeypatch, 20_000)
 
     df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000, drop_incomplete=True)
 
     assert _ms(df["ts"]) == venue.bar_ts[-9000:-1]
 
 
-def test_fetch_ohlcv_warns_when_the_venue_has_less_history(caplog):
-    venue = PagedVenue(2500)
+def test_fetch_ohlcv_warns_when_the_venue_has_less_history(monkeypatch, caplog):
+    venue = PagedVenue(monkeypatch, 2500)
 
     df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000)
 
@@ -422,8 +452,8 @@ def test_fetch_ohlcv_warns_when_the_venue_has_less_history(caplog):
     assert "returned 2500 bars (requested 9000)" in caplog.text
 
 
-def test_fetch_ohlcv_pages_forward_from_since():
-    venue = PagedVenue(20_000)
+def test_fetch_ohlcv_pages_forward_from_since(monkeypatch):
+    venue = PagedVenue(monkeypatch, 20_000)
     since = venue.bar_ts[100]
 
     df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=2500, since=since)
@@ -436,8 +466,8 @@ def test_fetch_ohlcv_pages_forward_from_since():
     ]
 
 
-def test_fetch_ohlcv_stops_when_the_venue_ignores_since():
-    venue = PagedVenue(20_000)
+def test_fetch_ohlcv_stops_when_the_venue_ignores_since(monkeypatch):
+    venue = PagedVenue(monkeypatch, 20_000)
     newest = [[ts, 1.0, 1.0, 1.0, 1.0, 1.0] for ts in venue.bar_ts[-PAGE:]]
     venue.fetch_ohlcv = MagicMock(return_value=newest)
 
@@ -447,8 +477,8 @@ def test_fetch_ohlcv_stops_when_the_venue_ignores_since():
     assert venue.fetch_ohlcv.call_count == 2
 
 
-def test_funding_since_walks_every_settlement_to_now_in_pages():
-    venue = PagedVenue(10, funding_days=400)
+def test_funding_since_walks_every_settlement_to_now_in_pages(monkeypatch):
+    venue = PagedVenue(monkeypatch, 10, funding_days=400)
     since = venue.funding_ts[0] - 1
 
     df = _paged_adapter(venue).fetch_funding_rate_history("BTC/USDT:USDT", limit=None, since=since)
@@ -462,8 +492,8 @@ def test_funding_since_walks_every_settlement_to_now_in_pages():
     ]
 
 
-def test_funding_since_keeps_its_limit_as_a_cap():
-    venue = PagedVenue(10, funding_days=400)
+def test_funding_since_keeps_its_limit_as_a_cap(monkeypatch):
+    venue = PagedVenue(monkeypatch, 10, funding_days=400)
 
     df = _paged_adapter(venue).fetch_funding_rate_history(
         "BTC/USDT:USDT", limit=2, since=venue.funding_ts[5]
