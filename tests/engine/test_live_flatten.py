@@ -3,9 +3,11 @@
 An ungrouped reduce/close that the adapter rejects as below the venue minimum
 is skipped for that symbol, recorded, and alerted once, while the remaining
 exits still go out. Entries and every other preparation error stay fail-closed.
-A drawdown or flatten exit the broker rejects is skipped the same way, unless
-the refusal is of the account. An operator flatten runs the drawdown path's close-everything-and-halt on the
-polling thread, so the caller's thread never touches engine state.
+A drawdown or flatten exit that ends rejected, cancelled or timed out is
+skipped the same way, while a close that only borrows a recovery reason on a
+running account keeps halting. An operator flatten runs the drawdown path's
+close-everything-and-halt on the polling thread, so the caller's thread never
+touches engine state.
 """
 
 from __future__ import annotations
@@ -633,12 +635,16 @@ def _refusing(symbol: str, error: OrderRejectedError, *, working: bool):
     return adapter
 
 
-def _refusal_skips(events) -> list:
+def _skips(events, reason: str) -> list:
     return [
         event
         for event in events
-        if event.event_type == "decision_skipped" and event.detail.get("reason") == "close_rejected"
+        if event.event_type == "decision_skipped" and event.detail.get("reason") == reason
     ]
+
+
+def _refusal_skips(events) -> list:
+    return _skips(events, "close_rejected")
 
 
 class TestRefusedRecoveryExit:
@@ -671,36 +677,41 @@ class TestRefusedRecoveryExit:
         trader._cash = 0.0
         trader._equity_peak = 1_000.0
 
-        trader._record_equity(TEST_CLOCK_NOW)
+        bar_ts = datetime(2025, 1, 1, 9, tzinfo=UTC)
+
+        trader._record_equity(bar_ts)
 
         assert _submitted(adapter) == SYMBOLS
         assert set(trader._positions) == {"AAA"}
         assert trader._halted is True
-        assert [skip.symbol for skip in _refusal_skips(events)] == ["AAA"]
+        [skip] = _refusal_skips(events)
+        assert (skip.symbol, skip.ts) == ("AAA", bar_ts)
         [breach] = _titled(alerts, "Max Drawdown Breach")
         assert "closed all but AAA" in breach["message"]
 
-    def test_account_fault_refusal_during_a_flatten_still_halts_and_cancels(self):
+    def test_account_fault_refusal_during_a_flatten_keeps_the_other_exits(self):
         adapter = _refusing(
             "BBB",
-            OrderRejectedError("Invalid API-key, IP, or permissions", account_fault=True),
+            OrderRejectedError("Timestamp outside of the recvWindow", account_fault=True),
             working=True,
         )
-        trader, events, alerts = _trader(adapter)
+        trader, _, alerts = _trader(adapter)
 
         trader.request_flatten("desk asked to stop")
         for _ in range(3):
             trader._poll_cycle()
 
-        assert _submitted(adapter) == ["AAA", "BBB"]
+        assert _submitted(adapter) == SYMBOLS
+        adapter.cancel_order.assert_not_called()
         assert trader._active_orders == []
-        assert set(trader._positions) == {"BBB", "DUST"}
+        assert set(trader._positions) == {"BBB"}
         assert trader._halted is True
-        assert _refusal_skips(events) == []
-        [alert] = _titled(alerts, "Order Rejected")
-        assert "Invalid API-key" in alert["message"]
+        [alert] = _titled(alerts, "Close Rejected: BBB")
+        assert "recvWindow" in alert["message"]
+        assert "refused the account" in alert["message"]
+        assert _titled(alerts, "Order Rejected") == []
 
-    def test_cancelled_recovery_exit_still_halts(self):
+    def test_cancelled_flatten_exits_are_recorded_and_the_rest_submitted(self):
         adapter = _adapter(below_minimum="")
         adapter.place_order.side_effect = lambda signal: {
             "id": signal["client_order_id"],
@@ -713,27 +724,95 @@ class TestRefusedRecoveryExit:
         trader.request_flatten("desk asked to stop")
         trader._poll_cycle()
 
-        assert _submitted(adapter) == ["AAA"]
+        assert _submitted(adapter) == SYMBOLS
+        assert set(trader._positions) == set(SYMBOLS)
         assert trader._halted is True
-        assert _refusal_skips(events) == []
-        assert _titled(alerts, "Order Cancelled")
+        assert [event.symbol for event in _skips(events, "close_cancelled")] == SYMBOLS
+        assert len(_titled(alerts, "Close Cancelled")) == 3
+        assert _titled(alerts, "Order Cancelled") == []
+        [flatten] = [alert for alert in alerts if alert["title"].endswith("Operator Flatten")]
+        assert "closed none; AAA, BBB, DUST remain open" in flatten["message"]
 
-    def test_refused_entry_with_a_recovery_reason_still_halts(self):
-        adapter = _refusing("AAA", OrderRejectedError(_REDUCE_ONLY_REFUSAL), working=False)
+    def test_timed_out_flatten_exit_is_recorded_and_the_rest_submitted(self):
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = lambda signal: (
+            _accepted(signal["client_order_id"])
+            if signal["canonical_symbol"] == "BBB"
+            else _broker_report(order_id=signal["client_order_id"], quantity=signal["quantity"])
+        )
+        adapter.cancel_order.side_effect = lambda order_id, _symbol: {
+            "id": order_id,
+            "status": "canceled",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
         trader, events, _ = _trader(adapter)
-        trader._positions = {}
+        trader._live_order_timeout_seconds = 0.0
 
-        trader._execute_live_decision(
+        trader.request_flatten("desk asked to stop")
+        for _ in range(2):
+            trader._poll_cycle()
+
+        assert _submitted(adapter) == SYMBOLS
+        adapter.cancel_order.assert_called_once()
+        assert trader._active_orders == []
+        assert set(trader._positions) == {"BBB"}
+        assert trader._halted is True
+        [skip] = _skips(events, "close_cancelled")
+        assert skip.symbol == "BBB"
+        assert "Order Timeout" in skip.detail["message"]
+
+    def test_every_refused_exit_reports_that_none_closed(self):
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = OrderRejectedError(_REDUCE_ONLY_REFUSAL)
+        trader, events, alerts = _trader(adapter)
+
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+
+        assert _submitted(adapter) == SYMBOLS
+        assert len(_refusal_skips(events)) == 3
+        [flatten] = [alert for alert in alerts if alert["title"].endswith("Operator Flatten")]
+        assert "closed none; AAA, BBB, DUST remain open" in flatten["message"]
+        assert "closed all but" not in flatten["message"]
+
+    def test_close_with_a_spoofed_recovery_reason_on_a_running_account_halts(self):
+        adapter = _refusing("AAA", OrderRejectedError(_REDUCE_ONLY_REFUSAL), working=False)
+        trader, events, alerts = _trader(adapter)
+
+        complete = trader._execute_live_decision(
             [
-                OrderIntent(
-                    action="long", symbol="AAA", quantity=1.0, reason=REASON_OPERATOR_FLATTEN
-                )
+                OrderIntent(action="close", symbol=symbol, reason=REASON_OPERATOR_FLATTEN)
+                for symbol in SYMBOLS
             ],
             _bars(),
             TEST_CLOCK_NOW,
         )
 
+        assert complete is False
+        assert _submitted(adapter) == ["AAA"]
         assert trader._halted is True
+        assert _refusal_skips(events) == []
+        assert _titled(alerts, "Order Rejected")
+
+    def test_failed_entry_with_a_recovery_reason_halts_even_while_halted(self):
+        trader, events, _ = _trader(_adapter(below_minimum=""))
+        trader._halted = True
+        tracked = TrackedOrder(
+            request=OrderRequest(
+                client_order_id="entry-1",
+                symbol="AAA",
+                side="buy",
+                quantity=1.0,
+                order_type="market",
+                submitted_at=TEST_CLOCK_NOW,
+                reason=REASON_OPERATOR_FLATTEN,
+                position_effect="open",
+            ),
+            status="rejected",
+        )
+
+        assert trader._fail_group_or_halt(tracked, title="Order Rejected", message="AAA") is True
         assert _refusal_skips(events) == []
 
     def test_refused_strategy_close_still_halts(self):
@@ -748,3 +827,20 @@ class TestRefusedRecoveryExit:
         assert _refusal_skips(events) == []
         [alert] = _titled(alerts, "Order Rejected")
         assert "ReduceOnly Order is rejected." in alert["message"]
+
+    def test_skipped_close_names_a_position_gone_from_the_ledger(self):
+        trader, _, alerts = _trader(_adapter(below_minimum=""))
+
+        trader._report_skipped_close(
+            "AAA",
+            quantity=1.0,
+            held=None,
+            ts=TEST_CLOCK_NOW,
+            reason="close_rejected",
+            title="Close Rejected",
+            cause="venue refused",
+        )
+
+        [alert] = _titled(alerts, "Close Rejected: AAA")
+        assert "no longer in the ledger" in alert["message"]
+        assert "stays open" not in alert["message"]

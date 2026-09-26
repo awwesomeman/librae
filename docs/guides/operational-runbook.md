@@ -90,7 +90,7 @@ Order placement alerts (rules in
 
 | Alert title | Meaning | Action |
 |---|---|---|
-| Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled. A rejected flatten or drawdown exit alerts as Close Rejected instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted |
+| Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled. A failed flatten or drawdown exit alerts as Close Rejected or Close Cancelled instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted |
 | Ambiguous Order Placement | Placement failed with an error the adapter could not classify and the client-id lookup found nothing: the order may still exist at the venue; halted | Check the broker's order history for the client order id. `reset_halt()` refuses (`unresolved_broker_orders`) until the engine resolves the order |
 
 ## Kill-switch rehearsal
@@ -249,13 +249,17 @@ current valuation mark, so its exit could not be priced and was skipped
 (reason `close_without_mark`). It stays open in the ledger; once its feed
 produces a bar and the account is reset, request the flatten again.
 
-A **Close Rejected** alert during a flatten or drawdown breach means the
-broker rejected that exit; the alert carries the venue's reason, and the
-other exits kept working (reason `close_rejected`). The position stays open
-in the ledger. Compare it with the venue: a reduce-only refusal usually means
-the venue position is already smaller or gone, which the verification round
-after `reset_halt()` reports as a position mismatch. Otherwise fix what the
-reason names, reset, and request the flatten again.
+A **Close Rejected** or **Close Cancelled** alert during a flatten or
+drawdown breach means the broker rejected or cancelled that exit, or it was
+cancelled after its timeout; the alert carries the cause, and the other exits
+kept working (reason `close_rejected` or `close_cancelled`). A cause naming an
+account-level refusal (credentials, permissions, clock) was recorded the same
+way, not halted on, because the flatten halts the account anyway. The
+position stays open in the ledger. Compare it with the venue: a reduce-only
+refusal may mean the venue position is already smaller or gone (unverified),
+which the verification round after `reset_halt()` would report as a position
+mismatch. Otherwise fix what the cause names, reset, and request the flatten
+again.
 
 ## DB backup and restore
 
