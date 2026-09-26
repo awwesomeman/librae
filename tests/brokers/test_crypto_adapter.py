@@ -16,6 +16,7 @@ from librae.live.executor import (
     BrokerUnavailableError,
     LiveExecutor,
     OrderBelowVenueMinimumError,
+    OrderRejectedError,
     OrderRequest,
     PositionRequest,
 )
@@ -364,8 +365,11 @@ def test_readonly_place_order_raises(readonly_adapter):
         "quantity": 0.01,
         "order_type": "market",
     }
-    with pytest.raises(NotImplementedError, match="read-only"):
+    with pytest.raises(OrderRejectedError, match="read-only") as raised:
         readonly_adapter.place_order(signal)
+
+    assert raised.value.account_fault is True
+    assert isinstance(raised.value.__cause__, NotImplementedError)
 
 
 def test_readonly_get_position_raises(readonly_adapter):
@@ -1053,7 +1057,7 @@ def test_market_order_sends_no_time_in_force(authed_adapter, mock_ccxt_exchange)
 def test_market_order_refuses_a_lifetime_the_venue_cannot_express(
     authed_adapter, mock_ccxt_exchange, time_in_force
 ):
-    with pytest.raises(ValueError, match="binance does not support"):
+    with pytest.raises(OrderRejectedError, match="binance does not support") as raised:
         authed_adapter.place_order(
             {
                 "symbol": "BTC/USDT",
@@ -1065,6 +1069,7 @@ def test_market_order_refuses_a_lifetime_the_venue_cannot_express(
             }
         )
 
+    assert isinstance(raised.value.__cause__, ValueError)
     mock_ccxt_exchange.create_order.assert_not_called()
 
 
@@ -1225,6 +1230,138 @@ def test_place_order_skips_backfill_when_unfilled(authed_adapter, mock_ccxt_exch
     )
 
     mock_ccxt_exchange.fetch_my_trades.assert_not_called()
+
+
+_MARKET_BUY = {
+    "symbol": "BTC/USDT",
+    "side": "buy",
+    "quantity": 0.01,
+    "order_type": "market",
+    "time_in_force": "ioc",
+    "position_effect": "open",
+}
+
+
+@pytest.mark.parametrize(
+    ("error_name", "account_fault"),
+    [
+        ("InvalidOrder", False),
+        ("OrderImmediatelyFillable", False),
+        ("OrderNotFillable", False),
+        ("ContractUnavailable", False),
+        ("InsufficientFunds", False),
+        ("BadRequest", False),
+        ("BadSymbol", False),
+        ("OperationRejected", False),
+        ("MarketClosed", False),
+        ("NotSupported", False),
+        ("ArgumentsRequired", False),
+        ("AuthenticationError", True),
+        ("AccountSuspended", True),
+        ("PermissionDenied", True),
+        ("AccountNotEnabled", True),
+        ("RestrictedLocation", True),
+        ("ManualInteractionNeeded", True),
+        ("InvalidNonce", True),
+    ],
+)
+def test_place_order_classifies_definite_venue_refusals(
+    authed_adapter, mock_ccxt_exchange, error_name, account_fault
+):
+    ccxt = _require_ccxt()
+    original = getattr(ccxt, error_name)(
+        'binance {"code":-2022,"msg":"ReduceOnly Order is rejected."}'
+    )
+    mock_ccxt_exchange.create_order.side_effect = original
+
+    with pytest.raises(OrderRejectedError) as raised:
+        authed_adapter.place_order(dict(_MARKET_BUY))
+
+    assert raised.value.__cause__ is original
+    assert "ReduceOnly Order is rejected." in str(raised.value)
+    assert raised.value.account_fault is account_fault
+
+
+@pytest.mark.parametrize(
+    "error_name",
+    [
+        # The outcome is unknown: the request may have reached the venue.
+        "NetworkError",
+        "RequestTimeout",
+        "ExchangeNotAvailable",
+        "OperationFailed",
+        "BadResponse",
+        "ExchangeError",
+        # Not a refusal to create this order.
+        "OrderNotFound",
+        "OrderNotCached",
+        # An order with this client id may already exist; lookup resolves it.
+        "DuplicateOrderId",
+        # Subclasses of a mapped class that are not placement refusals.
+        "ChecksumError",
+        "NoChange",
+    ],
+)
+def test_place_order_leaves_unknown_outcomes_unclassified(
+    authed_adapter, mock_ccxt_exchange, error_name
+):
+    ccxt = _require_ccxt()
+    mock_ccxt_exchange.create_order.side_effect = getattr(ccxt, error_name)("?")
+
+    with pytest.raises(getattr(ccxt, error_name)) as raised:
+        authed_adapter.place_order(dict(_MARKET_BUY))
+
+    assert not isinstance(raised.value, OrderRejectedError)
+
+
+def _raise(error: Exception):
+    def raise_error(*_args, **_kwargs):
+        raise error
+
+    return raise_error
+
+
+@pytest.mark.parametrize(
+    ("step", "account_fault"),
+    [
+        ("load_markets:NetworkError", False),
+        ("load_markets:AuthenticationError", True),
+        ("market:BadSymbol", False),
+        ("signal", False),
+        ("contract", False),
+    ],
+)
+def test_place_order_refuses_every_failure_before_sending(
+    authed_adapter, mock_ccxt_exchange, step, account_fault
+):
+    ccxt = _require_ccxt()
+    signal = dict(_MARKET_BUY)
+    if step == "signal":
+        signal["quantity"] = -1.0
+    elif step == "contract":
+        signal["contract_month"] = "202612"
+    else:
+        method, error_name = step.split(":")
+        getattr(mock_ccxt_exchange, method).side_effect = _raise(getattr(ccxt, error_name)("x"))
+
+    with pytest.raises(OrderRejectedError, match="BTC/USDT not sent") as raised:
+        authed_adapter.place_order(signal)
+
+    assert raised.value.__cause__ is not None
+    assert raised.value.account_fault is account_fault
+    mock_ccxt_exchange.create_order.assert_not_called()
+
+
+def test_place_order_does_not_classify_a_failure_after_creation(authed_adapter, mock_ccxt_exchange):
+    ccxt = _require_ccxt()
+    mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "closed", "filled": 1}
+    mock_ccxt_exchange.has = {"fetchMyTrades": True}
+    mock_ccxt_exchange.fetch_my_trades.side_effect = ccxt.BadRequest("bad fee lookup")
+
+    with pytest.raises(ccxt.BadRequest) as raised:
+        authed_adapter.place_order(dict(_MARKET_BUY))
+
+    assert not isinstance(raised.value, OrderRejectedError)
 
 
 def test_find_order_uses_client_id_across_order_history(authed_adapter, mock_ccxt_exchange):

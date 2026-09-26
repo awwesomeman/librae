@@ -521,7 +521,20 @@ fill delta. Submitted, accepted, and partial orders remain in a durable,
 serial queue and are polled before another strategy decision. Repeated
 cumulative reports are idempotent; filled quantity, notional, commission,
 slippage, and tax can only advance. Cancelled/rejected orders halt dependent
-work. While an order remains active, polling still refreshes the OHLCV cache,
+work. A placement that raises has one of two outcomes:
+
+- **Definite refusal** (the adapter raised `OrderRejectedError`): the order
+  is recorded as rejected, with no lookup, and the alert carries the venue's
+  reason. As for any rejected order, an ungrouped order halts the account
+  and a grouped leg fails only its group; an `account_fault` refusal halts
+  the account either way. A drawdown or flatten exit is the exception (see
+  `max_drawdown_rate` below). Nothing stays unresolved.
+- **Unknown outcome** (any other exception): the engine looks the order up
+  by client id. If it is not found, the whole account halts with
+  *Ambiguous Order Placement*, grouped or not, and the order stays tracked,
+  so `reset_halt()` refuses until it resolves.
+
+While an order remains active, polling still refreshes the OHLCV cache,
 heartbeat, and staleness state, but it does not run a new strategy decision.
 An optional local wall-clock timeout cancels an over-age order, preserves any
 confirmed partial fill, and halts dependent work for review. A non-terminal
@@ -875,9 +888,15 @@ adapter at submission.
   market exits for the run's open positions and fills them at the next observed
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
-  confirmed broker fills; a close below the venue minimum is skipped as above,
-  and the breach alert names what remains open. The halt persists across
-  restart, emergency exits remain active while halted, and broker orders must
+  confirmed broker fills; a close below the venue minimum is skipped as above.
+  An exit that ends rejected, cancelled, or cancelled after its timeout is
+  skipped too, with a `decision_skipped` event (reason `close_rejected` or
+  `close_cancelled`, carrying the venue's reason) and a **Close Rejected** or
+  **Close Cancelled** alert, instead of halting and cancelling the other
+  exits. That includes an `account_fault` refusal, since the flatten halts
+  the account anyway. A strategy close that merely carries a recovery reason
+  on a running account keeps the normal handling. The breach alert names what
+  remains open. The halt persists across restart, emergency exits remain active while halted, and broker orders must
   reach a terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts
   a new risk epoch.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,

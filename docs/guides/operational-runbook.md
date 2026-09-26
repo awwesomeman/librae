@@ -85,6 +85,14 @@ Periodic reconciliation alerts (thresholds and rules in
 | Periodic Reconciliation Unavailable | The venue missed too many rounds in a row; halted | Once it answers, check positions and orders at the broker, then `reset_halt()` |
 | Periodic Reconciliation Failed, Periodic Position Reconciliation Mismatch | An unclassified read error (auth, permission, bad response) or a broker/local disagreement; halted at once | Find the cause before `reset_halt()` |
 
+Order placement alerts (rules in
+[Engine usage → order lifecycle](engine-usage.md#related-multi-leg-order-contract)):
+
+| Alert title | Meaning | Action |
+|---|---|---|
+| Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled. A failed flatten or drawdown exit alerts as Close Rejected or Close Cancelled instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted |
+| Ambiguous Order Placement | Placement failed with an error the adapter could not classify and the client-id lookup found nothing: the order may still exist at the venue; halted | Check the broker's order history for the client order id. `reset_halt()` refuses (`unresolved_broker_orders`) until the engine resolves the order |
+
 ## Kill-switch rehearsal
 
 **Rehearsal script:** `scripts/rehearse_kill_switch.py` — builds a real
@@ -149,7 +157,7 @@ the same rule the runtime uses for market data. A flat account has nothing to
 revalue and can reset immediately.
 
 **Findings from the 2026-08-01 rehearsal**, worth knowing before running this
-again — three were real bugs, all fixed:
+again — all fixed:
 
 - **CCXT spot positions never carry an average price, but reconciliation
   required one (fixed).** `_read_broker_positions()` used to raise
@@ -187,16 +195,18 @@ again — three were real bugs, all fixed:
   why this had gone unnoticed. Fixed by adding
   `LiveTrader(on_run_registered=...)`, called with the resolved run_id
   immediately before that first persist.
-- **A limit order too far from market gets rejected outright, ambiguously
-  (expected behavior, not a bug).** Binance's `PERCENT_PRICE_BY_SIDE` filter
-  rejects a bid below `0.5x` the recent average price. When that happened
-  mid-rehearsal (before landing on the `0.6x` margin used now), the engine
-  logged `Order placement/report FAILED` and correctly treated the order as
-  **unresolved** rather than assuming it failed cleanly (`Cannot cancel
-  unresolved order`, then `reset_halt()` refused with `cannot reset halt
-  while broker orders remain unresolved`) — a real, unplanned exercise of
-  the readiness checklist's "placement-ambiguity handling" item, and it held
-  up correctly.
+- **A limit order the venue refused stayed unresolved for good (fixed).**
+  Binance's `PERCENT_PRICE_BY_SIDE` filter rejects a bid below `0.5x` the
+  recent average price. When that happened mid-rehearsal (before landing on
+  the `0.6x` margin used now), the engine logged `Order placement/report
+  FAILED`, found no order by client id, and halted with it **unresolved**
+  (`Cannot cancel unresolved order`, then `reset_halt()` refused with
+  `cannot reset halt while broker orders remain unresolved`), with no way
+  back short of editing the checkpoint. Fixed by classifying definite
+  refusals: ccxt raises this one as `InvalidOrder` (its Binance table maps
+  `PERCENT_PRICE_BY_SIDE` there), so it now alerts as **Order Rejected**
+  with the venue's reason and leaves nothing unresolved. Only an
+  unclassified failure still takes the ambiguous path.
 - **`reset_halt()` used to crash if a position had no mark yet (fixed).**
   Calling it before the engine had processed a bar raised an unhandled
   `ValueError` from inside valuation. It now refuses with a named cause and a
@@ -238,6 +248,18 @@ A **Close Without Mark** alert during a flatten means that position had no
 current valuation mark, so its exit could not be priced and was skipped
 (reason `close_without_mark`). It stays open in the ledger; once its feed
 produces a bar and the account is reset, request the flatten again.
+
+A **Close Rejected** or **Close Cancelled** alert during a flatten or
+drawdown breach means the broker rejected or cancelled that exit, or it was
+cancelled after its timeout; the alert carries the cause, and the other exits
+kept working (reason `close_rejected` or `close_cancelled`). A cause naming an
+account-level refusal (credentials, permissions, clock) was recorded the same
+way, not halted on, because the flatten halts the account anyway. The
+position stays open in the ledger. Compare it with the venue: a reduce-only
+refusal may mean the venue position is already smaller or gone (unverified),
+which the verification round after `reset_halt()` would report as a position
+mismatch. Otherwise fix what the cause names, reset, and request the flatten
+again.
 
 ## DB backup and restore
 
