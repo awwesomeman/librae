@@ -62,6 +62,8 @@ def _single_symbol_trader(strategy: Strategy, adapter):
 
 
 def _run_in_background(trader, iterations: int = 1) -> Thread:
+    # A short real sleep between cycles is when a waiting operator call runs.
+    trader._sleep = lambda _seconds: time.sleep(PARK_SECONDS)
     loop = Thread(target=trader.run, kwargs={"max_iterations": iterations}, daemon=True)
     loop.start()
     return loop
@@ -99,7 +101,7 @@ class TestSynchronousOperatorCalls:
                 parked.append(operator.is_alive())
 
         trader._persist_state = persist_then_park
-        loop = _run_in_background(trader)
+        loop = _run_in_background(trader, iterations=2)
         loop.join(5)
         operator.join(5)
 
@@ -128,7 +130,7 @@ class TestSynchronousOperatorCalls:
             return fetch()
 
         trader._fetch_runtime_frames = park_then_fetch
-        loop = _run_in_background(trader)
+        loop = _run_in_background(trader, iterations=2)
         loop.join(5)
         operator.join(5)
 
@@ -367,3 +369,62 @@ class TestHaltOnAHaltedAccount:
         [halt] = _titled(alerts, "Manual Halt")
         assert "fail-safe" in halt["message"]
         assert f"already halted; {len(SYMBOLS)} recovery exits keep working" in halt["message"]
+
+
+class TestAfterShutdown:
+    @pytest.mark.parametrize("call", ["halt", "reset_halt", "halt_reset_readiness"])
+    def test_operator_call_after_run_returns_raises_without_mutating(self, call):
+        trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())
+        loop = _run_in_background(trader)
+        loop.join(5)
+        trader._halted = call != "halt"
+        persisted: list = []
+        trader._persist_state = lambda *orders: persisted.append(orders)
+
+        with pytest.raises(RuntimeError, match="not running"):
+            getattr(trader, call)()
+
+        assert trader._halted is (call != "halt")
+        assert persisted == []
+        assert trader._halt_requests.empty()
+
+    def test_a_halt_waiting_on_shutdown_raises_without_mutating(self):
+        trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())
+        errors: list[str] = []
+
+        def late_halt():
+            try:
+                trader.halt("too late")
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        operator = Thread(target=late_halt, daemon=True)
+        shutting_down: list[bool] = []
+        persisted_after: list = []
+        persist = trader._persist_state
+
+        def recording_persist(*orders):
+            if shutting_down:
+                persisted_after.append(orders)
+            persist(*orders)
+
+        pool_shutdown = trader._notify_pool.shutdown
+
+        def start_halt_then_shut_down(*args, **kwargs):
+            shutting_down.append(True)
+            operator.start()
+            _wait_until(lambda: not trader._halt_requests.empty())
+            operator.join(PARK_SECONDS)
+            return pool_shutdown(*args, **kwargs)
+
+        trader._persist_state = recording_persist
+        trader._notify_pool.shutdown = start_halt_then_shut_down
+        loop = _run_in_background(trader)
+        loop.join(5)
+        operator.join(5)
+
+        assert not loop.is_alive() and not operator.is_alive()
+        assert len(errors) == 1 and "not running" in errors[0]
+        assert trader._halted is False
+        assert persisted_after == []
+        assert trader._halt_requests.empty()

@@ -895,7 +895,8 @@ adapter at submission.
   cycles, so it never interleaves with an order submission. Errors stay
   synchronous: a refused `reset_halt()` raises to its caller. `halt()`
   records the halt before it waits, so a cycle that starts first or hangs
-  applies it at its start instead.
+  applies it at its start instead. Once `run()` has shut down, all three
+  raise instead of acting on an account the run no longer owns.
 - `LiveTrader.request_halt(reason)` records a halt without waiting; `run()`
   maps `SIGUSR1` to it on POSIX. The loop applies pending requests first in
   its next cycle, before order work and before a pending `request_flatten`,

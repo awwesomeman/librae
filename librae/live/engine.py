@@ -923,6 +923,9 @@ class LiveTrader:
         # Held for each cycle: an operator call from another thread waits for
         # the cycle in progress and applies between cycles.
         self._cycle_lock = RLock()
+        # Set once run() has shut down; operator calls then raise instead of
+        # mutating a run that no longer owns the account.
+        self._closed = False
         # Requests another thread or a signal records; the loop acts on them.
         # Halt requests stay lock-free so a signal handler, which interrupts
         # the loop thread mid-cycle, can never block on a lock that thread holds.
@@ -1945,6 +1948,7 @@ class LiveTrader:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
         self._stop_event.clear()
         self._running = True
+        self._closed = False
         self._setup_signal_handlers()
         try:
             with self._cycle_lock:
@@ -1953,7 +1957,8 @@ class LiveTrader:
                 self._on_ready(self._run_id)
         except BaseException:
             self._running = False
-            self._release_lease()
+            with self._cycle_lock:
+                self._close()
             raise
         iteration = 0
         strategy_name = self._executor.strategy_name
@@ -2015,17 +2020,32 @@ class LiveTrader:
             shutdown_reason = "unhandled exception"
             logger.exception("LiveTrader crashed")
         finally:
-            try:
-                self._notify(
-                    "send_shutdown",
-                    strategy=strategy_name,
-                    symbol=symbols_str,
-                    reason=shutdown_reason,
-                )
-                self._notify_pool.shutdown(wait=True)
-            finally:
-                self._release_lease()
+            # Under the lock, so an operator call waiting on the last cycle
+            # finds the run closed instead of acting after the lease is gone.
+            with self._cycle_lock:
+                try:
+                    self._notify(
+                        "send_shutdown",
+                        strategy=strategy_name,
+                        symbol=symbols_str,
+                        reason=shutdown_reason,
+                    )
+                    self._notify_pool.shutdown(wait=True)
+                finally:
+                    self._close()
             logger.info("LiveTrader stopped (reason: %s)", shutdown_reason)
+
+    def _close(self) -> None:
+        """Refuse further operator calls and release the account; hold the cycle lock."""
+        self._closed = True
+        dropped = self._drain_halt_requests()
+        if dropped:
+            logger.warning("Dropped halt requests at shutdown: %s", "; ".join(dropped))
+        self._release_lease()
+
+    def _require_running(self) -> None:
+        if self._closed:
+            raise RuntimeError("trader is not running: run() has shut down")
 
     def stop(self) -> None:
         """Signal the runner to stop after the current cycle."""
@@ -2071,9 +2091,16 @@ class LiveTrader:
         cycle in progress, then applied once that cycle ends, raising any
         error to the caller. A cycle that starts first, or never ends,
         applies it itself at its start, so a slow or hung cycle cannot lose it.
+        Raises once ``run`` has shut down.
         """
-        self._halt_requests.put(_validated_reason(reason, "halt"))
+        reason = _validated_reason(reason, "halt")
+        self._require_running()
+        self._halt_requests.put(reason)
         with self._cycle_lock:
+            if self._closed:
+                # Shut down while this call waited: nothing may apply it now.
+                self._drain_halt_requests()
+            self._require_running()
             self._run_requested_halt()
 
     def request_halt(self, reason: str = "operator requested halt") -> None:
@@ -2105,7 +2132,7 @@ class LiveTrader:
         able to see the blocking reason without provoking an exception to
         obtain it. Remaining halted is always safe; being unable to find out
         why is not. Safe from any thread; it waits for the cycle in progress,
-        as ``halt`` does.
+        as ``halt`` does, and raises once ``run`` has shut down.
 
         Every open position needs a mark that is both present and current.
         Presence alone would let a reset revalue the book on a price a dead
@@ -2114,6 +2141,7 @@ class LiveTrader:
         closed market is not mistaken for a stalled one.
         """
         with self._cycle_lock:
+            self._require_running()
             return halt_recovery.evaluate_reset_readiness(
                 active_orders=self._active_orders,
                 positions=self._positions,
@@ -2131,9 +2159,10 @@ class LiveTrader:
         rather than an unhandled valuation error, and records the refusal so
         an operator can see it after the fact. Safe from any thread, waiting
         for the cycle in progress as ``halt`` does; a halt request still
-        pending then applies on the next cycle.
+        pending then applies on the next cycle. Raises once ``run`` has shut down.
         """
         with self._cycle_lock:
+            self._require_running()
             readiness = self.halt_reset_readiness()
             if not readiness.ready:
                 halt_recovery.refuse_reset(
@@ -4798,14 +4827,17 @@ class LiveTrader:
         First in the cycle, so a planned order is never submitted, and a
         pending flatten is refused rather than having its exits cancelled.
         """
+        reasons = self._drain_halt_requests()
+        if reasons:
+            self._apply_manual_halt("; ".join(reasons))
+
+    def _drain_halt_requests(self) -> list[str]:
         reasons: list[str] = []
         while True:
             try:
                 reasons.append(self._halt_requests.get_nowait())
             except Empty:
-                break
-        if reasons:
-            self._apply_manual_halt("; ".join(reasons))
+                return reasons
 
     def _run_requested_flatten(self) -> None:
         """Act on a pending ``request_flatten`` from the polling thread."""
