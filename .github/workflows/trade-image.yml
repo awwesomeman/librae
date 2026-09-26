@@ -287,14 +287,9 @@ jobs:
               quant_smoke-ci
           )" = "${TRADE_IMAGE_REF}"
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
-          ./deploy/trade.sh halt smoke-ci
-          for attempt in $(seq 1 10); do
-            docker exec quant_smoke-ci test -f /tmp/librae-halt-requested && break
-            sleep 1
-          done
-          docker exec quant_smoke-ci test -f /tmp/librae-halt-requested
-          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
-          docker exec quant_smoke-ci rm /tmp/librae-halt-requested
+          # Crash before any halt: after `docker kill --signal USR1` the restart
+          # policy did not restart the next exit (Docker Engine 29.4.0,
+          # observed 2026-09-26).
           docker exec quant_smoke-ci touch /tmp/librae-crash-requested
           for attempt in $(seq 1 30); do
             state="$(docker inspect --format '{{.State.Status}} {{.RestartCount}}' quant_smoke-ci)"
@@ -313,6 +308,13 @@ jobs:
             ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running" >/dev/null && break
             sleep 1
           done
+          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
+          ./deploy/trade.sh halt smoke-ci
+          for attempt in $(seq 1 10); do
+            docker exec quant_smoke-ci test -f /tmp/librae-halt-requested && break
+            sleep 1
+          done
+          docker exec quant_smoke-ci test -f /tmp/librae-halt-requested
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
           ./deploy/trade.sh restart smoke-ci | grep -Fx "phase=running"
           if ./deploy/trade.sh start failing-ci ci-fail USD failing sim 60; then
