@@ -845,6 +845,8 @@ class LiveTrader:
         self._halted: bool = False
         # A halt the store has not recorded: a restart would resume unhalted.
         self._halt_unpersisted = False
+        # Whether that halt still owes the cancellation it skipped.
+        self._halt_cancels_pending = False
         self._pending_decision: StrategyDecision = []
         # Bar timestamp each pending intent first rested on, keyed by symbol.
         # A resting "day" limit expires against the session it first rested in.
@@ -1753,6 +1755,10 @@ class LiveTrader:
             self._record_reconciliation_unavailable(exc)
             return
         except Exception as exc:
+            if self._halted:
+                # A halt in this round has alerted already; its error is not
+                # a reconciliation failure.
+                raise
             logger.exception("Periodic broker reconciliation failed")
             self._halt_live(
                 title="Periodic Reconciliation Failed",
@@ -1826,23 +1832,21 @@ class LiveTrader:
     def _halt_live(self, *, title: str, message: str) -> None:
         """Fail closed and cancel every tracked order that may still execute.
 
-        A checkpoint failure still alerts, naming it, before it propagates.
+        The halt is checkpointed before cancelling, and each cancel records
+        itself. A failure of either still alerts, naming it, before it
+        propagates.
         """
         self._halted = True
         self._pending_decision = []
         self._pending_resting_since = {}
         self._live_rebalance = None
-        failure: Exception | None = None
-        note = ""
-        try:
-            # Cancellation records each cancel before sending it, so a store
-            # outage can surface here too.
-            if not self._executor.simulation:
+        failure, note = self._persist_halt(cancel_on_retry=True)
+        if failure is None and not self._executor.simulation:
+            try:
                 self._cancel_active_orders()
-            self._persist_state()
-        except Exception as exc:
-            failure = exc
-            note = self._mark_halt_unpersisted(exc)
+            except Exception as exc:
+                failure = exc
+                note = f"; cancelling tracked orders failed ({type(exc).__name__}: {exc})"
         logger.error("%s: %s", title, message)
         self._notify(
             "send_alert",
@@ -1852,21 +1856,31 @@ class LiveTrader:
         if failure is not None:
             raise failure
 
-    def _mark_halt_unpersisted(self, failure: Exception) -> str:
-        """Keep a halt the store did not record for retry; return the note for its alert."""
-        self._halt_unpersisted = True
-        logger.error("Halt checkpoint not written", exc_info=failure)
-        return (
-            f"; halt not persisted ({type(failure).__name__}: {failure}), "
-            "so a restart now would resume unhalted"
-        )
+    def _persist_halt(self, *, cancel_on_retry: bool) -> tuple[Exception | None, str]:
+        """Checkpoint a halt, or keep it for retry and return a note naming the failure.
+
+        ``cancel_on_retry`` is whether the halt still owes a cancellation: a
+        plain halt does, a flatten leaves its recovery exits working.
+        """
+        try:
+            self._persist_state()
+        except Exception as exc:
+            self._halt_unpersisted = True
+            self._halt_cancels_pending = cancel_on_retry
+            # The caller re-raises it, which logs the traceback.
+            logger.error("Halt checkpoint not written: %s", exc)
+            return exc, (
+                f"; halt not persisted ({type(exc).__name__}: {exc}), "
+                "so a restart now would resume unhalted"
+            )
+        return None, ""
 
     def _retry_halt_checkpoint(self) -> None:
         """Record a halt the store missed before any other work in the cycle.
 
         A failure propagates and stops the cycle like any checkpoint failure,
         so no order work runs on a state the store never saw. Once recorded,
-        cancellation finishes as a restart from the halted checkpoint would.
+        the cancellation the halt skipped goes out.
         """
         if not self._halt_unpersisted:
             return
@@ -1878,7 +1892,8 @@ class LiveTrader:
             title=f"[{self._executor.strategy_name}] Halt Persisted",
             message="The halt is now recorded; a restart resumes halted.",
         )
-        if not self._executor.simulation and not self._has_active_recovery_orders():
+        if self._halt_cancels_pending and not self._executor.simulation:
+            self._halt_cancels_pending = False
             self._cancel_active_orders()
 
     def _fail_group_or_halt(
@@ -1957,6 +1972,11 @@ class LiveTrader:
         if not self._halted:
             self._halt_live(title="Manual Halt", message=reason)
             return
+        if self._halt_unpersisted:
+            # Answer with a durable halt or its error, never "already halted".
+            logger.warning("Manual Halt: %s; already halted, not yet persisted", reason)
+            self._retry_halt_checkpoint()
+            return
         exits = sum(1 for tracked in self._active_orders if _is_recovery_exit(tracked.request))
         message = f"{reason}; already halted; {exits} recovery exits keep working"
         logger.warning("Manual Halt: %s", message)
@@ -1981,6 +2001,7 @@ class LiveTrader:
                     f"another live process already owns state_key={self._state_key!r}"
                 )
             self._lease_acquired = True
+            restored_halted = self._halted
             try:
                 if self._halted and not self._has_active_recovery_orders():
                     self._cancel_active_orders()
@@ -1988,6 +2009,9 @@ class LiveTrader:
                     self._advance_live_orders(submit_planned=False)
                 self._reconcile_open_orders()
             except Exception as exc:
+                if self._halted and not restored_halted:
+                    # A halt during reconciliation has alerted already.
+                    raise
                 logger.exception("Broker order reconciliation failed")
                 self._halt_live(
                     title="Order Reconciliation Failed",
@@ -4840,6 +4864,7 @@ class LiveTrader:
     ) -> None:
         """Queue or submit exits for every position, halt, and alert the outcome."""
         exit_queued = False
+        submit_failure: Exception | None = None
         held_before = set(self._positions)
         if self._executor.simulation:
             queue_market_exit_all(self._positions, reason=reason)
@@ -4878,20 +4903,24 @@ class LiveTrader:
                     ts,
                     apply_volume_limit=False,
                 )
+            except Exception as exc:
+                if self._halted:
+                    # A halt during submission has alerted already.
+                    raise
+                # Queueing the exits checkpoints them first, so a store
+                # outage fails here, before the account is halted.
+                submit_failure = exc
+                flattened = False
             finally:
                 self._flatten_at = None
         self._halted = True
         self._pending_decision = []
         self._pending_resting_since = {}
         self._live_rebalance = None
-        failure: Exception | None = None
-        note = ""
-        try:
-            self._persist_state()
-        except Exception as exc:
-            failure = exc
-            note = self._mark_halt_unpersisted(exc)
-        if flattened and self._positions and set(self._positions) == held_before:
+        failure, note = self._persist_halt(cancel_on_retry=False)
+        if submit_failure is not None:
+            outcome = f"exit submission failed ({type(submit_failure).__name__}: {submit_failure})"
+        elif flattened and self._positions and set(self._positions) == held_before:
             outcome = f"no position fully closed; {', '.join(sorted(self._positions))} remain open"
         elif flattened and self._positions:
             outcome = f"closed all but {', '.join(sorted(self._positions))}, which remain open"
@@ -4916,6 +4945,8 @@ class LiveTrader:
             detail,
             outcome,
         )
+        if submit_failure is not None:
+            raise submit_failure
         if failure is not None:
             raise failure
 

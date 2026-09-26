@@ -910,15 +910,20 @@ adapter at submission.
   mode then re-verifies the broker before the first new decision (see
   [Reconciliation](#reconciliation-live-only)). See the recovery procedure in
   [the operational runbook](operational-runbook.md).
-- Halt durability: every halt, including a drawdown or operator flatten,
-  applies in memory first, then writes the checkpoint. If that write fails,
-  the halt alert still goes out and names the failure, the error propagates
-  (to `halt()`'s caller, or as a poll-cycle error), and the run stays halted.
-  Each later cycle retries the checkpoint before any order work and stops
-  there while it keeps failing; once it succeeds, a **Halt Persisted** alert
-  follows and the halt's remaining cancellations are sent, as on a restart.
-  `reset_halt()` refuses with `halt_not_persisted` until then. A process that
-  exits first restarts from the last written checkpoint, unhalted.
+- Halt durability: every halt applies in memory, writes its checkpoint, and
+  only then cancels, each cancel recording itself before it is sent; the alert
+  names a cancellation that fails. If the checkpoint write fails, nothing is
+  cancelled yet, the halt alert still goes out naming the failure, the error
+  propagates (to `halt()`'s caller, or as a poll-cycle error), and the run
+  stays halted. A drawdown or operator flatten whose exits cannot be queued,
+  because queueing writes them first, halts and alerts the same way. Each
+  later cycle retries the checkpoint before any order work and stops there
+  while it fails; so does a repeated `halt()`, which raises until the write
+  succeeds. On success a **Halt Persisted** alert follows, a plain halt's
+  cancellations go out, and a flatten's exits, sent or still queued, keep
+  working. `reset_halt()` refuses with `halt_not_persisted` until then. A
+  process that exits first restarts from the last written checkpoint,
+  unhalted.
 - Threading: `halt()`, `reset_halt()` and `halt_reset_readiness()` are safe
   from any thread. Each waits for the poll cycle in progress, which lasts as
   long as that cycle's broker and market-data calls, and applies between
