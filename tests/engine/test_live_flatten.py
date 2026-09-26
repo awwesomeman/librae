@@ -732,7 +732,7 @@ class TestRefusedRecoveryExit:
         assert len(_titled(alerts, "Close Cancelled")) == 3
         assert _titled(alerts, "Order Cancelled") == []
         [flatten] = [alert for alert in alerts if alert["title"].endswith("Operator Flatten")]
-        assert "closed none; AAA, BBB, DUST remain open" in flatten["message"]
+        assert "no position fully closed; AAA, BBB, DUST remain open" in flatten["message"]
 
     def test_timed_out_flatten_exit_is_recorded_and_the_rest_submitted(self):
         adapter = _adapter(below_minimum="")
@@ -763,7 +763,7 @@ class TestRefusedRecoveryExit:
         assert skip.symbol == "BBB"
         assert "Order Timeout" in skip.detail["message"]
 
-    def test_every_refused_exit_reports_that_none_closed(self):
+    def test_every_refused_exit_reports_that_no_position_fully_closed(self):
         adapter = _adapter(below_minimum="")
         adapter.place_order.side_effect = OrderRejectedError(_REDUCE_ONLY_REFUSAL)
         trader, events, alerts = _trader(adapter)
@@ -774,7 +774,7 @@ class TestRefusedRecoveryExit:
         assert _submitted(adapter) == SYMBOLS
         assert len(_refusal_skips(events)) == 3
         [flatten] = [alert for alert in alerts if alert["title"].endswith("Operator Flatten")]
-        assert "closed none; AAA, BBB, DUST remain open" in flatten["message"]
+        assert "no position fully closed; AAA, BBB, DUST remain open" in flatten["message"]
         assert "closed all but" not in flatten["message"]
 
     def test_close_with_a_spoofed_recovery_reason_on_a_running_account_halts(self):

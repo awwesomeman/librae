@@ -159,8 +159,8 @@ manifest. The engine independently holds a durable account lease before any
 broker reconciliation or order work, so separate manifests and launch paths
 cannot concurrently control the same declared `account_id`.
 
-The `Supervisor` protocol exposes only `start`, `stop`, `inspect`, and
-`restart`. Docker, systemd, Kubernetes, or another concrete process manager
+The `Supervisor` protocol exposes only `start`, `stop`, `inspect`, `restart`,
+and `halt`, which asks a running process to halt trading without stopping it. Docker, systemd, Kubernetes, or another concrete process manager
 implements those operations and remains the lifecycle source of truth.
 `DeploymentStatus` carries observed identity, phase, timestamp, and optional
 process, run, exit, and failure facts; it is not a second state store.
@@ -901,13 +901,26 @@ adapter at submission.
   a new risk epoch.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
   clears pending strategy decisions, and cancels tracked live broker orders.
-  `reset_halt()` is required after review before new entries resume. It
+  On an already-halted account it only alerts, so recovery exits from a
+  drawdown breach or flatten keep working. `reset_halt()` is required after review before new entries resume. It
   refuses while a tracked order is unresolved, or while an open position lacks
   a current valuation mark, naming the cause and the next action;
   `halt_reset_readiness()` reports the same answer without raising. Live
   mode then re-verifies the broker before the first new decision (see
   [Reconciliation](#reconciliation-live-only)). See the recovery procedure in
   [the operational runbook](operational-runbook.md).
+- Threading: `halt()`, `reset_halt()` and `halt_reset_readiness()` are safe
+  from any thread. Each waits for the poll cycle in progress, which lasts as
+  long as that cycle's broker and market-data calls, and applies between
+  cycles, so it never interleaves with an order submission. Errors stay
+  synchronous: a refused `reset_halt()` raises to its caller. `halt()`
+  records the halt before it waits, so a cycle that starts first or hangs
+  applies it at its start instead. Once `run()` has shut down, all three
+  raise instead of acting on an account the run no longer owns.
+- `LiveTrader.request_halt(reason)` records a halt without waiting; `run()`
+  maps `SIGUSR1` to it on POSIX. The loop applies pending requests first in
+  its next cycle, before order work and before a pending `request_flatten`,
+  which the halted account then refuses. A restart drops a pending request.
 - `LiveTrader.request_flatten(reason)` is the operator flatten: the same
   close-everything-and-halt as a drawdown breach, with exits carrying reason
   `operator_flatten`. It is safe from any thread because it only records the

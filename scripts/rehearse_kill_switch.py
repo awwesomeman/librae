@@ -4,8 +4,9 @@ session.
 
 Runs a real LiveTrader against Binance sandbox (Demo Trading, mode=live),
 places one small resting order, then calls the operator controls from
-docs/guides/optional-infrastructure.md: trader.halt(reason), then
-trader.reset_halt() after manual reconciliation.
+docs/guides/optional-infrastructure.md from a second thread, as an in-process
+operator would: trader.halt(reason), then trader.reset_halt() after manual
+reconciliation. Each waits for the poll cycle in progress.
 
 Requires BINANCE_API_KEY/BINANCE_API_SECRET and BINANCE_SANDBOX=true
 (e.g. in .credentials/<account>.env) — refuses to run otherwise.
@@ -227,8 +228,8 @@ def main() -> None:
 
         print("[kill-switch] calling trader.halt('kill-switch rehearsal')...")
         trader.halt("kill-switch rehearsal")
-        active = len(trader._active_orders)
-        print(f"[kill-switch] halted. active tracked orders after cancel attempt: {active}")
+        readiness = trader.halt_reset_readiness()
+        print(f"[kill-switch] halted. reset readiness after cancel attempt: {readiness}")
 
         print(
             "[kill-switch] confirm the halt in the Binance UI, then reconcile manually if needed."
@@ -243,7 +244,7 @@ def main() -> None:
 
         trader.stop()
 
-    # trader.run() registers SIGTERM/SIGINT handlers, which only Python's main
+    # trader.run() registers signal handlers, which only Python's main
     # thread may do — it must be the one blocking in run(), not the operator
     # actions above, which is why those are threaded off instead.
     operator_thread = threading.Thread(target=_operator_actions, daemon=True)

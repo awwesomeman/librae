@@ -4218,6 +4218,13 @@ class TestLiveExecutionLifecycle:
         trader.STALE_DATA_TOLERANCE_BARS = 100
         return trader
 
+    @staticmethod
+    def _halt_once_an_order_rests(trader: LiveTrader, reason: str) -> None:
+        """Run until an order rests, halting from the loop as a running operator would."""
+        trader._sleep = lambda _seconds: None
+        trader._on_heartbeat = lambda _run_id: trader._active_orders and trader.halt(reason)
+        trader.run(max_iterations=2)
+
     def test_live_runtime_revision_is_required_before_checkpoint_or_broker_access(self):
         adapter = _mock_order_adapter()
         store = MagicMock()
@@ -6513,9 +6520,7 @@ class TestLiveExecutionLifecycle:
             cancelled,
         ]
         first = self._make_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
-        first.run(max_iterations=1)
-
-        first.halt("operator requested halt")
+        self._halt_once_an_order_rests(first, "operator requested halt")
 
         assert first._halted is True
         assert first._active_orders[0].cancel_requested is True
@@ -6832,9 +6837,7 @@ class TestLiveExecutionLifecycle:
             "filled": 0.0,
         }
         runner = self._make_trader(_AlwaysBuyStrategy(), adapter)
-        runner.run(max_iterations=1)
-
-        runner.halt("test")
+        self._halt_once_an_order_rests(runner, "test")
 
         adapter.cancel_order.assert_called_once_with("open-1", "BTC/USDT")
         assert runner._active_orders == []

@@ -13,7 +13,7 @@ of it.
 | | |
 |---|---|
 | Named operator | Jason Pan (repository owner) |
-| Escalation path | Single-operator deployment — there is no second responder. If the operator cannot act within the alert's implied urgency (see below), the fail-safe response is: `LiveTrader.halt(reason)` (or kill the process — live mode's durable engine state makes that safe, see [Restart recovery](#restart-recovery); a restart rebuilds the strategy object from its defaults, so only engine-owned state returns), then contact the broker's support line directly for any order that halt could not resolve. |
+| Escalation path | Single-operator deployment — there is no second responder. If the operator cannot act within the alert's implied urgency (see below), the fail-safe response is: `LiveTrader.halt(reason)`, or `./deploy/trade.sh halt <deployment_id>` for a deployed run (see [Halting a deployed run](#halting-a-deployed-run)) (or kill the process — live mode's durable engine state makes that safe, see [Restart recovery](#restart-recovery); a restart rebuilds the strategy object from its defaults, so only engine-owned state returns), then contact the broker's support line directly for any order that halt could not resolve. |
 | Reachability | Telegram (bot configured under [Alert delivery](#alert-delivery)) is the paging channel. No on-call rotation exists; do not run live capital during a period the operator cannot monitor Telegram. |
 
 This is intentionally minimal because it is a single-person deployment. If a
@@ -214,6 +214,31 @@ again — all fixed:
   raising, so health tooling can see it. A stale mark blocks reset too: the
   old check only required a mark to exist, so a dead feed's last price could
   be used to revalue the book. See the halt-recovery procedure above.
+
+## Halting a deployed run
+
+`./deploy/trade.sh halt <deployment_id>` halts a running deployment without
+stopping it. It sends SIGUSR1, which the engine records as a halt request
+([engine behavior](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)).
+
+- It refuses a deployment that is not ready or not managed, and signals
+  nothing: the engine installs its handler before it reports ready. Retry once
+  `trade.sh inspect` reports `phase=running`; stopping instead would leave
+  resting orders working.
+- The next poll cycle applies it, so it can take up to the poll interval.
+  Confirm with the **Manual Halt** alert (reason `SIGUSR1 operator halt`) or
+  `docker logs`.
+- The halt cancels tracked broker orders and drops pending decisions. A
+  cancellation the venue has not confirmed stays tracked and is retried each
+  cycle; check the venue for anything still resting.
+- On an account already halted, say by a drawdown breach, it cancels
+  nothing: the flatten's exits keep working, and the alert says how many.
+- `trade.sh stop` is not a halt: the process exits without cancelling resting
+  orders, and the checkpoint keeps tracking them for the next start.
+- The halt persists across `trade.sh restart`. Resuming takes `reset_halt()`
+  inside the running process, after the review in
+  [Kill-switch rehearsal](#kill-switch-rehearsal); the reference runner does
+  not expose it, so the strategy's runner has to provide that entry point.
 
 ## Operator flatten
 
