@@ -101,6 +101,9 @@ def _network_errors_unavailable[**P, R](read: Callable[P, R]) -> Callable[P, R]:
     also files an unrecognized 400/403/404 there, which the engine's bound on
     skipped rounds still caps). Authentication and permission errors sit
     under ExchangeError instead and keep their type, so they fail closed.
+    InvalidNonce (and its ChecksumError subclass) is in the family but is a
+    client-side fault the venue answered (ccxt's binance table maps -1021,
+    a request timestamp outside recvWindow, to it), so waiting cannot clear it.
     """
 
     @functools.wraps(read)
@@ -108,6 +111,8 @@ def _network_errors_unavailable[**P, R](read: Callable[P, R]) -> Callable[P, R]:
         ccxt = _require_ccxt()
         try:
             return read(*args, **kwargs)
+        except ccxt.InvalidNonce:
+            raise
         except ccxt.NetworkError as exc:
             raise BrokerUnavailableError(str(exc)) from exc
 

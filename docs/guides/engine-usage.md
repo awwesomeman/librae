@@ -1012,15 +1012,20 @@ is skipped instead of halting, because a skipped round is only a longer
 interval:
 
 - The next attempt waits the normal interval; the venue is not retried harder.
-- Consecutive skips alert once at `LiveTrader.CONSECUTIVE_ERROR_THRESHOLD`;
-  the first round the broker answers after that alert sends a recovery notice.
-- Reaching `LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS` halts with
-  "Periodic Reconciliation Unavailable", so the drift an outage can hide
-  stays bounded to that many intervals.
+- An unavailable balance read counts as a skipped round here, although cash
+  reconciliation is otherwise best-effort.
+- Skips are tracked over the market-data fetch-health window
+  (`LiveTrader.FETCH_HEALTH_*`), so an intermittent venue surfaces as well as
+  a dead one: one alert when skipped rounds in the window reach the alert
+  count, one recovery notice once they fall to the recovery count.
+- Only consecutive skips halt, at
+  `LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS`, with "Periodic
+  Reconciliation Unavailable": every answered round runs a full reconcile, so
+  intermittent skips thin coverage without removing it.
 - A mismatch, an orphan order, any other read error, and every startup or
   restore read still halt immediately.
-- The skip count is not checkpointed: a restart re-runs startup
-  reconciliation, which fails closed.
+- `reset_halt()` starts a fresh window. The skip history is not checkpointed:
+  a restart re-runs startup reconciliation, which fails closed.
 
 During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle

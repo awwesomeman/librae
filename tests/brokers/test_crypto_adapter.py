@@ -1145,7 +1145,15 @@ def test_reconciliation_reads_classify_network_errors_as_unavailable(
 @pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
 @pytest.mark.parametrize(
     "error_name",
-    ["AuthenticationError", "PermissionDenied", "ExchangeError", "BadResponse"],
+    [
+        "AuthenticationError",
+        "PermissionDenied",
+        "ExchangeError",
+        "BadResponse",
+        # NetworkError subclasses where the venue answered or the client is at fault.
+        "InvalidNonce",
+        "ChecksumError",
+    ],
 )
 def test_reconciliation_reads_leave_non_network_errors_unclassified(
     authed_adapter, mock_ccxt_exchange, read, error_name

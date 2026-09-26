@@ -841,6 +841,8 @@ class LiveTrader:
         self._adv_filled_quantities: dict[str, float] = {}
         self._last_reconciliation_at: datetime | None = None
         self._reconciliation_unavailable_rounds = 0
+        self._reconciliation_history: deque[bool] = deque(maxlen=self.FETCH_HEALTH_WINDOW)
+        self._reconciliation_degraded = False
         self._cycle_fetch_seconds: dict[str, float] = {}
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
@@ -1129,8 +1131,9 @@ class LiveTrader:
 
     # WHY: a skipped reconciliation round only stretches the interval, so
     # bounding consecutive skips bounds how long broker/local drift can go
-    # undetected. Twice the alert threshold gives the operator as many rounds
-    # after the alert as before it, before the engine fails closed itself.
+    # undetected. Only consecutive skips halt: every answered round runs a full
+    # reconcile, so intermittent skips thin coverage without removing it, and
+    # the FETCH_HEALTH_* window below alerts on them instead.
     RECONCILIATION_UNAVAILABLE_HALT_ROUNDS = 6
 
     # A six-poll window catches a sustained two-out-of-three failure pattern
@@ -1623,7 +1626,8 @@ class LiveTrader:
 
         Duck-typed and best-effort: an unavailable capability or unreadable
         balance is reported but does not halt trading because broker balance
-        semantics cannot safely replace the local accounting ledger.
+        semantics cannot safely replace the local accounting ledger. A
+        BrokerUnavailableError propagates so the caller can count the round.
         """
         if self._executor.simulation:
             return
@@ -1638,6 +1642,8 @@ class LiveTrader:
             return
         try:
             broker_total = float(adapter.get_balance(self._currency)["total"])
+        except BrokerUnavailableError:
+            raise
         except Exception:
             logger.exception(
                 "Cash reconciliation failed for account=%s currency=%s; skipping",
@@ -1711,7 +1717,9 @@ class LiveTrader:
                 title="Periodic Reconciliation Failed",
                 message=str(exc),
             )
-        self._record_reconciliation_answered()
+        if not self._halted:
+            self._reconciliation_unavailable_rounds = 0
+            self._record_reconciliation_health(skipped=False)
 
     def _record_reconciliation_unavailable(self, error: BrokerUnavailableError) -> None:
         rounds = self._reconciliation_unavailable_rounds + 1
@@ -1719,36 +1727,53 @@ class LiveTrader:
         logger.warning(
             "Periodic broker reconciliation skipped: broker unavailable (%d consecutive)",
             rounds,
-            exc_info=(type(error), error, error.__traceback__),
+            exc_info=error,
         )
         if rounds >= self.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS:
-            # The halt alert supersedes the outage alert, and an operator
-            # reset starts a fresh unverified window.
-            self._reconciliation_unavailable_rounds = 0
             self._halt_live(
                 title="Periodic Reconciliation Unavailable",
                 message=f"Broker unavailable for {rounds} consecutive rounds: {error}",
             )
-        elif rounds == self.CONSECUTIVE_ERROR_THRESHOLD:
+            return
+        self._record_reconciliation_health(skipped=True, error=error)
+
+    def _record_reconciliation_health(
+        self, *, skipped: bool, error: BrokerUnavailableError | None = None
+    ) -> None:
+        """Alert on skipped rounds over a window, as market-data fetch health does.
+
+        Unlike that feed diagnostic, a partial window counts, so a pure outage
+        alerts before the consecutive halt bound.
+        """
+        history = self._reconciliation_history
+        history.append(skipped)
+        skipped_rounds = sum(history)
+        if not self._reconciliation_degraded and skipped_rounds >= self.FETCH_HEALTH_ALERT_FAILURES:
+            self._reconciliation_degraded = True
             self._notify(
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] Periodic Reconciliation Skipped",
                 message=(
-                    f"Broker unavailable for {rounds} consecutive rounds: {error}; "
-                    "trading continues, halts after "
-                    f"{self.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS}."
+                    f"{skipped_rounds}/{len(history)} recent rounds got no broker answer "
+                    f"({error}); trading continues, halts after "
+                    f"{self.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS} consecutive."
                 ),
             )
-
-    def _record_reconciliation_answered(self) -> None:
-        rounds = self._reconciliation_unavailable_rounds
-        self._reconciliation_unavailable_rounds = 0
-        if rounds >= self.CONSECUTIVE_ERROR_THRESHOLD and not self._halted:
-            logger.info("Periodic broker reconciliation recovered after %d skipped rounds", rounds)
+        elif (
+            self._reconciliation_degraded
+            and not skipped
+            and skipped_rounds <= self.FETCH_HEALTH_RECOVERY_FAILURES
+        ):
+            self._reconciliation_degraded = False
+            logger.info(
+                "Periodic broker reconciliation recovered: skipped=%d/%d",
+                skipped_rounds,
+                len(history),
+            )
             self._notify(
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] Periodic Reconciliation Recovered",
-                message=f"Broker answered after {rounds} skipped rounds; alert cleared.",
+                message=f"Skipped rounds fell to {skipped_rounds}/{len(history)}; alert cleared.",
             )
 
     def _halt_live(self, *, title: str, message: str) -> None:
@@ -1841,7 +1866,11 @@ class LiveTrader:
                 )
 
         self._reconcile_positions()
-        self._reconcile_cash()
+        try:
+            self._reconcile_cash()
+        except BrokerUnavailableError:
+            # Startup cash is best-effort; positions and orders gate the start.
+            logger.warning("Startup cash reconciliation skipped: broker unavailable", exc_info=True)
         if not self._executor.simulation:
             self._last_reconciliation_at = self._utc_now()
 
@@ -2018,6 +2047,10 @@ class LiveTrader:
             )
         equity, _ = self._calc_account_snapshot()
         self._halted = False
+        # A new risk epoch starts a fresh unverified window.
+        self._reconciliation_unavailable_rounds = 0
+        self._reconciliation_history.clear()
+        self._reconciliation_degraded = False
         self._equity_peak = equity
         self._prev_equity = equity
         self._status_window_equity = equity
