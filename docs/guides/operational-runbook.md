@@ -80,7 +80,7 @@ Periodic reconciliation alerts (thresholds and rules in
 
 | Alert title | Meaning | Action |
 |---|---|---|
-| Periodic Reconciliation Skipped | The venue has not answered several rounds in a row; trading continues unverified | Check venue status and connectivity; nothing to do if it recovers |
+| Periodic Reconciliation Skipped | The venue has not answered several rounds in a row; trading continues unverified | Check venue status and connectivity; nothing to do if it recovers. An IBKR client never reconnects on its own: restart the deployment once the gateway is back |
 | Periodic Reconciliation Recovered | The broker answered again | None |
 | Periodic Reconciliation Unavailable | The venue stayed unreachable past the bound; halted | Once it answers, check positions and orders at the broker, then `reset_halt()` |
 | Periodic Reconciliation Failed, Periodic Position Reconciliation Mismatch | An unclassified read error (auth, permission, bad response) or a broker/local disagreement; halted at once | Find the cause before `reset_halt()` |
