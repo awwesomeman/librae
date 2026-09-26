@@ -1030,7 +1030,9 @@ interval:
   account while halted. Decisions wait until a round answers and matches: a
   mismatch or orphan halts again, and an unavailable round is skipped and
   counted as above, retried at the normal interval. Heartbeat and
-  market-data monitoring keep running meanwhile.
+  market-data monitoring keep running meanwhile, but marks and the
+  `max_drawdown_rate` circuit pause until the round matches, so watch the
+  book manually during that window.
 - Neither the skip history nor that wait is checkpointed: a restart re-runs
   startup reconciliation, which fails closed and serves as the round.
 

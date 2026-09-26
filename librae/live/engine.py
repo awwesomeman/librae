@@ -1878,10 +1878,11 @@ class LiveTrader:
         except BrokerUnavailableError:
             # Startup cash is best-effort; positions and orders gate the start.
             logger.warning("Startup cash reconciliation skipped: broker unavailable", exc_info=True)
+        # Startup reconciliation is fail-closed, so it verifies a reset too;
+        # simulation has nothing to verify.
+        self._resume_unverified = False
         if not self._executor.simulation:
-            # Startup reconciliation is fail-closed, so it verifies a reset too.
             self._last_reconciliation_at = self._utc_now()
-            self._resume_unverified = False
 
     def _release_lease(self) -> None:
         if self._lease_acquired:
@@ -2055,11 +2056,14 @@ class LiveTrader:
                 utc_now=self._utc_now,
             )
         equity, _ = self._calc_account_snapshot()
+        if self._halted:
+            # The operator may have touched the account while halted: compare
+            # it with the broker on the next cycle, before any new decision.
+            # Armed before the halt clears so a cycle polling on another
+            # thread never sees an unhalted, unverified account.
+            self._last_reconciliation_at = None
+            self._resume_unverified = True
         self._halted = False
-        # The operator may have touched the account while halted: compare it
-        # with the broker on the next cycle, before any new decision.
-        self._last_reconciliation_at = None
-        self._resume_unverified = True
         # A new risk epoch starts a fresh unverified window.
         self._reconciliation_unavailable_rounds = 0
         self._reconciliation_history.clear()

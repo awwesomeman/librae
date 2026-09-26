@@ -5639,6 +5639,56 @@ class TestLiveExecutionLifecycle:
         strategy.on_bar.assert_called_once()
         adapter.get_position.assert_not_called()
 
+    def test_resume_gate_is_armed_before_the_halt_clears(self):
+        """reset_halt may run on an operator thread while run() polls."""
+        runner = self._make_trader(_HoldStrategy(), _mock_order_adapter())
+        runner._initialize_run()
+        runner.halt("operator check")
+        seen: list[tuple[bool, datetime | None]] = []
+
+        class Observed(LiveTrader):
+            @property
+            def _halted(self) -> bool:
+                return self.__dict__["_halted"]
+
+            @_halted.setter
+            def _halted(self, value: bool) -> None:
+                if not value:
+                    seen.append((self._resume_unverified, self._last_reconciliation_at))
+                self.__dict__["_halted"] = value
+
+        runner.__class__ = Observed
+        runner.reset_halt()
+
+        assert seen == [(True, None)]
+
+    def test_reset_without_a_halt_does_not_hold_decisions(self):
+        adapter = _mock_order_adapter()
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_trader(
+            strategy, adapter, config=_test_cfg(mode="live", reconciliation_interval_seconds=3600)
+        )
+        runner._initialize_run()
+        runner.reset_halt()
+        adapter.reset_mock()
+
+        runner._poll_cycle()
+
+        strategy.on_bar.assert_called_once()
+        adapter.get_position.assert_not_called()
+
+    def test_simulation_start_clears_a_reset_made_before_run(self):
+        runner = self._make_trader(
+            _HoldStrategy(), _mock_order_adapter(), config=_test_cfg(mode="sim")
+        )
+        runner.halt("operator check")
+        runner.reset_halt()
+
+        runner._initialize_run()
+
+        assert runner._resume_unverified is False
+
     def test_startup_reconciliation_verifies_a_reset_made_before_run(self):
         adapter = _mock_order_adapter()
         strategy = MagicMock(spec=Strategy)

@@ -124,7 +124,15 @@ Procedure it exercises:
    broker before any new decision: a mismatch or orphan order halts again
    with its usual alert, and an unanswered venue holds decisions: skipped
    rounds are logged, then alerted and bounded as in the periodic
-   reconciliation alerts above.
+   reconciliation alerts above. Until that round matches, marks and the
+   max-drawdown circuit are paused, so watch the book manually.
+   The round gates on positions and open orders only. Cash moved while
+   halted (a withdrawal, say) raises only Cash Reconciliation Drift, and the
+   local ledger is never overwritten from the broker, so sizing keeps using
+   the old cash. Restore the balance before `reset_halt()`, or stop flat and
+   start a new checkpoint with `account.initial_cash` set to the broker
+   balance (see
+   [Development checkpoint compatibility](optional-infrastructure.md#development-checkpoint-compatibility)).
 
 `trader.halt_reset_readiness()` answers the same question without raising, so
 an operator or a health check can see what is blocking before attempting a
