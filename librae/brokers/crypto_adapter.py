@@ -31,7 +31,11 @@ from librae.config.symbols import (
 )
 from librae.core.utils import validate_contract_month
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
-from librae.live.executor import BrokerUnavailableError, PositionRequest
+from librae.live.executor import (
+    BrokerUnavailableError,
+    OrderBelowVenueMinimumError,
+    PositionRequest,
+)
 
 from .base import (
     AdapterInfo,
@@ -630,9 +634,18 @@ class CryptoAdapter:
         )
         prepared = dict(signal)
 
-        quantity = float(self._exchange.amount_to_precision(symbol, signal["quantity"]))
+        try:
+            rounded = self._exchange.amount_to_precision(symbol, signal["quantity"])
+        except Exception as exc:
+            # WHY: ccxt's base Exchange.amount_to_precision raises exactly
+            # InvalidOrder only when the amount truncates to zero, and no
+            # exchange override raises at all; subclasses mean something else.
+            if type(exc) is not _require_ccxt().InvalidOrder:
+                raise
+            raise OrderBelowVenueMinimumError(f"{symbol} quantity rounds to zero: {exc}") from exc
+        quantity = float(rounded)
         if quantity <= 0:
-            raise ValueError(f"{symbol} quantity rounds to zero")
+            raise OrderBelowVenueMinimumError(f"{symbol} quantity rounds to zero")
         prepared["quantity"] = quantity
 
         price = signal.get("price")
@@ -669,7 +682,7 @@ class CryptoAdapter:
             raise ValueError(f"{symbol} spot inventory cannot open a short position")
 
         limits = market.get("limits") or {}
-        self._validate_limit(quantity, limits.get("amount"), "quantity", symbol)
+        self._validate_limit(quantity, limits.get("amount"), "quantity", symbol, size=True)
         if price is not None:
             self._validate_limit(price, limits.get("price"), "price", symbol)
         reference_price = price or signal.get("reference_price")
@@ -681,7 +694,7 @@ class CryptoAdapter:
             if contract_size <= 0:
                 raise ValueError(f"{symbol} contractSize must be positive")
             notional = quantity * float(reference_price) * contract_size
-            self._validate_limit(notional, limits.get("cost"), "notional", symbol)
+            self._validate_limit(notional, limits.get("cost"), "notional", symbol, size=True)
         return prepared
 
     @staticmethod
@@ -690,13 +703,21 @@ class CryptoAdapter:
         limits: dict | None,
         name: str,
         symbol: str,
+        *,
+        size: bool = False,
     ) -> None:
+        """Check one venue limit; only a size minimum is typed as unclosable dust.
+
+        A price outside the venue's band is a bad order, not a remainder the
+        venue will never take, so it stays a plain ``ValueError``.
+        """
         if not limits:
             return
         minimum = limits.get("min")
         maximum = limits.get("max")
         if minimum is not None and value < float(minimum):
-            raise ValueError(f"{symbol} {name} {value} is below minimum {minimum}")
+            error = OrderBelowVenueMinimumError if size else ValueError
+            raise error(f"{symbol} {name} {value} is below minimum {minimum}")
         if maximum is not None and value > float(maximum):
             raise ValueError(f"{symbol} {name} {value} exceeds maximum {maximum}")
 

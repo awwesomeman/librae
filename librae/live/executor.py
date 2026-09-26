@@ -358,6 +358,18 @@ class BrokerUnavailableError(Exception):
     """
 
 
+class OrderBelowVenueMinimumError(ValueError):
+    """``prepare_order`` refused a size below the venue's minimum amount, notional or lot.
+
+    Adapters raise it only from a size minimum, including a size that rounds
+    to zero; every other preparation failure, including a maximum or a price
+    outside the venue's band, stays a plain ``ValueError``. The engine
+    skips an ungrouped reduce/close refused this way, because halting would
+    strand every other exit behind a remainder the venue will not take, and
+    keeps every other case fail-closed.
+    """
+
+
 class LiveExecutor:
     """Submit live order requests and normalize broker execution reports."""
 
@@ -525,6 +537,10 @@ class LiveExecutor:
                 signal["price"] = expected_limit_price
                 adapter_owns_price = True
             prepared = adapter.prepare_order(signal)
+        except OrderBelowVenueMinimumError as exc:
+            raise OrderBelowVenueMinimumError(
+                f"{request.symbol} order preparation failed: {exc}"
+            ) from exc
         except Exception as exc:
             raise ValueError(f"{request.symbol} order preparation failed: {exc}") from exc
         if not isinstance(prepared, dict):

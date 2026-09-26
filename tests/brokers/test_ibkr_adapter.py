@@ -21,6 +21,7 @@ from librae.core.cost_model import CostModel
 from librae.live.executor import (
     BrokerUnavailableError,
     LiveExecutor,
+    OrderBelowVenueMinimumError,
     OrderRequest,
     PositionRequest,
 )
@@ -703,6 +704,26 @@ class TestPlaceOrder:
 
         assert prepared["quantity"] == 1.2
         assert prepared["price"] == 100.01
+
+    def test_prepare_order_types_a_below_minimum_size(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._contract_details = MagicMock(
+            return_value=SimpleNamespace(minSize=1.0, sizeIncrement=1.0, minTick=0.01)
+        )
+
+        with pytest.raises(OrderBelowVenueMinimumError, match="below minimum"):
+            adapter.prepare_order(
+                {
+                    "symbol": "MU",
+                    "side": "sell",
+                    "quantity": 0.5,
+                    "order_type": "market",
+                    "time_in_force": "ioc",
+                    "position_effect": "close",
+                    "security_type": "STK",
+                    "currency": "USD",
+                }
+            )
 
     def test_live_executor_accepts_ibkr_owned_market_rule_normalization(self):
         adapter = _make_adapter(trading_enabled=True)

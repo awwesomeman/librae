@@ -56,6 +56,8 @@ REASON_TAKE_PROFIT = "take_profit"
 # order that close after the final bar's accrual (FinancingLifecycleEvent).
 REASON_FORCE_CLOSE = "force_close"
 REASON_DRAWDOWN_BREACH = "drawdown_breach"
+# Live only: the exits of LiveTrader.request_flatten.
+REASON_OPERATOR_FLATTEN = "operator_flatten"
 REASON_LIQUIDATION = "liquidation"
 
 

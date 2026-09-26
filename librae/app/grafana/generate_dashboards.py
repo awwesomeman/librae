@@ -738,8 +738,9 @@ BASE_PANELS_DEF: list[dict] = [
             "  open→close round-trip.\n"
             "- Periods — elapsed bars, not clock time — multiply by the run's\n"
             "  timeframe for actual duration.\n"
-            "- Reason — free text, or one of 5 risk-exit codes: stop_loss,\n"
-            "  take_profit, liquidation, drawdown_breach, force_close."
+            "- Reason — free text, or an engine exit code: stop_loss,\n"
+            "  take_profit, liquidation, drawdown_breach, operator_flatten,\n"
+            "  force_close."
         ),
         "type": "table",
         "h": 15,

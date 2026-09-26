@@ -849,6 +849,14 @@ adapter at submission.
   adapter preparation may only round a quantity *down*: a prepared order
   whose quantity exceeds the requested one, drops a limit price, or changes
   the venue symbol halts the account before checkpointing or submission.
+  A size the adapter refuses as below the venue minimum
+  (`OrderBelowVenueMinimumError`) halts too, except on an ungrouped
+  reduce/close: that exit is skipped for its symbol with a `decision_skipped`
+  event (reason `close_below_venue_minimum`) and an alert sent once per held
+  quantity and risk epoch, and the other orders still go out. A price outside
+  the venue's band is a bad order, not a remainder, and still halts. The
+  position stays in the ledger because the venue still holds it; see the
+  [runbook](operational-runbook.md#unclosable-remainders) for what to do.
   After preparation the order is replayed through the same notional, cash,
   position, and exposure checks as the original request.
 - `max_gross_exposure` / `max_net_exposure`: backtest/sim validate every
@@ -867,9 +875,10 @@ adapter at submission.
   market exits for the run's open positions and fills them at the next observed
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
-  confirmed broker fills. The halt persists across restart, emergency exits
-  remain active while halted, and broker orders must reach a terminal state
-  before `reset_halt()` is allowed. After operator review, `reset_halt()` starts
+  confirmed broker fills; a close below the venue minimum is skipped as above,
+  and the breach alert names what remains open. The halt persists across
+  restart, emergency exits remain active while halted, and broker orders must
+  reach a terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts
   a new risk epoch.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
   clears pending strategy decisions, and cancels tracked live broker orders.
@@ -880,6 +889,17 @@ adapter at submission.
   mode then re-verifies the broker before the first new decision (see
   [Reconciliation](#reconciliation-live-only)). See the recovery procedure in
   [the operational runbook](operational-runbook.md).
+- `LiveTrader.request_flatten(reason)` is the operator flatten: the same
+  close-everything-and-halt as a drawdown breach, with exits carrying reason
+  `operator_flatten`. It is safe from any thread because it only records the
+  request; the polling loop acts on it at the start of its next cycle, before
+  strategy evaluation, after cancelling any working order. A halted account
+  refuses it, since a halt can mean the book is not safe to trade from; after
+  `reset_halt()` it waits for the reconciliation round that verifies the book.
+  A restart drops a pending request. A position with no current mark cannot be
+  priced, so its exit is skipped with a `decision_skipped` event (reason
+  `close_without_mark`) and an alert. Sim queues the exits for the next
+  observed open, as for a drawdown breach. `reset_halt()` is the resume path.
 - Volume-aware slippage (`CostModel.volume_impact_ticks`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `volume_impact_ticks > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 The backtest timeframe is inferred independently for each symbol. Every symbol
@@ -994,11 +1014,12 @@ When no order or grouped execution is active, the checks repeat every
   unavailable is the bounded exception below). A first run with no
   checkpoint must be flat: broker exposure alone cannot reconstruct the
   engine's cash, accumulated entry costs, or risk epoch, so a non-flat first
-  run halts and requires the matching checkpoint or an operator flatten.
-  Crypto spot uses base-asset balance inventory, not the derivatives-only
-  positions endpoint. A sell that reduces or closes owned inventory is
-  valid; opening or adding a short is refused in every mode (see quantity
-  and short feasibility above).
+  run halts and requires the matching checkpoint or closing that exposure at
+  the venue; `request_flatten` closes only positions in the engine's own
+  ledger. Crypto spot uses base-asset balance inventory, not the
+  derivatives-only positions endpoint. A sell that reduces or closes owned
+  inventory is valid; opening or adding a short is refused in every mode (see
+  quantity and short feasibility above).
 - **Cash** (`_reconcile_cash`, for adapters exposing `get_balance()`): warns
   only, never overwrites. A Telegram alert fires once discrepancy exceeds
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total

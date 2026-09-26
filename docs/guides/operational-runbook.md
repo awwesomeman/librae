@@ -205,6 +205,40 @@ again — three were real bugs, all fixed:
   old check only required a mark to exist, so a dead feed's last price could
   be used to revalue the book. See the halt-recovery procedure above.
 
+## Operator flatten
+
+To stop and close every position, call `trader.request_flatten(reason)`
+instead of halting and closing at the venue, which desynchronises the
+checkpoint. The loop cancels working orders, submits the exits, halts, and
+sends an **Operator Flatten** alert naming anything that remains open. Exits
+still resting keep being polled while halted. Once
+`trader.halt_reset_readiness()` is ready, `trader.reset_halt()` resumes. A
+request on a halted account is refused with an **Operator Flatten Refused**
+alert; right after `reset_halt()` it waits until reconciliation has verified
+the book. A request pending at a restart is dropped, so request it again. Engine
+behavior is in
+[engine-usage.md](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics).
+
+## Unclosable remainders
+
+A **Close Below Venue Minimum** alert (its title names the symbol) means an
+exit was skipped because the adapter refused its size as below the venue's
+minimum amount, notional, or lot, or it rounds to zero. Every other order in
+that decision, or in the flatten, still went out. The skip is recorded each
+time as a `decision_skipped` runtime event with reason
+`close_below_venue_minimum`; the alert repeats only when the held quantity
+changes or after `reset_halt()`.
+
+The remainder is still held at the venue and stays in the ledger, so
+reconciliation keeps matching. Leave it there: it closes once a later fill
+grows the position above the minimum. Removing it at the venue instead makes
+the next reconciliation halt with a position mismatch.
+
+A **Close Without Mark** alert during a flatten means that position had no
+current valuation mark, so its exit could not be priced and was skipped
+(reason `close_without_mark`). It stays open in the ledger; once its feed
+produces a bar and the account is reset, request the flatten again.
+
 ## DB backup and restore
 
 **Scripts:** `deploy/db_backup.sh` and `deploy/db_restore.sh`, against the
