@@ -194,6 +194,7 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert "touch /tmp/librae-crash-requested" in workflow
     assert "halt signalled a restarted runner before it was ready" in workflow
     assert "halted runner was not restarted after a crash" in workflow
+    assert "halt reported a signal to a runner that restarted before it" in workflow
     assert "./deploy/trade.sh inspect failing-ci" in workflow
     assert "librae-account-lease-owner" in workflow
     assert 'io.librae.account_id" }}' in workflow
@@ -268,6 +269,8 @@ def _run_trade_script(
     start_timeout_seconds: str = "2",
     stale_ready_marker: str = "",
     restart_count: str = "0",
+    ready_file: str = "/run/librae/ready",
+    marker_at_signal: str | None = None,
     arguments: list[str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bash = _find_bash()
@@ -361,6 +364,11 @@ elif [[ "$1" == "run" && "$2" == "--rm" ]]; then
         exit 1
     fi
 elif [[ "$1" == "exec" ]]; then
+    if [[ "$*" == *SIGUSR1* ]]; then
+        # The in-container check: signal only while the marker is unchanged.
+        [[ "${@: -1}" == "${FAKE_MARKER_AT_SIGNAL}" ]]
+        exit $?
+    fi
     if [[ "$*" == *" cat "* ]]; then
         marker_file="${@: -1}"
         if [[ "${marker_file}" == "${FAKE_READY_FILE}" ]]; then
@@ -401,7 +409,8 @@ fi
             "FAKE_EXISTING_STRATEGY": existing_strategy,
             "FAKE_EXISTING_MODE": existing_mode,
             "FAKE_EXISTING_MANAGED": existing_managed,
-            "FAKE_READY_FILE": "/run/librae/ready",
+            "FAKE_READY_FILE": ready_file,
+            "FAKE_MARKER_AT_SIGNAL": ready_marker if marker_at_signal is None else marker_at_signal,
             "FAKE_READY_TOKEN": ready_token,
             "FAKE_READY_MARKER": ready_marker,
             "FAKE_READY_MARKER_EXIT_CODE": str(ready_marker_exit_code),
@@ -583,28 +592,65 @@ def _halt(tmp_path: Path, **kwargs) -> tuple[subprocess.CompletedProcess[str], l
     )
 
 
-_SIGNAL_RUNNER = "exec quant_smoke-main python -c import os, signal; os.kill(1, signal.SIGUSR1)"
-
-
 def _signalled(docker_calls: list[str]) -> bool:
-    return _SIGNAL_RUNNER in docker_calls or any(call.startswith("kill") for call in docker_calls)
+    return any(
+        call.startswith("kill") or (call.startswith("exec") and "SIGUSR1" in call)
+        for call in docker_calls
+    )
 
 
 def test_trade_script_halt_signals_a_ready_deployment(tmp_path: Path) -> None:
     result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main")
 
     assert result.returncode == 0, result.stderr
-    assert _SIGNAL_RUNNER in docker_calls
-    assert not any(call.startswith(("stop", "rm", "run", "start")) for call in docker_calls)
-
-
-def test_trade_script_halt_never_uses_docker_kill(tmp_path: Path) -> None:
-    # `docker kill` marks the container manually stopped, so the restart
+    # `docker kill` would mark the container manually stopped, so the restart
     # policy would no longer restart a halted runner that later crashes.
-    result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main")
+    assert not any(call.startswith(("kill", "stop", "rm", "run", "start")) for call in docker_calls)
+    signal_call = next(call for call in docker_calls if _signalled([call]))
+    # The in-container check receives the marker halt validated.
+    assert signal_call.startswith("exec quant_smoke-main python -c ")
+    assert signal_call.endswith(f" /run/librae/ready attempt-token:fixture-run:{'a' * 32}")
+    assert "run halt again" in result.stdout
+    assert "restart-safe readiness" not in result.stderr
 
-    assert result.returncode == 0, result.stderr
-    assert not any(call.startswith("kill") for call in docker_calls)
+
+def test_trade_script_halt_reports_a_runner_that_restarted_after_the_check(
+    tmp_path: Path,
+) -> None:
+    # The runner crashed between the readiness check and the signal: the
+    # restarted container's tmpfs no longer holds the validated marker.
+    result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main", marker_at_signal="")
+
+    assert result.returncode != 0
+    assert _signalled(docker_calls)
+    assert result.stderr.strip() == (
+        "quant_smoke-main is not ready; nothing was signalled. "
+        "Retry once inspect reports phase=running."
+    )
+    assert "Halt requested" not in result.stdout
+
+
+def test_trade_script_warns_about_a_deployment_created_before_restart_safe_readiness(
+    tmp_path: Path,
+) -> None:
+    legacy = {"all_containers": "quant_smoke-main", "ready_file": "/tmp/librae-ready-smoke-main"}
+    inspected, _ = _run_trade_script(
+        tmp_path / "inspect",
+        image_reference=f"registry.example/librae-trade@sha256:{'e' * 64}",
+        arguments=["inspect", "smoke-main"],
+        **legacy,
+    )
+    halted, docker_calls = _halt(tmp_path / "halt", **legacy)
+
+    warning = (
+        "smoke-main was created before restart-safe readiness; run trade.sh start to adopt it."
+    )
+    assert inspected.returncode == 0, inspected.stderr
+    assert warning in inspected.stderr
+    assert "phase=running" in inspected.stdout.splitlines()
+    assert halted.returncode == 0, halted.stderr
+    assert halted.stderr.count(warning) == 1
+    assert _signalled(docker_calls)
 
 
 def test_trade_script_halt_refuses_a_deployment_that_is_not_ready(tmp_path: Path) -> None:
@@ -1036,7 +1082,7 @@ def test_trade_container_uses_reachable_service_endpoints() -> None:
     assert "container_ready_token()" in script
     assert "valid_ready_marker()" in script
     assert 'ready_file="${READY_FILE}"' in script
-    assert script.count('container_ready_file "${container}"') == 3
+    assert script.count('container_ready_file "${container}"') == 4
     assert "cmd_inspect()" in script
     assert "cmd_restart()" in script
     assert 'stop_container "${container}" "${force}"' in script

@@ -230,6 +230,9 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
 - The next poll cycle applies it, so it can take up to the poll interval.
   Confirm with the **Manual Halt** alert (reason `SIGUSR1 operator halt`) or
   `docker logs`.
+- Until that alert, the request lives only in the running process. If the
+  container restarts first, the restarted runner never saw it and resumes
+  trading: run `halt` again once `inspect` reports `phase=running`.
 - The halt cancels tracked broker orders and drops pending decisions. A
   cancellation the venue has not confirmed stays tracked and is retried each
   cycle; check the venue for anything still resting.

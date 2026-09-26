@@ -517,8 +517,12 @@ durable ownership, and startup broker reconciliation. A custom runner must write
 malformed, or stale marker does not make the deployment ready. The file lives
 on a tmpfs that Docker mounts empty at every container start, so after an
 automatic restart the deployment is not ready until the new process writes its
-own marker. The mount belongs to the container `trade.sh start` creates;
-`trade.sh restart` reuses the existing container as it was created.
+own marker. Source: "When the container stops, the tmpfs mount is removed"
+([Docker tmpfs mounts](https://docs.docker.com/engine/storage/tmpfs/));
+observed empty after both a restart-policy and a manual restart on Docker
+Engine 29.4.0, 2026-09-26. The mount belongs to the container `trade.sh start`
+creates; `trade.sh restart` reuses the existing container as it was created,
+and `inspect` warns about a container without it.
 
 Use the lifecycle commands without relying on shell process memory:
 

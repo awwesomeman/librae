@@ -319,6 +319,36 @@ jobs:
             sleep 1
           done
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
+          # Crash the runner between halt's readiness check and its signal:
+          # the restarted runner must not be signalled, and halt must say so.
+          real_docker="$(command -v docker)"
+          mkdir -p "${RUNNER_TEMP}/crash-before-signal"
+          cat > "${RUNNER_TEMP}/crash-before-signal/docker" <<SHIM
+          #!/usr/bin/env bash
+          if [[ "\$1" == exec && "\$*" == *SIGUSR1* ]]; then
+            "${real_docker}" exec quant_smoke-ci touch /tmp/librae-crash-requested
+            for attempt in \$(seq 1 150); do
+              [[ "\$("${real_docker}" inspect --format '{{.State.Status}} {{.RestartCount}}' quant_smoke-ci)" == "running 2" ]] && break
+              sleep 0.2
+            done
+          fi
+          exec "${real_docker}" "\$@"
+          SHIM
+          chmod +x "${RUNNER_TEMP}/crash-before-signal/docker"
+          if PATH="${RUNNER_TEMP}/crash-before-signal:${PATH}" \
+            ./deploy/trade.sh halt smoke-ci 2> "${RUNNER_TEMP}/halt.err"; then
+            echo "halt reported a signal to a runner that restarted before it" >&2
+            exit 1
+          fi
+          grep -F "nothing was signalled" "${RUNNER_TEMP}/halt.err"
+          test "$(docker inspect --format '{{.RestartCount}}' quant_smoke-ci)" = "2"
+          docker exec quant_smoke-ci test ! -e /tmp/librae-halt-requested
+          docker exec quant_smoke-ci touch /tmp/librae-release-ready
+          for attempt in $(seq 1 30); do
+            ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running" >/dev/null && break
+            sleep 1
+          done
+          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
           ./deploy/trade.sh restart smoke-ci | grep -Fx "phase=running"
           if ./deploy/trade.sh start failing-ci ci-fail USD failing sim 60; then
             echo "early-exit deployment was reported ready" >&2
