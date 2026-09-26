@@ -893,7 +893,9 @@ adapter at submission.
   from any thread. Each waits for the poll cycle in progress, which lasts as
   long as that cycle's broker and market-data calls, and applies between
   cycles, so it never interleaves with an order submission. Errors stay
-  synchronous: a refused `reset_halt()` raises to its caller.
+  synchronous: a refused `reset_halt()` raises to its caller. `halt()`
+  records the halt before it waits, so a cycle that starts first or hangs
+  applies it at its start instead.
 - `LiveTrader.request_halt(reason)` records a halt without waiting; `run()`
   maps `SIGUSR1` to it on POSIX. The loop applies pending requests first in
   its next cycle, before order work and before a pending `request_flatten`,

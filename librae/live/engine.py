@@ -2067,13 +2067,14 @@ class LiveTrader:
     def halt(self, reason: str = "operator requested halt") -> None:
         """Fail closed until an operator calls ``reset_halt``.
 
-        Safe from any thread: it waits for the cycle in progress, which lasts
-        as long as that cycle's broker and market-data calls, and applies
-        before the next one.
+        Safe from any thread. The halt is recorded before waiting for the
+        cycle in progress, then applied once that cycle ends, raising any
+        error to the caller. A cycle that starts first, or never ends,
+        applies it itself at its start, so a slow or hung cycle cannot lose it.
         """
-        reason = _validated_reason(reason, "halt")
+        self._halt_requests.put(_validated_reason(reason, "halt"))
         with self._cycle_lock:
-            self._apply_manual_halt(reason)
+            self._run_requested_halt()
 
     def request_halt(self, reason: str = "operator requested halt") -> None:
         """Ask the polling loop to halt as ``halt`` does, without waiting.

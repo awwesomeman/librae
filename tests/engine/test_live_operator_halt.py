@@ -10,6 +10,7 @@ in its next cycle.
 from __future__ import annotations
 
 import signal
+import time
 from threading import Thread
 
 import pytest
@@ -29,6 +30,13 @@ from tests.engine.test_live_flatten import (
 from tests.engine.test_live_runner import TEST_CLOCK_NOW, _HoldStrategy, _mock_order_adapter
 
 PARK_SECONDS = 0.2
+
+
+def _wait_until(condition, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "condition not reached"
+        time.sleep(0.01)
 
 
 class _BuyOnce(Strategy):
@@ -149,6 +157,44 @@ class TestSynchronousOperatorCalls:
         assert observed == [True], "a cycle must not start between the readiness check and reset"
         assert not loop.is_alive()
         assert trader._halted is False
+
+    def test_a_blocked_halt_is_recorded_and_the_next_cycle_applies_it(self):
+        trader, _, alerts = _trader(_adapter(below_minimum=""))
+        operator = Thread(target=trader.halt, args=("desk asked to stop",), daemon=True)
+
+        # The loop holds the lock through a hung call, or re-takes it first.
+        with trader._cycle_lock:
+            operator.start()
+            _wait_until(lambda: trader._halt_requests.qsize() == 1)
+            assert operator.is_alive()
+            assert trader._halted is False
+            trader._poll_cycle()
+            assert trader._halted is True
+        operator.join(5)
+
+        assert not operator.is_alive()
+        [halt] = _titled(alerts, "Manual Halt")
+        assert "desk asked to stop" in halt["message"]
+
+    def test_a_halt_with_the_lock_free_applies_once_and_synchronously(self):
+        trader, _, alerts = _trader(_adapter(below_minimum=""))
+
+        trader.halt("desk asked to stop")
+        assert trader._halted is True
+        trader._poll_cycle()
+
+        assert len(_titled(alerts, "Manual Halt")) == 1
+
+    def test_a_halt_that_fails_raises_to_its_caller(self):
+        trader, _, _ = _trader(_adapter(below_minimum=""))
+
+        def failing_persist(*_orders):
+            raise OSError("checkpoint store unavailable")
+
+        trader._persist_state = failing_persist
+
+        with pytest.raises(OSError, match="checkpoint store"):
+            trader.halt("desk asked to stop")
 
     def test_the_loop_thread_may_halt_inside_its_own_cycle(self):
         trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())
