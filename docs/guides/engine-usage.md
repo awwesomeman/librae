@@ -903,12 +903,22 @@ adapter at submission.
   clears pending strategy decisions, and cancels tracked live broker orders.
   On an already-halted account it only alerts, so recovery exits from a
   drawdown breach or flatten keep working. `reset_halt()` is required after review before new entries resume. It
-  refuses while a tracked order is unresolved, or while an open position lacks
-  a current valuation mark, naming the cause and the next action;
+  refuses while the halt is not yet persisted (below), while a tracked order is
+  unresolved, or while an open position lacks a current valuation mark, naming
+  the cause and the next action;
   `halt_reset_readiness()` reports the same answer without raising. Live
   mode then re-verifies the broker before the first new decision (see
   [Reconciliation](#reconciliation-live-only)). See the recovery procedure in
   [the operational runbook](operational-runbook.md).
+- Halt durability: every halt, including a drawdown or operator flatten,
+  applies in memory first, then writes the checkpoint. If that write fails,
+  the halt alert still goes out and names the failure, the error propagates
+  (to `halt()`'s caller, or as a poll-cycle error), and the run stays halted.
+  Each later cycle retries the checkpoint before any order work and stops
+  there while it keeps failing; once it succeeds, a **Halt Persisted** alert
+  follows and the halt's remaining cancellations are sent, as on a restart.
+  `reset_halt()` refuses with `halt_not_persisted` until then. A process that
+  exits first restarts from the last written checkpoint, unhalted.
 - Threading: `halt()`, `reset_halt()` and `halt_reset_readiness()` are safe
   from any thread. Each waits for the poll cycle in progress, which lasts as
   long as that cycle's broker and market-data calls, and applies between

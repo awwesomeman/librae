@@ -843,6 +843,8 @@ class LiveTrader:
         self._positions: dict[str, PositionState] = {}
         self._cash = config.account.initial_cash
         self._halted: bool = False
+        # A halt the store has not recorded: a restart would resume unhalted.
+        self._halt_unpersisted = False
         self._pending_decision: StrategyDecision = []
         # Bar timestamp each pending intent first rested on, keyed by symbol.
         # A resting "day" limit expires against the session it first rested in.
@@ -1822,20 +1824,62 @@ class LiveTrader:
             )
 
     def _halt_live(self, *, title: str, message: str) -> None:
-        """Fail closed and cancel every tracked order that may still execute."""
+        """Fail closed and cancel every tracked order that may still execute.
+
+        A checkpoint failure still alerts, naming it, before it propagates.
+        """
         self._halted = True
         self._pending_decision = []
         self._pending_resting_since = {}
         self._live_rebalance = None
-        if not self._executor.simulation:
-            self._cancel_active_orders()
-        self._persist_state()
+        failure: Exception | None = None
+        note = ""
+        try:
+            # Cancellation records each cancel before sending it, so a store
+            # outage can surface here too.
+            if not self._executor.simulation:
+                self._cancel_active_orders()
+            self._persist_state()
+        except Exception as exc:
+            failure = exc
+            note = self._mark_halt_unpersisted(exc)
         logger.error("%s: %s", title, message)
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}",
-            message=f"{message}; trading halted.",
+            message=f"{message}; trading halted{note}.",
         )
+        if failure is not None:
+            raise failure
+
+    def _mark_halt_unpersisted(self, failure: Exception) -> str:
+        """Keep a halt the store did not record for retry; return the note for its alert."""
+        self._halt_unpersisted = True
+        logger.error("Halt checkpoint not written", exc_info=failure)
+        return (
+            f"; halt not persisted ({type(failure).__name__}: {failure}), "
+            "so a restart now would resume unhalted"
+        )
+
+    def _retry_halt_checkpoint(self) -> None:
+        """Record a halt the store missed before any other work in the cycle.
+
+        A failure propagates and stops the cycle like any checkpoint failure,
+        so no order work runs on a state the store never saw. Once recorded,
+        cancellation finishes as a restart from the halted checkpoint would.
+        """
+        if not self._halt_unpersisted:
+            return
+        self._persist_state()
+        self._halt_unpersisted = False
+        logger.warning("Halt checkpoint persisted")
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Halt Persisted",
+            message="The halt is now recorded; a restart resumes halted.",
+        )
+        if not self._executor.simulation and not self._has_active_recovery_orders():
+            self._cancel_active_orders()
 
     def _fail_group_or_halt(
         self,
@@ -2169,6 +2213,7 @@ class LiveTrader:
         with self._cycle_lock:
             self._require_running()
             return halt_recovery.evaluate_reset_readiness(
+                halt_persisted=not self._halt_unpersisted,
                 active_orders=self._active_orders,
                 positions=self._positions,
                 last_prices=self._last_prices,
@@ -2232,6 +2277,7 @@ class LiveTrader:
     def _poll_cycle(self) -> None:
         """Process completed market-data events without live catch-up orders."""
         self._run_requested_halt()
+        self._retry_halt_checkpoint()
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
         self._run_requested_flatten()
@@ -4838,7 +4884,13 @@ class LiveTrader:
         self._pending_decision = []
         self._pending_resting_since = {}
         self._live_rebalance = None
-        self._persist_state()
+        failure: Exception | None = None
+        note = ""
+        try:
+            self._persist_state()
+        except Exception as exc:
+            failure = exc
+            note = self._mark_halt_unpersisted(exc)
         if flattened and self._positions and set(self._positions) == held_before:
             outcome = f"no position fully closed; {', '.join(sorted(self._positions))} remain open"
         elif flattened and self._positions:
@@ -4854,7 +4906,7 @@ class LiveTrader:
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}",
-            message=f"account_id={self._account_id} {detail} — {outcome} and halted",
+            message=f"account_id={self._account_id} {detail} — {outcome} and halted{note}",
         )
         logger.warning(
             "LiveTrader account %s halted at %s: %s %s — %s",
@@ -4864,6 +4916,8 @@ class LiveTrader:
             detail,
             outcome,
         )
+        if failure is not None:
+            raise failure
 
     def _run_requested_halt(self) -> None:
         """Apply pending ``request_halt`` calls from the polling thread.
