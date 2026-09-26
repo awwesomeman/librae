@@ -840,6 +840,7 @@ class LiveTrader:
         self._adv_session_labels: dict[str, str] = {}
         self._adv_filled_quantities: dict[str, float] = {}
         self._last_reconciliation_at: datetime | None = None
+        self._resume_unverified = False
         self._reconciliation_unavailable_rounds = 0
         self._reconciliation_history: deque[bool] = deque(maxlen=self.FETCH_HEALTH_WINDOW)
         self._reconciliation_degraded = False
@@ -1718,6 +1719,7 @@ class LiveTrader:
                 message=str(exc),
             )
         if not self._halted:
+            self._resume_unverified = False
             self._reconciliation_unavailable_rounds = 0
             self._record_reconciliation_health(skipped=False)
 
@@ -1750,12 +1752,17 @@ class LiveTrader:
         skipped_rounds = sum(history)
         if not self._reconciliation_degraded and skipped_rounds >= self.FETCH_HEALTH_ALERT_FAILURES:
             self._reconciliation_degraded = True
+            trading = (
+                "new decisions wait for an answered round"
+                if self._resume_unverified
+                else "trading continues"
+            )
             self._notify(
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] Periodic Reconciliation Skipped",
                 message=(
                     f"{skipped_rounds}/{len(history)} recent rounds got no broker answer "
-                    f"({error}); trading continues, halts after "
+                    f"({error}); {trading}, halts after "
                     f"{self.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS} consecutive."
                 ),
             )
@@ -1871,6 +1878,9 @@ class LiveTrader:
         except BrokerUnavailableError:
             # Startup cash is best-effort; positions and orders gate the start.
             logger.warning("Startup cash reconciliation skipped: broker unavailable", exc_info=True)
+        # Startup reconciliation is fail-closed, so it verifies a reset too;
+        # simulation has nothing to verify.
+        self._resume_unverified = False
         if not self._executor.simulation:
             self._last_reconciliation_at = self._utc_now()
 
@@ -2046,6 +2056,13 @@ class LiveTrader:
                 utc_now=self._utc_now,
             )
         equity, _ = self._calc_account_snapshot()
+        if self._halted:
+            # The operator may have touched the account while halted: compare
+            # it with the broker on the next cycle, before any new decision.
+            # Armed before the halt clears so a cycle polling on another
+            # thread never sees an unhalted, unverified account.
+            self._last_reconciliation_at = None
+            self._resume_unverified = True
         self._halted = False
         # A new risk epoch starts a fresh unverified window.
         self._reconciliation_unavailable_rounds = 0
@@ -2130,8 +2147,11 @@ class LiveTrader:
 
         # Keep heartbeat, cache, and staleness monitoring alive while a broker
         # order is resting. Strategy evaluation remains serialized behind the
-        # active order so a later bar cannot create a conflicting order queue.
-        if not self._executor.simulation and (self._active_orders or self._halted):
+        # active order so a later bar cannot create a conflicting order queue,
+        # and after a reset behind a periodic round that answered and matched.
+        if not self._executor.simulation and (
+            self._active_orders or self._halted or self._resume_unverified
+        ):
             return
 
         # A required subscription with no usable observation blocks evaluation
