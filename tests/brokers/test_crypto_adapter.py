@@ -876,6 +876,69 @@ def test_prepare_order_keeps_a_maximum_rejection_untyped(
     assert not isinstance(raised.value, OrderBelowVenueMinimumError)
 
 
+def test_prepare_order_keeps_a_price_below_the_band_untyped(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "limits": {"price": {"min": 10.0, "max": None}},
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = "1"
+    mock_ccxt_exchange.price_to_precision.return_value = "5"
+
+    with pytest.raises(ValueError, match=r"price 5\.0 is below minimum") as raised:
+        authed_adapter.prepare_order(
+            {
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "quantity": 1.0,
+                "order_type": "limit",
+                "price": 5.0,
+                "time_in_force": "day",
+                "position_effect": "close",
+            }
+        )
+    assert not isinstance(raised.value, OrderBelowVenueMinimumError)
+
+
+_DUST_SIGNAL = {
+    "symbol": "BTC/USDT",
+    "side": "sell",
+    "quantity": 0.0004,
+    "order_type": "market",
+    "time_in_force": "ioc",
+    "position_effect": "close",
+    "reference_price": 50_000.0,
+}
+
+
+def test_prepare_order_types_an_amount_rounding_to_zero(authed_adapter, mock_ccxt_exchange):
+    mock_ccxt_exchange.amount_to_precision.return_value = "0"
+
+    with pytest.raises(OrderBelowVenueMinimumError, match="rounds to zero"):
+        authed_adapter.prepare_order(dict(_DUST_SIGNAL))
+
+
+def test_prepare_order_types_ccxts_zero_precision_refusal(authed_adapter, mock_ccxt_exchange):
+    # ccxt's amount_to_precision raises exactly InvalidOrder when the amount
+    # truncates to zero instead of returning "0".
+    ccxt = _require_ccxt()
+    mock_ccxt_exchange.amount_to_precision.side_effect = ccxt.InvalidOrder(
+        "binance amount of BTC/USDT must be greater than minimum amount precision of 0.001"
+    )
+
+    with pytest.raises(OrderBelowVenueMinimumError, match="minimum amount precision"):
+        authed_adapter.prepare_order(dict(_DUST_SIGNAL))
+
+
+def test_prepare_order_keeps_other_precision_errors_untyped(authed_adapter, mock_ccxt_exchange):
+    ccxt = _require_ccxt()
+    mock_ccxt_exchange.amount_to_precision.side_effect = ccxt.ContractUnavailable("delisted")
+
+    with pytest.raises(ccxt.ContractUnavailable):
+        authed_adapter.prepare_order(dict(_DUST_SIGNAL))
+
+
 def test_live_executor_keeps_the_below_minimum_type(authed_adapter, mock_ccxt_exchange):
     mock_ccxt_exchange.market.return_value = {
         "symbol": "BTC/USDT",

@@ -361,8 +361,9 @@ class BrokerUnavailableError(Exception):
 class OrderBelowVenueMinimumError(ValueError):
     """``prepare_order`` refused a size below the venue's minimum amount, notional or lot.
 
-    Adapters raise it only from that minimum check; every other preparation
-    failure, including a maximum, stays a plain ``ValueError``. The engine
+    Adapters raise it only from a size minimum, including a size that rounds
+    to zero; every other preparation failure, including a maximum or a price
+    outside the venue's band, stays a plain ``ValueError``. The engine
     skips an ungrouped reduce/close refused this way, because halting would
     strand every other exit behind a remainder the venue will not take, and
     keeps every other case fail-closed.
