@@ -22,6 +22,7 @@ from .state import HaltResetReadiness
 
 def evaluate_reset_readiness(
     *,
+    halt_persisted: bool,
     active_orders: Collection[object],
     positions: Iterable[str],
     last_prices: Container[str],
@@ -31,6 +32,15 @@ def evaluate_reset_readiness(
     staleness_grace: Callable[[MarketDataSubscription], timedelta],
 ) -> HaltResetReadiness:
     """Report whether a halt reset is allowed, and the blocking reason."""
+    if not halt_persisted:
+        return HaltResetReadiness(
+            ready=False,
+            reason="halt_not_persisted",
+            required_action=(
+                "wait for the Halt Persisted alert: the engine retries the halt "
+                "checkpoint every poll cycle until the state store accepts it"
+            ),
+        )
     if active_orders:
         return HaltResetReadiness(
             ready=False,

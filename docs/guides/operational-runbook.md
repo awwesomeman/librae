@@ -13,7 +13,7 @@ of it.
 | | |
 |---|---|
 | Named operator | Jason Pan (repository owner) |
-| Escalation path | Single-operator deployment — there is no second responder. If the operator cannot act within the alert's implied urgency (see below), the fail-safe response is: `LiveTrader.halt(reason)`, or `./deploy/trade.sh halt <deployment_id>` for a deployed run (see [Halting a deployed run](#halting-a-deployed-run)) (or kill the process — live mode's durable engine state makes that safe, see [Restart recovery](#restart-recovery); a restart rebuilds the strategy object from its defaults, so only engine-owned state returns), then contact the broker's support line directly for any order that halt could not resolve. |
+| Escalation path | Single-operator deployment — there is no second responder. If the operator cannot act within the alert's implied urgency (see below), the fail-safe response is: `LiveTrader.halt(reason)`, or `./deploy/trade.sh halt <deployment_id>` for a deployed run (see [Halting a deployed run](#halting-a-deployed-run)) (or kill the process — live mode's durable engine state makes that safe, see [Restart recovery](#restart-recovery), unless the halt alert says it was not persisted, see [Halt not persisted](#halt-not-persisted); a restart rebuilds the strategy object from its defaults, so only engine-owned state returns), then contact the broker's support line directly for any order that halt could not resolve. |
 | Reachability | Telegram (bot configured under [Alert delivery](#alert-delivery)) is the paging channel. No on-call rotation exists; do not run live capital during a period the operator cannot monitor Telegram. |
 
 This is intentionally minimal because it is a single-person deployment. If a
@@ -144,10 +144,11 @@ Procedure it exercises:
 
 `trader.halt_reset_readiness()` answers the same question without raising, so
 an operator or a health check can see what is blocking before attempting a
-reset. It reports one of `unresolved_broker_orders`, `missing_valuation_mark`
-or `stale_valuation_mark`, the symbols responsible, and what to do next. A
-refused reset is also recorded as a `decision_skipped` runtime event with
-reason `halt_reset_blocked`.
+reset. It reports one of `halt_not_persisted` (see
+[Halt not persisted](#halt-not-persisted)), `unresolved_broker_orders`,
+`missing_valuation_mark` or `stale_valuation_mark`, the symbols responsible,
+and what to do next. A refused reset is also recorded as a `decision_skipped`
+runtime event with reason `halt_reset_blocked`.
 
 A missing mark clears itself: the engine establishes marks from completed
 bars, so a restored non-flat account becomes resettable once its symbols
@@ -239,6 +240,26 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
   inside the running process, after the review in
   [Kill-switch rehearsal](#kill-switch-rehearsal); the reference runner does
   not expose it, so the strategy's runner has to provide that entry point.
+
+## Halt not persisted
+
+A halt whose checkpoint write fails is still applied in memory
+([engine behavior](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)).
+
+| Alert | Meaning | Action |
+|---|---|---|
+| Any halt alert that says `halt not persisted (<error>)`; a flatten's alert may also say `exit submission failed` | Halted in memory; the state store refused the checkpoint. The halt has cancelled nothing yet, and a flatten that says `exit submission failed` submitted nothing. Every later cycle retries the checkpoint and does nothing else until it succeeds, so a Poll Error alert follows if the outage lasts; `halt()` raises the same error until then | Keep the process running and restore the state store. Orders resting at the venue keep working meanwhile: cancel at the venue anything that must not fill |
+| Halt Persisted | The retry succeeded; a restart now resumes halted. A plain halt's cancellations go out now; a flatten's exits, including ones it could not record before, go out and keep working | Continue the normal halt review; `reset_halt()` stops refusing with `halt_not_persisted` |
+
+A halt alert that says `cancelling tracked orders failed (<error>)` is
+recorded, but its cancellation stopped at that error: cancel at the venue
+whatever is still resting, and find the cause before `reset_halt()`.
+
+A process that exits before **Halt Persisted** restarts from the last written
+checkpoint, unhalted: nothing in the engine can recover a halt the store never
+saw. Halt it again as soon as `trade.sh inspect` reports `phase=running`; a
+cycle can run before that halt lands, so if the book must not trade at all,
+close its risk at the broker before restarting.
 
 ## Operator flatten
 
