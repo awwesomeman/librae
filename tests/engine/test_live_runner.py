@@ -39,6 +39,7 @@ from librae.live.executor import (
     BrokerUnavailableError,
     ExecutionReport,
     LiveExecutor,
+    OrderRejectedError,
     OrderRequest,
     PositionRequest,
 )
@@ -526,6 +527,42 @@ class TestLiveExecutor:
         assert report is not None
         assert report.status == "rejected"
         assert report.has_fill is False
+
+    @pytest.mark.parametrize("account_fault", [False, True])
+    def test_submit_order_reports_a_definite_venue_refusal_as_rejected(self, account_fault):
+        mock_adapter = MagicMock()
+        mock_adapter.place_order.side_effect = OrderRejectedError(
+            "ReduceOnly Order is rejected.", account_fault=account_fault
+        )
+        ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
+        request = ex.request_from_event(_make_fill_event())
+
+        report = ex.submit_order(request)
+
+        assert report == ExecutionReport(
+            order_id="",
+            client_order_id=request.client_order_id,
+            symbol=request.symbol,
+            side=request.side,
+            status="rejected",
+            requested_quantity=request.quantity,
+            filled_quantity=0.0,
+            average_price=None,
+            commission=0.0,
+            slippage=0.0,
+            tax=0.0,
+            executed_at=None,
+            rejection_reason="ReduceOnly Order is rejected.",
+            account_fault=account_fault,
+        )
+        mock_adapter.find_order.assert_not_called()
+
+    def test_submit_order_leaves_an_unknown_placement_failure_unresolved(self):
+        mock_adapter = MagicMock()
+        mock_adapter.place_order.side_effect = TimeoutError("read timed out")
+        ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
+
+        assert ex.submit_order(ex.request_from_event(_make_fill_event())) is None
 
     def test_pending_cancel_has_a_distinct_nonterminal_status(self):
         assert LiveExecutor._normalize_status("pending_cancel") == "cancel_pending"
@@ -5274,6 +5311,106 @@ class TestLiveExecutionLifecycle:
         assert any(
             m == "send_alert" and "Ambiguous Order Placement" in kw["title"] for m, kw in alerts
         )
+
+    def test_definite_placement_refusal_resolves_the_order_without_lookup(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = OrderRejectedError(
+            'binanceusdm {"code":-2022,"msg":"ReduceOnly Order is rejected."}'
+        )
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        runner = self._make_trader(_HoldStrategy(), adapter, state_store=store)
+        alerts = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        runner._last_prices = {"BTCUSDT": 100.0}
+
+        complete = runner._execute_live_decision(
+            [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)],
+            {"BTCUSDT": {"close": 100.0, "volume": 10_000.0}},
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is False
+        adapter.find_order.assert_not_called()
+        # An ungrouped rejection keeps its halt, but nothing is left unresolved.
+        assert runner._halted is True
+        assert runner._active_orders == []
+        assert store.load(runner._state_key).active_orders == []
+        assert runner.halt_reset_readiness().ready is True
+        [alert] = [kw for m, kw in alerts if m == "send_alert"]
+        assert alert["title"].endswith("Order Rejected")
+        assert "ReduceOnly Order is rejected." in alert["message"]
+
+    def test_definite_group_leg_refusal_keeps_group_scoping(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = [
+            _broker_report(order_id="spot-1", status="filled", quantity=1.0, average=100.0),
+            OrderRejectedError("Margin is insufficient."),
+        ]
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["SPOT", "PERP"]),
+        )
+        alerts = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        runner._last_prices = {"SPOT": 100.0, "PERP": 100.0}
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(
+                    action="long", symbol="SPOT", quantity=1.0, reason="basis", group_id="basis"
+                ),
+                OrderIntent(
+                    action="short", symbol="PERP", quantity=1.0, reason="basis", group_id="basis"
+                ),
+            ],
+            {
+                "SPOT": {"close": 100.0, "volume": 10_000.0},
+                "PERP": {"close": 100.0, "volume": 10_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        assert runner._halted is False
+        assert runner._active_orders == []
+        adapter.find_order.assert_not_called()
+        [alert] = [kw for m, kw in alerts if m == "send_alert"]
+        assert "'basis'" in alert["message"]
+        assert "Margin is insufficient." in alert["message"]
+
+    def test_account_fault_refusal_of_a_group_leg_halts_the_account(self):
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = OrderRejectedError(
+            "Invalid API-key, IP, or permissions for action.", account_fault=True
+        )
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=["SPOT", "PERP", "SOLO"]),
+        )
+        alerts = []
+        runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
+        runner._last_prices = {"SPOT": 100.0, "PERP": 100.0, "SOLO": 100.0}
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="SPOT", quantity=1.0, group_id="basis"),
+                OrderIntent(action="short", symbol="PERP", quantity=1.0, group_id="basis"),
+                OrderIntent(action="long", symbol="SOLO", quantity=1.0),
+            ],
+            {symbol: {"close": 100.0, "volume": 10_000.0} for symbol in ("SPOT", "PERP", "SOLO")},
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is False
+        assert runner._halted is True
+        assert adapter.place_order.call_count == 1
+        assert runner._active_orders == []
+        adapter.find_order.assert_not_called()
+        [alert] = [kw for m, kw in alerts if m == "send_alert"]
+        assert alert["title"].endswith("Order Rejected")
+        assert "Invalid API-key" in alert["message"]
 
     def test_post_fill_risk_uses_broker_price_and_halts(self):
         adapter = _mock_order_adapter()

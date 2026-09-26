@@ -530,6 +530,14 @@ def _validate_market_data_calendar_preconditions(
             ) from exc
 
 
+def _is_recovery_exit(request: OrderRequest) -> bool:
+    """Whether ``request`` is an engine-owned drawdown or operator-flatten exit."""
+    return request.reason in (
+        REASON_DRAWDOWN_BREACH,
+        REASON_OPERATOR_FLATTEN,
+    ) and request.position_effect in ("reduce", "close")
+
+
 class LiveTrader:
     """Polling-based runner for sim/live modes.
 
@@ -859,6 +867,8 @@ class LiveTrader:
         self._reconciliation_history: deque[bool] = deque(maxlen=self.FETCH_HEALTH_WINDOW)
         self._reconciliation_degraded = False
         self._skipped_close_alerts: dict[tuple[str, str], float] = {}
+        # Set only while a flatten submits its exits, before it halts the account.
+        self._flatten_at: datetime | None = None
         self._cycle_fetch_seconds: dict[str, float] = {}
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
@@ -1827,7 +1837,14 @@ class LiveTrader:
             message=f"{message}; trading halted.",
         )
 
-    def _fail_group_or_halt(self, tracked: TrackedOrder, *, title: str, message: str) -> bool:
+    def _fail_group_or_halt(
+        self,
+        tracked: TrackedOrder,
+        *,
+        title: str,
+        message: str,
+        account_fault: bool = False,
+    ) -> bool:
         """Scope one leg's *confirmed* terminal failure to its group when possible.
 
         Only call this once the broker has given a definite answer for
@@ -1841,15 +1858,32 @@ class LiveTrader:
         state to "cancel the group and keep going" risks silently losing
         track of an order that may still be live at the venue.
 
-        A leg with no group_id has no isolation boundary, so it always halts.
-        A grouped leg's confirmed failure cancels only that group's other
-        still-active legs and alerts — unrelated groups and independent
-        intents keep executing. Returns True if the whole account was halted
-        (caller should stop advancing this tick), False if only the group
-        was cancelled (caller should continue to the next active order).
+        An exit of a flatten that has halted, or is halting, the account is
+        recorded as a skipped close, even for an account fault: every other
+        exit may still be working, and the account stops trading anyway.
+        Otherwise a leg with no group_id halts, having no isolation boundary,
+        and so does an account fault, which every later order would repeat.
+        A grouped leg's confirmed failure cancels
+        only that group's other still-active legs and alerts — unrelated
+        groups and independent intents keep executing. Returns True if the
+        whole account was halted (caller should stop advancing this tick),
+        False otherwise (caller should continue to the next active order).
         """
-        group_id = tracked.request.group_id
-        if group_id is None:
+        request = tracked.request
+        if (self._halted or self._flatten_at is not None) and _is_recovery_exit(request):
+            position = self._positions.get(request.symbol)
+            self._report_skipped_close(
+                request.symbol,
+                quantity=request.quantity - tracked.filled_quantity,
+                held=position.quantity if position is not None else None,
+                ts=self._flatten_at or self._utc_now(),
+                reason=f"close_{tracked.status}",
+                title=f"Close {tracked.status.title()}",
+                cause=f"{title}: {message}",
+            )
+            return False
+        group_id = request.group_id
+        if group_id is None or account_fault:
             self._halt_live(title=title, message=message)
             return True
         if not self._executor.simulation:
@@ -1864,18 +1898,10 @@ class LiveTrader:
         )
         return False
 
-    @staticmethod
-    def _is_recovery_order(tracked: TrackedOrder) -> bool:
-        """Whether an order is an engine-owned exit that keeps working while halted."""
-        return tracked.request.reason in (
-            REASON_DRAWDOWN_BREACH,
-            REASON_OPERATOR_FLATTEN,
-        ) and tracked.request.position_effect in ("reduce", "close")
-
     def _has_active_recovery_orders(self) -> bool:
         """Whether every tracked order is an engine-owned recovery order."""
         return bool(self._active_orders) and all(
-            self._is_recovery_order(tracked) for tracked in self._active_orders
+            _is_recovery_exit(tracked.request) for tracked in self._active_orders
         )
 
     def _apply_manual_halt(self, reason: str) -> None:
@@ -1887,7 +1913,7 @@ class LiveTrader:
         if not self._halted:
             self._halt_live(title="Manual Halt", message=reason)
             return
-        exits = sum(1 for tracked in self._active_orders if self._is_recovery_order(tracked))
+        exits = sum(1 for tracked in self._active_orders if _is_recovery_exit(tracked.request))
         message = f"{reason}; already halted; {exits} recovery exits keep working"
         logger.warning("Manual Halt: %s", message)
         self._notify(
@@ -2972,7 +2998,7 @@ class LiveTrader:
         symbol: str,
         *,
         quantity: float,
-        held: float,
+        held: float | None,
         ts: datetime,
         reason: str,
         title: str,
@@ -2982,6 +3008,7 @@ class LiveTrader:
 
         A strategy that keeps closing the same remainder would otherwise page
         the operator every bar about a position that has not changed.
+        ``held`` is None once the position is no longer in the ledger.
         """
         logger.warning("%s skipped for %s: %s", title, symbol, cause)
         if self._on_runtime_event:
@@ -2993,16 +3020,21 @@ class LiveTrader:
                     detail={"reason": reason, "quantity": quantity, "message": cause},
                 )
             )
+        held_quantity = 0.0 if held is None else held
         alerted = self._skipped_close_alerts.get((reason, symbol))
-        if alerted is not None and isclose(alerted, held, rel_tol=0.0, abs_tol=EPSILON):
+        if alerted is not None and isclose(alerted, held_quantity, rel_tol=0.0, abs_tol=EPSILON):
             return
-        self._skipped_close_alerts[(reason, symbol)] = held
+        self._skipped_close_alerts[(reason, symbol)] = held_quantity
+        remaining = (
+            "the position is no longer in the ledger"
+            if held is None
+            else f"{held:g} stays open in the ledger"
+        )
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}: {symbol}",
             message=(
-                f"exit of {quantity:g} skipped: {cause}; {held:g} stays open in the "
-                "ledger, other orders remain eligible."
+                f"exit of {quantity:g} skipped: {cause}; {remaining}, other orders remain eligible."
             ),
         )
 
@@ -3793,14 +3825,20 @@ class LiveTrader:
                 self._persist_state(tracked)
                 return
             if report.status in ("cancelled", "rejected"):
+                message = (
+                    f"{request.symbol} order_id={report.order_id or 'unassigned'} "
+                    f"filled={report.filled_quantity:.4f}/"
+                    f"{report.requested_quantity:.4f}"
+                )
+                if report.rejection_reason:
+                    message += f"; venue: {report.rejection_reason}"
+                if report.account_fault:
+                    message += "; the venue refused the account, not only this order"
                 if self._fail_group_or_halt(
                     tracked,
                     title=f"Order {report.status.title()}",
-                    message=(
-                        f"{request.symbol} order_id={report.order_id or 'unassigned'} "
-                        f"filled={report.filled_quantity:.4f}/"
-                        f"{report.requested_quantity:.4f}"
-                    ),
+                    message=message,
+                    account_fault=report.account_fault,
                 ):
                     return
                 continue
@@ -4756,6 +4794,7 @@ class LiveTrader:
     ) -> None:
         """Queue or submit exits for every position, halt, and alert the outcome."""
         exit_queued = False
+        held_before = set(self._positions)
         if self._executor.simulation:
             queue_market_exit_all(self._positions, reason=reason)
             flattened = not self._positions
@@ -4785,18 +4824,24 @@ class LiveTrader:
                     )
             # Live emergency exits submit the full remaining quantity. Broker
             # execution reports remain authoritative for partial fills.
-            flattened = self._execute_live_decision(
-                actions,
-                reference_bars,
-                ts,
-                apply_volume_limit=False,
-            )
+            self._flatten_at = ts
+            try:
+                flattened = self._execute_live_decision(
+                    actions,
+                    reference_bars,
+                    ts,
+                    apply_volume_limit=False,
+                )
+            finally:
+                self._flatten_at = None
         self._halted = True
         self._pending_decision = []
         self._pending_resting_since = {}
         self._live_rebalance = None
         self._persist_state()
-        if flattened and self._positions:
+        if flattened and self._positions and set(self._positions) == held_before:
+            outcome = f"closed none; {', '.join(sorted(self._positions))} remain open"
+        elif flattened and self._positions:
             outcome = f"closed all but {', '.join(sorted(self._positions))}, which remain open"
         elif flattened:
             outcome = "flattened account positions"

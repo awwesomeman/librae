@@ -14,6 +14,7 @@ from librae.integrations import (
     Notifier,
     OrderAdapter,
     OrderBelowVenueMinimumError,
+    OrderRejectedError,
     OrderRequest,
     OrderSignal,
     PositionRequest,
@@ -37,6 +38,7 @@ def test_public_integration_contracts_are_importable() -> None:
     assert BrokerBalance is not None
     assert issubclass(BrokerUnavailableError, Exception)
     assert issubclass(OrderBelowVenueMinimumError, ValueError)
+    assert issubclass(OrderRejectedError, Exception)
 
 
 def test_order_adapter_contract_includes_position_reconciliation() -> None:

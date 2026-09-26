@@ -34,6 +34,7 @@ from librae.live.execution_identity import ExecutionIdentity, account_fingerprin
 from librae.live.executor import (
     BrokerUnavailableError,
     OrderBelowVenueMinimumError,
+    OrderRejectedError,
     PositionRequest,
 )
 
@@ -58,6 +59,54 @@ SUPPORTED_TIME_IN_FORCE: dict[str, frozenset[str]] = {
     "limit": frozenset({"day", "gtc", "ioc", "fok"}),
     "market": frozenset({"ioc"}),
 }
+
+# ccxt classes that, raised by create_order, are treated as a refusal that
+# left no order at the venue. Evidence: Binance spot and USD-M error bodies
+# (-1013 PERCENT_PRICE_BY_SIDE, -1100, -1111, -2010, -2015, -2019, -2022,
+# -4131, -4164, -5022) fed offline through ccxt 4.5.66 handle_errors on
+# 2026-09-26 raise these classes, while -1001/-1007/-1008 raise
+# OperationFailed/RequestTimeout. That holds only because create_order sends
+# one request per order; other exchanges are unverified. Matched by exact
+# type so a subclass ccxt adds later stays an unknown outcome. Left out on
+# purpose: DuplicateOrderId (an order with that id may exist; lookup
+# resolves it), OrderNotFound/OrderNotCached (not placement refusals), and
+# the NetworkError/OperationFailed families (the request may have landed).
+_ORDER_REFUSALS = frozenset(
+    {
+        "InvalidOrder",
+        "OrderImmediatelyFillable",
+        "OrderNotFillable",
+        "ContractUnavailable",
+        "InsufficientFunds",
+        "BadRequest",
+        "BadSymbol",
+        "OperationRejected",
+        "MarketClosed",
+        "NotSupported",
+        "ArgumentsRequired",
+    }
+)
+# Refusals of the account rather than the order: every later order repeats them.
+_ACCOUNT_REFUSALS = frozenset(
+    {
+        "AuthenticationError",
+        "AccountSuspended",
+        "PermissionDenied",
+        "AccountNotEnabled",
+        "RestrictedLocation",
+        "ManualInteractionNeeded",
+        # The venue refused the request's timestamp (Binance -1021: clock skew).
+        "InvalidNonce",
+    }
+)
+_PLACEMENT_REFUSALS = _ORDER_REFUSALS | _ACCOUNT_REFUSALS
+
+
+def _is_account_refusal(exc: BaseException) -> bool:
+    """Whether ccxt raised ``exc`` as a refusal of the account, not the order."""
+    cls = type(exc)
+    return cls.__module__.startswith("ccxt.") and cls.__name__ in _ACCOUNT_REFUSALS
+
 
 logger = logging.getLogger(__name__)
 
@@ -733,8 +782,33 @@ class CryptoAdapter:
         (forwarded as ccxt's unified ``clientOrderId`` param, exchange-side
         dedup/audit). A contract-market ``position_effect`` of ``"reduce"`` or
         ``"close"`` is sent with ccxt's unified ``reduceOnly`` param.
+
+        Nothing reaches the venue before ``create_order``, so any failure up
+        to it raises ``OrderRejectedError``; a ``create_order`` failure does
+        only for the ccxt classes in ``_PLACEMENT_REFUSALS``.
         """
-        self._require_auth()
+        try:
+            self._require_auth()
+        except NotImplementedError as exc:
+            raise OrderRejectedError(str(exc), account_fault=True) from exc
+        try:
+            ccxt = _require_ccxt()
+            order = self._order_request(signal)
+        except Exception as exc:
+            raise OrderRejectedError(
+                f"{signal.get('symbol')} not sent: {exc}",
+                account_fault=_is_account_refusal(exc),
+            ) from exc
+        try:
+            result = self._exchange.create_order(**order)
+        except ccxt.BaseError as exc:
+            if type(exc).__name__ not in _PLACEMENT_REFUSALS:
+                raise
+            raise OrderRejectedError(str(exc), account_fault=_is_account_refusal(exc)) from exc
+        return self._backfill_fee(result, signal["symbol"])
+
+    def _order_request(self, signal: dict) -> dict[str, Any]:
+        """Validate ``signal`` and build the ``create_order`` arguments; sends nothing."""
         validate_order_signal(signal)
         self._exchange.load_markets()
         market = self._exchange.market(signal["symbol"])
@@ -763,15 +837,14 @@ class CryptoAdapter:
             # A stale local book must not let an exit open opposite exposure;
             # the venue refuses the order instead.
             params["reduceOnly"] = True
-        result = self._exchange.create_order(
-            symbol=signal["symbol"],
-            type=order_type,
-            side=signal["side"],
-            amount=signal["quantity"],
-            price=price,
-            params=params,
-        )
-        return self._backfill_fee(result, signal["symbol"])
+        return {
+            "symbol": signal["symbol"],
+            "type": order_type,
+            "side": signal["side"],
+            "amount": signal["quantity"],
+            "price": price,
+            "params": params,
+        }
 
     def _backfill_fee(self, order: dict, symbol: str) -> dict:
         """Fill commission from fetch_my_trades() when missing — binanceusdm's
