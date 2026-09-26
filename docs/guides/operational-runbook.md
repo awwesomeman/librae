@@ -221,6 +221,8 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
 - The halt cancels tracked broker orders and drops pending decisions. A
   cancellation the venue has not confirmed stays tracked and is retried each
   cycle; check the venue for anything still resting.
+- On an account already halted, say by a drawdown breach, it cancels
+  nothing: the flatten's exits keep working, and the alert says how many.
 - `trade.sh stop` is not a halt: the process exits without cancelling resting
   orders, and the checkpoint keeps tracking them for the next start.
 - The halt persists across `trade.sh restart`. Resuming takes `reset_halt()`

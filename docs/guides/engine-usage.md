@@ -882,7 +882,8 @@ adapter at submission.
   a new risk epoch.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,
   clears pending strategy decisions, and cancels tracked live broker orders.
-  `reset_halt()` is required after review before new entries resume. It
+  On an already-halted account it only alerts, so recovery exits from a
+  drawdown breach or flatten keep working. `reset_halt()` is required after review before new entries resume. It
   refuses while a tracked order is unresolved, or while an open position lacks
   a current valuation mark, naming the cause and the next action;
   `halt_reset_readiness()` reports the same answer without raising. Live
