@@ -294,3 +294,30 @@ class TestHaltSignal:
         assert trader._halted is True
         [halt] = _titled(alerts, "Manual Halt")
         assert "SIGUSR1" in halt["message"]
+
+
+class TestHaltOnAHaltedAccount:
+    @pytest.mark.parametrize("path", ["halt", "request_halt"])
+    def test_flatten_exits_keep_working_through_a_second_halt(self, path):
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = lambda signal: _resting(signal["client_order_id"])
+        adapter.get_order.side_effect = lambda order_id, _symbol: _resting(order_id)
+        trader, _, alerts = _trader(adapter)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        exits = list(trader._active_orders)
+        assert trader._halted is True
+        assert len(exits) == len(SYMBOLS)
+
+        if path == "halt":
+            trader.halt("fail-safe")
+        else:
+            trader.request_halt("fail-safe")
+            trader._poll_cycle()
+
+        adapter.cancel_order.assert_not_called()
+        assert trader._active_orders == exits
+        assert not any(order.cancel_requested for order in exits)
+        [halt] = _titled(alerts, "Manual Halt")
+        assert "fail-safe" in halt["message"]
+        assert f"already halted; {len(SYMBOLS)} recovery exits keep working" in halt["message"]

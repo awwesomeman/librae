@@ -1861,12 +1861,36 @@ class LiveTrader:
         )
         return False
 
+    @staticmethod
+    def _is_recovery_order(tracked: TrackedOrder) -> bool:
+        """Whether an order is an engine-owned exit that keeps working while halted."""
+        return tracked.request.reason in (
+            REASON_DRAWDOWN_BREACH,
+            REASON_OPERATOR_FLATTEN,
+        ) and tracked.request.position_effect in ("reduce", "close")
+
     def _has_active_recovery_orders(self) -> bool:
         """Whether every tracked order is an engine-owned recovery order."""
         return bool(self._active_orders) and all(
-            tracked.request.reason in (REASON_DRAWDOWN_BREACH, REASON_OPERATOR_FLATTEN)
-            and tracked.request.position_effect in ("reduce", "close")
-            for tracked in self._active_orders
+            self._is_recovery_order(tracked) for tracked in self._active_orders
+        )
+
+    def _apply_manual_halt(self, reason: str) -> None:
+        """Halt for an operator, leaving an already-halted account's exits working.
+
+        A halted account's only live orders are recovery exits closing its
+        positions; cancelling them would leave the positions open.
+        """
+        if not self._halted:
+            self._halt_live(title="Manual Halt", message=reason)
+            return
+        exits = sum(1 for tracked in self._active_orders if self._is_recovery_order(tracked))
+        message = f"{reason}; already halted; {exits} recovery exits keep working"
+        logger.warning("Manual Halt: %s", message)
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Manual Halt",
+            message=message,
         )
 
     def _initialize_run(self) -> None:
@@ -2049,7 +2073,7 @@ class LiveTrader:
         """
         reason = _validated_reason(reason, "halt")
         with self._cycle_lock:
-            self._halt_live(title="Manual Halt", message=reason)
+            self._apply_manual_halt(reason)
 
     def request_halt(self, reason: str = "operator requested halt") -> None:
         """Ask the polling loop to halt as ``halt`` does, without waiting.
@@ -4780,7 +4804,7 @@ class LiveTrader:
             except Empty:
                 break
         if reasons:
-            self._halt_live(title="Manual Halt", message="; ".join(reasons))
+            self._apply_manual_halt("; ".join(reasons))
 
     def _run_requested_flatten(self) -> None:
         """Act on a pending ``request_flatten`` from the polling thread."""
