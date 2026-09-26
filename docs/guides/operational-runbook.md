@@ -233,7 +233,9 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
   `docker logs`.
 - Until that alert, the request lives only in the running process. If the
   container restarts first, the restarted runner never saw it and resumes
-  trading: run `halt` again once `inspect` reports `phase=running`.
+  trading: run `halt` again once `inspect` reports `phase=running`. An alert
+  that says `halt not persisted` is covered in
+  [Halt not persisted](#halt-not-persisted).
 - The halt cancels tracked broker orders and drops pending decisions. A
   cancellation the venue has not confirmed stays tracked and is retried each
   cycle; check the venue for anything still resting.
