@@ -13,7 +13,9 @@ second exchange means picking a new prefix (e.g. ``OKX_*``), not new code.
 
 from __future__ import annotations
 
+import functools
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any
@@ -29,7 +31,7 @@ from librae.config.symbols import (
 )
 from librae.core.utils import validate_contract_month
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
-from librae.live.executor import PositionRequest
+from librae.live.executor import BrokerUnavailableError, PositionRequest
 
 from .base import (
     AdapterInfo,
@@ -89,6 +91,32 @@ def _require_ccxt() -> object:
             "From a repository clone run: uv sync --extra crypto-live. "
             "For a direct install, include Librae's 'crypto-live' extra."
         ) from e
+
+
+def _network_errors_unavailable[**P, R](read: Callable[P, R]) -> Callable[P, R]:
+    """Classify ccxt's NetworkError family on a reconciliation read.
+
+    ccxt raises that family for timeouts, connection failures, rate limits
+    and unavailable-status replies (``Exchange.httpExceptions``; its fallback
+    also files an unrecognized 400/403/404 there, which the engine's bound on
+    skipped rounds still caps). Authentication and permission errors sit
+    under ExchangeError instead and keep their type, so they fail closed.
+    InvalidNonce (and its ChecksumError subclass) is in the family but is a
+    client-side fault the venue answered (ccxt's binance table maps -1021,
+    a request timestamp outside recvWindow, to it), so waiting cannot clear it.
+    """
+
+    @functools.wraps(read)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        ccxt = _require_ccxt()
+        try:
+            return read(*args, **kwargs)
+        except ccxt.InvalidNonce:
+            raise
+        except ccxt.NetworkError as exc:
+            raise BrokerUnavailableError(str(exc)) from exc
+
+    return wrapper
 
 
 def _patch_binance_sandbox_urls(exchange) -> None:
@@ -775,6 +803,7 @@ class CryptoAdapter:
             raise NotImplementedError(f"{self._exchange_id} does not support fetchOrder")
         return self._backfill_fee(self._exchange.fetch_order(order_id, symbol), symbol)
 
+    @_network_errors_unavailable
     def list_open_orders(self, symbol: str) -> list[dict]:
         """Return currently resting orders for orphan detection."""
         self._require_auth()
@@ -790,6 +819,7 @@ class CryptoAdapter:
         self._exchange.cancel_order(order_id, symbol)
         return self.get_order(order_id, symbol)
 
+    @_network_errors_unavailable
     def get_balance(self, currency: str) -> dict[str, float]:
         """Return real free/used/total balance for *currency* from the exchange."""
         self._require_auth()
@@ -808,6 +838,7 @@ class CryptoAdapter:
             "total": float(entry["total"]),
         }
 
+    @_network_errors_unavailable
     def get_position(self, request: PositionRequest) -> dict:
         """Return the current position for one configured instrument.
 

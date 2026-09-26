@@ -18,7 +18,12 @@ import pytest
 from librae.brokers.ibkr_adapter import IBKRAdapter, IBKRCredentials, _require_ib_async
 from librae.config.symbols import SymbolInfo
 from librae.core.cost_model import CostModel
-from librae.live.executor import LiveExecutor, OrderRequest, PositionRequest
+from librae.live.executor import (
+    BrokerUnavailableError,
+    LiveExecutor,
+    OrderRequest,
+    PositionRequest,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -603,6 +608,51 @@ class TestReadOnlyGuard:
 
         with pytest.raises(NotImplementedError, match="read-only"):
             adapter.get_position(_position_request("MU"))
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation reads on a dropped session
+# ---------------------------------------------------------------------------
+
+
+_RECONCILIATION_READS = {
+    "get_position": ("positions", lambda a: a.get_position(_position_request("MU"))),
+    "list_open_orders": ("openTrades", lambda a: a.list_open_orders("MU")),
+    "get_balance": ("accountSummary", lambda a: a.get_balance("USD")),
+}
+
+
+class TestDisconnectedReads:
+    def _adapter(self, *, connected: bool):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._ib.isConnected.return_value = connected
+        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(conId=123))
+        adapter._ib.positions.return_value = []
+        adapter._ib.openTrades.return_value = []
+        adapter._ib.accountSummary.return_value = [
+            SimpleNamespace(tag="TotalCashValue", currency="USD", value="100")
+        ]
+        return adapter
+
+    @pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
+    def test_disconnected_read_is_unavailable_without_touching_cache(self, read):
+        adapter = self._adapter(connected=False)
+        cache, call = _RECONCILIATION_READS[read]
+
+        with pytest.raises(BrokerUnavailableError, match="not connected"):
+            call(adapter)
+
+        getattr(adapter._ib, cache).assert_not_called()
+        adapter._resolve_contract.assert_not_called()
+
+    @pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
+    def test_connected_read_uses_cache(self, read):
+        adapter = self._adapter(connected=True)
+        cache, call = _RECONCILIATION_READS[read]
+
+        call(adapter)
+
+        getattr(adapter._ib, cache).assert_called_once()
 
 
 # ---------------------------------------------------------------------------

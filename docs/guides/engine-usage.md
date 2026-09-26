@@ -989,19 +989,43 @@ When no order or grouped execution is active, the checks repeat every
   configured symbols; it is not described as a complete account snapshot. A
   restored checkpoint keeps its entry time and accumulated costs, while broker
   side/quantity is a reconciliation assertion. A mismatch or unreadable
-  configured-symbol snapshot halts. A first run with no checkpoint must be
-  flat: broker exposure alone cannot reconstruct the engine's cash, accumulated
-  entry costs, or risk epoch, so a non-flat first run halts and requires the
-  matching checkpoint or an operator flatten. Crypto spot uses base-asset
-  balance inventory, not the derivatives-only positions endpoint. A sell that
-  reduces or closes owned inventory is valid; opening or adding a short is
-  refused in every mode (see quantity and short feasibility above).
+  configured-symbol snapshot halts (a periodic round the adapter reports
+  unavailable is the bounded exception below). A first run with no
+  checkpoint must be flat: broker exposure alone cannot reconstruct the
+  engine's cash, accumulated entry costs, or risk epoch, so a non-flat first
+  run halts and requires the matching checkpoint or an operator flatten.
+  Crypto spot uses base-asset balance inventory, not the derivatives-only
+  positions endpoint. A sell that reduces or closes owned inventory is
+  valid; opening or adding a short is refused in every mode (see quantity
+  and short feasibility above).
 - **Cash** (`_reconcile_cash`, for adapters exposing `get_balance()`): warns
   only, never overwrites. A Telegram alert fires once discrepancy exceeds
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total
   semantics vary by account mode, so blindly overwriting can corrupt a valid
   ledger. A missing capability or unreadable balance is logged explicitly;
   best-effort means non-fatal, not silent.
+
+A periodic round whose broker read raises `BrokerUnavailableError` (the
+adapter's statement that the venue did not answer; see
+[Broker Adapter Design](../../architecture.md#broker-adapter-design-libraebrokers))
+is skipped instead of halting, because a skipped round is only a longer
+interval:
+
+- The next attempt waits the normal interval; the venue is not retried harder.
+- An unavailable balance read counts as a skipped round here, although cash
+  reconciliation is otherwise best-effort.
+- Skips are tracked over the market-data fetch-health window
+  (`LiveTrader.FETCH_HEALTH_*`), so an intermittent venue surfaces as well as
+  a dead one: one alert when skipped rounds in the window reach the alert
+  count, one recovery notice once they fall to the recovery count.
+- Only consecutive skips halt, at
+  `LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS`, with "Periodic
+  Reconciliation Unavailable": every answered round runs a full reconcile, so
+  intermittent skips thin coverage without removing it.
+- A mismatch, an orphan order, any other read error, and every startup or
+  restore read still halt immediately.
+- `reset_halt()` starts a fresh window. The skip history is not checkpointed:
+  a restart re-runs startup reconciliation, which fails closed.
 
 During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle

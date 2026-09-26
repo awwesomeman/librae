@@ -71,6 +71,7 @@ def test_ib_async_contract() -> None:
     assert future.exchange == "CME"
     assert callable(ib_async.IB.trades)
     assert callable(ib_async.IB.openTrades)
+    assert callable(ib_async.IB.isConnected)
     assert callable(ib_async.IB.reqCompletedOrders)
     assert callable(ib_async.IB.reqExecutions)
     assert callable(ib_async.IB.cancelOrder)

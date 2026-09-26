@@ -12,7 +12,12 @@ import pytest
 from librae.brokers.crypto_adapter import CryptoAdapter, CryptoCredentials, _require_ccxt
 from librae.config.symbols import SymbolInfo
 from librae.core.cost_model import CostModel
-from librae.live.executor import LiveExecutor, OrderRequest, PositionRequest
+from librae.live.executor import (
+    BrokerUnavailableError,
+    LiveExecutor,
+    OrderRequest,
+    PositionRequest,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1102,6 +1107,74 @@ def test_find_order_uses_client_id_across_order_history(authed_adapter, mock_ccx
 
     assert result == {"id": "ord_1", "clientOrderId": "strategy-1"}
     mock_ccxt_exchange.fetch_orders.assert_called_once_with("BTC/USDT")
+
+
+_RECONCILIATION_READS = {
+    "get_position": ("fetch_balance", lambda a: a.get_position(_position_request("BTC/USDT"))),
+    "list_open_orders": ("fetch_open_orders", lambda a: a.list_open_orders("BTC/USDT")),
+    "get_balance": ("fetch_balance", lambda a: a.get_balance("USDT")),
+}
+
+
+@pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
+@pytest.mark.parametrize(
+    "error_name",
+    [
+        "NetworkError",
+        "RequestTimeout",
+        "ExchangeNotAvailable",
+        "OnMaintenance",
+        "DDoSProtection",
+        "RateLimitExceeded",
+    ],
+)
+def test_reconciliation_reads_classify_network_errors_as_unavailable(
+    authed_adapter, mock_ccxt_exchange, read, error_name
+):
+    ccxt = _require_ccxt()
+    method, call = _RECONCILIATION_READS[read]
+    original = getattr(ccxt, error_name)("venue down")
+    getattr(mock_ccxt_exchange, method).side_effect = original
+
+    with pytest.raises(BrokerUnavailableError) as raised:
+        call(authed_adapter)
+
+    assert raised.value.__cause__ is original
+
+
+@pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
+@pytest.mark.parametrize(
+    "error_name",
+    [
+        "AuthenticationError",
+        "PermissionDenied",
+        "ExchangeError",
+        "BadResponse",
+        # NetworkError subclasses where the venue answered or the client is at fault.
+        "InvalidNonce",
+        "ChecksumError",
+    ],
+)
+def test_reconciliation_reads_leave_non_network_errors_unclassified(
+    authed_adapter, mock_ccxt_exchange, read, error_name
+):
+    ccxt = _require_ccxt()
+    method, call = _RECONCILIATION_READS[read]
+    getattr(mock_ccxt_exchange, method).side_effect = getattr(ccxt, error_name)("refused")
+
+    with pytest.raises(getattr(ccxt, error_name)) as raised:
+        call(authed_adapter)
+
+    assert not isinstance(raised.value, BrokerUnavailableError)
+
+
+def test_order_lookup_network_errors_are_not_reclassified(authed_adapter, mock_ccxt_exchange):
+    ccxt = _require_ccxt()
+    mock_ccxt_exchange.has = {"fetchOrder": True}
+    mock_ccxt_exchange.fetch_order.side_effect = ccxt.RequestTimeout("slow")
+
+    with pytest.raises(ccxt.RequestTimeout):
+        authed_adapter.get_order("ord_1", "BTC/USDT")
 
 
 def test_cancel_order_returns_refreshed_cumulative_state(authed_adapter, mock_ccxt_exchange):
