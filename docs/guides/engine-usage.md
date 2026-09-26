@@ -525,9 +525,10 @@ work. A placement that raises has one of two outcomes:
 
 - **Definite refusal** (the adapter raised `OrderRejectedError`): the order
   is recorded as rejected, with no lookup, and the alert carries the venue's
-  reason. As for any rejected order, an ungrouped order halts the account and
-  a grouped leg fails only its group; an `account_fault` refusal halts the
-  account either way. Nothing stays unresolved.
+  reason. As for any rejected order, an ungrouped order halts the account
+  (a drawdown or flatten exit is skipped instead, see `max_drawdown_rate`
+  below) and a grouped leg fails only its group; an `account_fault` refusal
+  halts the account either way. Nothing stays unresolved.
 - **Unknown outcome** (any other exception): the engine looks the order up
   by client id. If it is not found, the whole account halts with
   *Ambiguous Order Placement*, grouped or not, and the order stays tracked,
@@ -887,9 +888,12 @@ adapter at submission.
   market exits for the run's open positions and fills them at the next observed
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
-  confirmed broker fills; a close below the venue minimum is skipped as above,
-  and the breach alert names what remains open. The halt persists across
-  restart, emergency exits remain active while halted, and broker orders must
+  confirmed broker fills; a close below the venue minimum is skipped as above.
+  An exit the broker rejects is skipped too, with a `decision_skipped` event
+  (reason `close_rejected`, carrying the venue's reason) and a **Close
+  Rejected** alert, instead of halting and cancelling the other exits; an
+  `account_fault` refusal still halts. The breach alert names what remains
+  open. The halt persists across restart, emergency exits remain active while halted, and broker orders must
   reach a terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts
   a new risk epoch.
 - `LiveTrader.halt(reason)` is the operator kill switch: it persists the halt,

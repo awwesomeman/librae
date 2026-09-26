@@ -523,6 +523,14 @@ def _validate_market_data_calendar_preconditions(
             ) from exc
 
 
+def _is_recovery_exit(request: OrderRequest) -> bool:
+    """Whether ``request`` is an engine-owned drawdown or operator-flatten exit."""
+    return request.reason in (
+        REASON_DRAWDOWN_BREACH,
+        REASON_OPERATOR_FLATTEN,
+    ) and request.position_effect in ("reduce", "close")
+
+
 class LiveTrader:
     """Polling-based runner for sim/live modes.
 
@@ -1851,9 +1859,7 @@ class LiveTrader:
     def _has_active_recovery_orders(self) -> bool:
         """Whether every tracked order is an engine-owned recovery order."""
         return bool(self._active_orders) and all(
-            tracked.request.reason in (REASON_DRAWDOWN_BREACH, REASON_OPERATOR_FLATTEN)
-            and tracked.request.position_effect in ("reduce", "close")
-            for tracked in self._active_orders
+            _is_recovery_exit(tracked.request) for tracked in self._active_orders
         )
 
     def _initialize_run(self) -> None:
@@ -3710,6 +3716,20 @@ class LiveTrader:
                     # group boundary cannot contain it.
                     self._halt_live(title=title, message=message)
                     return
+                if report.status == "rejected" and _is_recovery_exit(request):
+                    # WHY: the flatten already halts the account; halting
+                    # here would cancel every other exit still working.
+                    position = self._positions.get(request.symbol)
+                    self._report_skipped_close(
+                        request.symbol,
+                        quantity=report.requested_quantity - report.filled_quantity,
+                        held=position.quantity if position is not None else 0.0,
+                        ts=self._utc_now(),
+                        reason="close_rejected",
+                        title="Close Rejected",
+                        cause=report.rejection_reason or message,
+                    )
+                    continue
                 if self._fail_group_or_halt(tracked, title=title, message=message):
                     return
                 continue
