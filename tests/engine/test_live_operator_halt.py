@@ -388,6 +388,28 @@ class TestAfterShutdown:
         assert persisted == []
         assert trader._halt_requests.empty()
 
+    def test_a_halt_recorded_as_shutdown_lands_is_not_left_queued(self):
+        trader, _, _ = _trader(_adapter(below_minimum=""))
+        requests = trader._halt_requests
+
+        class ClosingQueue:
+            """Shutdown lands after the caller's first check, before it takes the lock."""
+
+            def put(self, reason):
+                requests.put(reason)
+                trader._closed = True
+
+            def __getattr__(self, name):
+                return getattr(requests, name)
+
+        trader._halt_requests = ClosingQueue()
+
+        with pytest.raises(RuntimeError, match="not running"):
+            trader.halt("too late")
+
+        assert requests.empty()
+        assert trader._halted is False
+
     def test_a_halt_waiting_on_shutdown_raises_without_mutating(self):
         trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())
         errors: list[str] = []

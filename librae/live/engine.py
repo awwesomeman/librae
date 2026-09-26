@@ -2162,7 +2162,6 @@ class LiveTrader:
         pending then applies on the next cycle. Raises once ``run`` has shut down.
         """
         with self._cycle_lock:
-            self._require_running()
             readiness = self.halt_reset_readiness()
             if not readiness.ready:
                 halt_recovery.refuse_reset(
