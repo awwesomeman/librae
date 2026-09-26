@@ -80,7 +80,7 @@ Periodic reconciliation alerts (thresholds and rules in
 
 | Alert title | Meaning | Action |
 |---|---|---|
-| Periodic Reconciliation Skipped | Many recent rounds got no venue answer, in a row or intermittently; trading continues with thinner verification | Check venue status and connectivity; nothing to do if it recovers. An IBKR client never reconnects on its own: restart the deployment once the gateway is back |
+| Periodic Reconciliation Skipped | Many recent rounds got no venue answer, in a row or intermittently; trading continues with thinner verification, except right after `reset_halt()`, when new decisions wait for an answered round | Check venue status and connectivity; nothing to do if it recovers. An IBKR client never reconnects on its own: restart the deployment once the gateway is back |
 | Periodic Reconciliation Recovered | Skipped rounds fell back to a few of the recent ones | None |
 | Periodic Reconciliation Unavailable | The venue missed too many rounds in a row; halted | Once it answers, check positions and orders at the broker, then `reset_halt()` |
 | Periodic Reconciliation Failed, Periodic Position Reconciliation Mismatch | An unclassified read error (auth, permission, bad response) or a broker/local disagreement; halted at once | Find the cause before `reset_halt()` |
@@ -120,7 +120,11 @@ Procedure it exercises:
 3. `trader.reset_halt()` — only after step 2. It refuses while any tracked
    order is unresolved, while an open position has no valuation mark, or
    while that mark is stale; the error names the cause and the next action.
-   These are guard rails, not bugs.
+   These are guard rails, not bugs. The next cycle then reconciles with the
+   broker before any new decision: a mismatch or orphan order halts again
+   with its usual alert, and an unanswered venue holds decisions: skipped
+   rounds are logged, then alerted and bounded as in the periodic
+   reconciliation alerts above.
 
 `trader.halt_reset_readiness()` answers the same question without raising, so
 an operator or a health check can see what is blocking before attempting a
