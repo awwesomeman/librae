@@ -5510,6 +5510,204 @@ class TestLiveExecutionLifecycle:
         assert runner._halted is True
         assert self._reconciliation_alerts(alerts) == ["Periodic Reconciliation Failed"]
 
+    def _resumed_runner(self, adapter: MagicMock, *, mode: str = "live"):
+        """Runner halted and reset right after startup, well inside its interval."""
+        clock = [TEST_CLOCK_NOW]
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_trader(
+            strategy,
+            adapter,
+            config=_test_cfg(mode=mode, reconciliation_interval_seconds=3600),
+            clock=lambda: clock[0],
+        )
+        alerts: list[str] = []
+        runner._notify = lambda method, **kwargs: alerts.append(
+            kwargs.get("title", "").split("] ", 1)[-1]
+        )
+        runner._initialize_run()
+        runner.halt("operator check")
+        runner.reset_halt()
+        alerts.clear()
+        adapter.reset_mock()
+        return runner, strategy, alerts, clock
+
+    def test_resume_reconciles_before_first_decision(self):
+        adapter = _mock_order_adapter()
+        runner, strategy, _, _ = self._resumed_runner(adapter)
+        events: list[str] = []
+        flat = adapter.get_position.return_value
+        adapter.get_position.side_effect = lambda request: events.append("reconcile") or flat
+        strategy.on_bar.side_effect = lambda ctx: events.append("decide") or []
+
+        runner._poll_cycle()
+
+        assert events == ["reconcile", "decide"]
+        adapter.list_open_orders.assert_called()
+        assert runner._halted is False
+
+    @pytest.mark.parametrize(
+        ("read", "answer", "title"),
+        [
+            (
+                "get_position",
+                {"symbol": "BTCUSDT", "size": 1.0, "avg_price": 1.0},
+                "Periodic Position Reconciliation Mismatch",
+            ),
+            (
+                "list_open_orders",
+                [{"id": "m-1", "clientOrderId": "external"}],
+                "Orphan Broker Orders",
+            ),
+        ],
+    )
+    def test_resume_rehalts_on_broker_drift_without_deciding(self, read, answer, title):
+        adapter = _mock_order_adapter()
+        runner, strategy, alerts, _ = self._resumed_runner(adapter)
+        getattr(adapter, read).return_value = answer
+
+        runner._poll_cycle()
+
+        assert runner._halted is True
+        assert alerts == [title]
+        strategy.on_bar.assert_not_called()
+        adapter.place_order.assert_not_called()
+
+    def test_resume_waits_for_an_answered_round_when_broker_unavailable(self):
+        adapter = _mock_order_adapter()
+        runner, strategy, _, clock = self._resumed_runner(adapter)
+        flat = adapter.get_position.return_value
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+
+        runner._poll_cycle()
+        # The skipped round consumes its interval, as any periodic round does.
+        runner._poll_cycle()
+
+        assert adapter.get_position.call_count == 1
+        assert runner._reconciliation_unavailable_rounds == 1
+        assert runner._halted is False
+        strategy.on_bar.assert_not_called()
+
+        clock[0] += timedelta(seconds=3600)
+        adapter.get_position.side_effect = None
+        adapter.get_position.return_value = flat
+        runner._poll_cycle()
+
+        strategy.on_bar.assert_called_once()
+        assert runner._reconciliation_unavailable_rounds == 0
+
+    def test_resume_outage_halts_at_the_consecutive_bound_without_deciding(self):
+        adapter = _mock_order_adapter()
+        runner, strategy, alerts, clock = self._resumed_runner(adapter)
+        messages: list[str] = []
+        record_title = runner._notify
+        runner._notify = lambda method, **kwargs: (
+            messages.append(kwargs.get("message", "")),
+            record_title(method, **kwargs),
+        )
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+
+        for _ in range(LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS):
+            runner._poll_cycle()
+            clock[0] += timedelta(seconds=3600)
+
+        assert runner._halted is True
+        assert self._reconciliation_alerts(alerts) == [
+            "Periodic Reconciliation Skipped",
+            "Periodic Reconciliation Unavailable",
+        ]
+        assert "new decisions wait for an answered round" in messages[0]
+        strategy.on_bar.assert_not_called()
+
+    def test_resume_in_simulation_decides_without_broker_reads(self):
+        adapter = _mock_order_adapter()
+        runner, strategy, _, _ = self._resumed_runner(adapter, mode="sim")
+
+        runner._poll_cycle()
+
+        strategy.on_bar.assert_called_once()
+        adapter.get_position.assert_not_called()
+
+    def test_resume_gate_is_armed_before_the_halt_clears(self):
+        """reset_halt may run on an operator thread while run() polls."""
+        runner = self._make_trader(_HoldStrategy(), _mock_order_adapter())
+        runner._initialize_run()
+        runner.halt("operator check")
+        seen: list[tuple[bool, datetime | None]] = []
+
+        class Observed(LiveTrader):
+            @property
+            def _halted(self) -> bool:
+                return self.__dict__["_halted"]
+
+            @_halted.setter
+            def _halted(self, value: bool) -> None:
+                if not value:
+                    seen.append((self._resume_unverified, self._last_reconciliation_at))
+                self.__dict__["_halted"] = value
+
+        runner.__class__ = Observed
+        runner.reset_halt()
+
+        assert seen == [(True, None)]
+
+    def test_reset_without_a_halt_does_not_hold_decisions(self):
+        adapter = _mock_order_adapter()
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_trader(
+            strategy, adapter, config=_test_cfg(mode="live", reconciliation_interval_seconds=3600)
+        )
+        runner._initialize_run()
+        runner.reset_halt()
+        adapter.reset_mock()
+
+        runner._poll_cycle()
+
+        strategy.on_bar.assert_called_once()
+        adapter.get_position.assert_not_called()
+
+    def test_simulation_start_clears_a_reset_made_before_run(self):
+        runner = self._make_trader(
+            _HoldStrategy(), _mock_order_adapter(), config=_test_cfg(mode="sim")
+        )
+        runner.halt("operator check")
+        runner.reset_halt()
+
+        runner._initialize_run()
+
+        assert runner._resume_unverified is False
+
+    def test_startup_reconciliation_verifies_a_reset_made_before_run(self):
+        adapter = _mock_order_adapter()
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_trader(
+            strategy, adapter, config=_test_cfg(mode="live", reconciliation_interval_seconds=3600)
+        )
+        runner.halt("operator check")
+        runner.reset_halt()
+
+        runner.run(max_iterations=1)
+
+        strategy.on_bar.assert_called_once()
+        assert adapter.get_position.call_count == 1
+
+    def test_cycle_without_reset_decides_inside_reconciliation_interval(self):
+        adapter = _mock_order_adapter()
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        runner = self._make_trader(
+            strategy, adapter, config=_test_cfg(mode="live", reconciliation_interval_seconds=3600)
+        )
+        runner._initialize_run()
+        adapter.reset_mock()
+
+        runner._poll_cycle()
+
+        strategy.on_bar.assert_called_once()
+        adapter.get_position.assert_not_called()
+
     def test_startup_reconciliation_fails_closed_when_broker_unavailable(self):
         adapter = _mock_order_adapter()
         adapter.get_position.side_effect = BrokerUnavailableError("timeout")

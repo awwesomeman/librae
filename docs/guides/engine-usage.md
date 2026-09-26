@@ -884,8 +884,9 @@ adapter at submission.
   `reset_halt()` is required after review before new entries resume. It
   refuses while a tracked order is unresolved, or while an open position lacks
   a current valuation mark, naming the cause and the next action;
-  `halt_reset_readiness()` reports the same answer without raising. See the
-  recovery procedure in
+  `halt_reset_readiness()` reports the same answer without raising. Live
+  mode then re-verifies the broker before the first new decision (see
+  [Reconciliation](#reconciliation-live-only)). See the recovery procedure in
   [the operational runbook](operational-runbook.md).
 - `LiveTrader.request_flatten(reason)` is the operator flatten: the same
   close-everything-and-halt as a drawdown breach, with exits carrying reason
@@ -1041,8 +1042,16 @@ interval:
   intermittent skips thin coverage without removing it.
 - A mismatch, an orphan order, any other read error, and every startup or
   restore read still halt immediately.
-- `reset_halt()` starts a fresh window. The skip history is not checkpointed:
-  a restart re-runs startup reconciliation, which fails closed.
+- `reset_halt()` starts a fresh window and makes the next cycle run a round
+  before any strategy decision, since the operator may have touched the
+  account while halted. Decisions wait until a round answers and matches: a
+  mismatch or orphan halts again, and an unavailable round is skipped and
+  counted as above, retried at the normal interval. Heartbeat and
+  market-data monitoring keep running meanwhile, but marks and the
+  `max_drawdown_rate` circuit pause until the round matches, so watch the
+  book manually during that window.
+- Neither the skip history nor that wait is checkpointed: a restart re-runs
+  startup reconciliation, which fails closed and serves as the round.
 
 During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
