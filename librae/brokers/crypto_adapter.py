@@ -29,7 +29,7 @@ from librae.config.symbols import (
 )
 from librae.core.utils import validate_contract_month
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
-from librae.live.executor import PositionRequest
+from librae.live.executor import OrderBelowVenueMinimumError, PositionRequest
 
 from .base import (
     AdapterInfo,
@@ -668,7 +668,7 @@ class CryptoAdapter:
         minimum = limits.get("min")
         maximum = limits.get("max")
         if minimum is not None and value < float(minimum):
-            raise ValueError(f"{symbol} {name} {value} is below minimum {minimum}")
+            raise OrderBelowVenueMinimumError(f"{symbol} {name} {value} is below minimum {minimum}")
         if maximum is not None and value > float(maximum):
             raise ValueError(f"{symbol} {name} {value} exceeds maximum {maximum}")
 

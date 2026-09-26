@@ -97,7 +97,12 @@ from .execution_identity import (
     resolve_execution_identity,
     runtime_state_key,
 )
-from .executor import ExecutionReport, LiveExecutor, OrderRequest
+from .executor import (
+    ExecutionReport,
+    LiveExecutor,
+    OrderBelowVenueMinimumError,
+    OrderRequest,
+)
 from .interfaces import (
     BarCallback,
     BarDataFetcher,
@@ -840,6 +845,7 @@ class LiveTrader:
         self._adv_session_labels: dict[str, str] = {}
         self._adv_filled_quantities: dict[str, float] = {}
         self._last_reconciliation_at: datetime | None = None
+        self._below_minimum_alerted_quantity: dict[str, float] = {}
         self._cycle_fetch_seconds: dict[str, float] = {}
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
@@ -2740,6 +2746,46 @@ class LiveTrader:
             message=f"{message}; no leg was submitted, unrelated orders remain eligible.",
         )
 
+    def _report_close_below_venue_minimum(
+        self,
+        request: OrderRequest,
+        held: float,
+        ts: datetime,
+        error: OrderBelowVenueMinimumError,
+    ) -> None:
+        """Record a skipped exit every time; alert once per held quantity.
+
+        A strategy that keeps closing the same dust would otherwise page the
+        operator every bar about a remainder that has not changed.
+        """
+        symbol = request.symbol
+        logger.warning("Close below venue minimum skipped: %s", error)
+        if self._on_runtime_event:
+            self._on_runtime_event(
+                RuntimeEvent(
+                    ts=ts,
+                    event_type="decision_skipped",
+                    symbol=symbol,
+                    detail={
+                        "reason": "close_below_venue_minimum",
+                        "quantity": request.quantity,
+                        "message": str(error),
+                    },
+                )
+            )
+        alerted = self._below_minimum_alerted_quantity.get(symbol)
+        if alerted is not None and isclose(alerted, held, rel_tol=0.0, abs_tol=EPSILON):
+            return
+        self._below_minimum_alerted_quantity[symbol] = held
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Close Below Venue Minimum: {symbol}",
+            message=(
+                f"{request.position_effect} of {request.quantity:g} skipped: {error}; "
+                f"{held:g} stays open in the ledger, other orders remain eligible."
+            ),
+        )
+
     def _plan_live_orders(
         self,
         intent: StrategyDecision,
@@ -3014,17 +3060,13 @@ class LiveTrader:
         planning_exposure_prices = dict(exposure_prices)
         for group_id, unit_actions in units:
             grouped = group_id is not None
-            unit_positions = deepcopy(staged_positions) if grouped else staged_positions
+            # Staged on copies so a skipped unit leaves no trace in the plan.
+            unit_positions = deepcopy(staged_positions)
             unit_cash = planning_cash
-            unit_exposure_prices = (
-                dict(planning_exposure_prices) if grouped else planning_exposure_prices
-            )
-            unit_bar_quantities = (
-                dict(planned_bar_quantity_by_symbol) if grouped else planned_bar_quantity_by_symbol
-            )
-            unit_adv_quantities = (
-                dict(planned_adv_quantity_by_symbol) if grouped else planned_adv_quantity_by_symbol
-            )
+            unit_exposure_prices = dict(planning_exposure_prices)
+            unit_bar_quantities = dict(planned_bar_quantity_by_symbol)
+            unit_adv_quantities = dict(planned_adv_quantity_by_symbol)
+            unit_skipped = False
             unit_requests: list[OrderRequest] = []
             preparation_scales: list[float] = []
             prepared_positions_before_unit = (
@@ -3191,10 +3233,22 @@ class LiveTrader:
                         limit_price=limit_price,
                         sequence=sequence_start + len(requests) + len(unit_requests),
                     )
-                    prepared = prepare_and_validate(
-                        request,
-                        reference_price=reference_price,
-                    )
+                    try:
+                        prepared = prepare_and_validate(
+                            request,
+                            reference_price=reference_price,
+                        )
+                    except OrderBelowVenueMinimumError as exc:
+                        # WHY: the venue refuses this size outright, so
+                        # failing the batch would only strand every other
+                        # exit behind a remainder it cannot close.
+                        if grouped or request.position_effect not in ("reduce", "close"):
+                            raise
+                        self._report_close_below_venue_minimum(
+                            request, positions_before_action[symbol].quantity, ts, exc
+                        )
+                        unit_skipped = True
+                        break
                     preparation_scales.append(prepared.quantity / request.quantity)
                     unit_requests.append(prepared)
 
@@ -3218,6 +3272,8 @@ class LiveTrader:
                 prepared_bar_quantity_by_symbol = prepared_bar_quantities_before_unit
                 prepared_adv_quantity_by_symbol = prepared_adv_quantities_before_unit
                 self._report_group_preflight_rejection(group_id, unit_actions, ts, exc)
+                continue
+            if unit_skipped:
                 continue
 
             staged_positions = unit_positions
@@ -4504,7 +4560,9 @@ class LiveTrader:
         self._pending_decision = []
         self._pending_resting_since = {}
         self._persist_state()
-        if flattened:
+        if flattened and self._positions:
+            outcome = f"closed all but {', '.join(sorted(self._positions))}, which remain open"
+        elif flattened:
             outcome = "flattened account positions"
         elif exit_queued:
             outcome = "market exits queued for next observed opens"

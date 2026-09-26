@@ -14,7 +14,12 @@ import pandas as pd
 import pytest
 from librae.brokers.shioaji_adapter import _require_shioaji
 from librae.core.cost_model import CostModel
-from librae.live.executor import LiveExecutor, OrderRequest, PositionRequest
+from librae.live.executor import (
+    LiveExecutor,
+    OrderBelowVenueMinimumError,
+    OrderRequest,
+    PositionRequest,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -379,6 +384,25 @@ class TestPlaceOrder:
 
         assert prepared["quantity"] == 2.0
         assert prepared["price"] == 20_000.0
+
+    def test_prepare_order_types_a_below_one_lot_size(self):
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(
+            return_value=_rolling_contract(limit_down=19_000, limit_up=21_000)
+        )
+
+        with pytest.raises(OrderBelowVenueMinimumError, match="below one lot"):
+            adapter.prepare_order(
+                {
+                    "symbol": "TXFR1",
+                    "side": "sell",
+                    "quantity": 0.5,
+                    "order_type": "market",
+                    "time_in_force": "ioc",
+                    "position_effect": "reduce",
+                    "continuous_alias": True,
+                }
+            )
 
     def test_prepare_order_preserves_price_when_fixed_increment_is_unknown(self):
         adapter = _make_adapter(ca_activated=True)

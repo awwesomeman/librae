@@ -53,7 +53,7 @@ from librae.core.trading_calendar import (
 )
 from librae.core.utils import floor_to_step, validate_contract_month, validate_futures_selector
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
-from librae.live.executor import PositionRequest
+from librae.live.executor import OrderBelowVenueMinimumError, PositionRequest
 
 from .base import (
     AdapterInfo,
@@ -848,7 +848,9 @@ class IBKRAdapter:
         minimum = self._positive_float(getattr(details, "minSize", None)) or step
         quantity = floor_to_step(float(signal["quantity"]), step)
         if quantity < minimum:
-            raise ValueError(f"{signal['symbol']} quantity {quantity} is below minimum {minimum}")
+            raise OrderBelowVenueMinimumError(
+                f"{signal['symbol']} quantity {quantity} is below minimum {minimum}"
+            )
 
         prepared = dict(signal)
         prepared["quantity"] = quantity

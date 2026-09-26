@@ -183,6 +183,20 @@ again — three were real bugs, all fixed:
   old check only required a mark to exist, so a dead feed's last price could
   be used to revalue the book. See the halt-recovery procedure above.
 
+## Unclosable remainders
+
+A **Close Below Venue Minimum: <symbol>** alert means an exit was skipped
+because the adapter refused its size as below the venue's minimum amount,
+notional, or lot. Every other order in that decision, or in the flatten, still
+went out. The skip is recorded each time as a `decision_skipped` runtime event
+with reason `close_below_venue_minimum`; the alert repeats only when the held
+quantity changes.
+
+The remainder is still held at the venue and stays in the ledger, so
+reconciliation keeps matching. Leave it there: it closes once a later fill
+grows the position above the minimum. Removing it at the venue instead makes
+the next reconciliation halt with a position mismatch.
+
 ## DB backup and restore
 
 **Scripts:** `deploy/db_backup.sh` and `deploy/db_restore.sh`, against the

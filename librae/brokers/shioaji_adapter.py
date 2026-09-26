@@ -43,7 +43,7 @@ from librae.core.trading_calendar import (
 )
 from librae.core.utils import floor_to_step, validate_contract_month, validate_futures_selector
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
-from librae.live.executor import PositionRequest
+from librae.live.executor import OrderBelowVenueMinimumError, PositionRequest
 
 from .base import (
     AdapterInfo,
@@ -432,7 +432,7 @@ class ShioajiAdapter:
         prepared = dict(signal)
         quantity = floor_to_step(float(signal["quantity"]), 1.0)
         if quantity < 1:
-            raise ValueError(f"{signal['symbol']} quantity rounds below one lot")
+            raise OrderBelowVenueMinimumError(f"{signal['symbol']} quantity rounds below one lot")
         prepared["quantity"] = quantity
 
         if signal.get("order_type") == "limit":

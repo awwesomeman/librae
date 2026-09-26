@@ -12,6 +12,7 @@ from librae.integrations import (
     MarketDataRouteOwner,
     Notifier,
     OrderAdapter,
+    OrderBelowVenueMinimumError,
     OrderRequest,
     OrderSignal,
     PositionRequest,
@@ -33,6 +34,7 @@ def test_public_integration_contracts_are_importable() -> None:
     assert BrokerOrderReport is not None
     assert BrokerPosition is not None
     assert BrokerBalance is not None
+    assert issubclass(OrderBelowVenueMinimumError, ValueError)
 
 
 def test_order_adapter_contract_includes_position_reconciliation() -> None:

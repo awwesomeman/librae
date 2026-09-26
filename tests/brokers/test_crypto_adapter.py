@@ -12,7 +12,12 @@ import pytest
 from librae.brokers.crypto_adapter import CryptoAdapter, CryptoCredentials, _require_ccxt
 from librae.config.symbols import SymbolInfo
 from librae.core.cost_model import CostModel
-from librae.live.executor import LiveExecutor, OrderRequest, PositionRequest
+from librae.live.executor import (
+    LiveExecutor,
+    OrderBelowVenueMinimumError,
+    OrderRequest,
+    PositionRequest,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -806,7 +811,71 @@ def test_prepare_order_rejects_spot_short_open(authed_adapter, mock_ccxt_exchang
         )
 
 
-def test_prepare_order_rejects_min_notional(authed_adapter, mock_ccxt_exchange):
+@pytest.mark.parametrize(
+    ("limits", "quantity"),
+    [
+        ({"amount": {"min": 0.001, "max": None}}, "0.0001"),
+        ({"cost": {"min": 10.0, "max": None}}, "0.0001"),
+    ],
+    ids=["amount", "notional"],
+)
+def test_prepare_order_types_a_below_minimum_rejection(
+    authed_adapter, mock_ccxt_exchange, limits, quantity
+):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "limits": limits,
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = quantity
+
+    with pytest.raises(OrderBelowVenueMinimumError, match="below minimum"):
+        authed_adapter.prepare_order(
+            {
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "quantity": float(quantity),
+                "order_type": "market",
+                "time_in_force": "ioc",
+                "position_effect": "close",
+                "reference_price": 50_000.0,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [{"amount": {"min": None, "max": 0.01}}, {"cost": {"min": None, "max": 10.0}}],
+    ids=["amount", "notional"],
+)
+def test_prepare_order_keeps_a_maximum_rejection_untyped(
+    authed_adapter, mock_ccxt_exchange, limits
+):
+    mock_ccxt_exchange.market.return_value = {
+        "symbol": "BTC/USDT",
+        "type": "spot",
+        "spot": True,
+        "limits": limits,
+    }
+    mock_ccxt_exchange.amount_to_precision.return_value = "1"
+
+    with pytest.raises(ValueError, match="exceeds maximum") as raised:
+        authed_adapter.prepare_order(
+            {
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "quantity": 1.0,
+                "order_type": "market",
+                "time_in_force": "ioc",
+                "position_effect": "close",
+                "reference_price": 50_000.0,
+            }
+        )
+    assert not isinstance(raised.value, OrderBelowVenueMinimumError)
+
+
+def test_live_executor_keeps_the_below_minimum_type(authed_adapter, mock_ccxt_exchange):
     mock_ccxt_exchange.market.return_value = {
         "symbol": "BTC/USDT",
         "type": "spot",
@@ -814,18 +883,21 @@ def test_prepare_order_rejects_min_notional(authed_adapter, mock_ccxt_exchange):
         "limits": {"cost": {"min": 10.0, "max": None}},
     }
     mock_ccxt_exchange.amount_to_precision.return_value = "0.0001"
+    executor = LiveExecutor(CostModel.zero(), simulation=False, order_adapter=authed_adapter)
 
-    with pytest.raises(ValueError, match="below minimum"):
-        authed_adapter.prepare_order(
-            {
-                "symbol": "BTC/USDT",
-                "side": "buy",
-                "quantity": 0.0001,
-                "order_type": "market",
-                "time_in_force": "ioc",
-                "position_effect": "open",
-                "reference_price": 50_000.0,
-            }
+    with pytest.raises(OrderBelowVenueMinimumError, match="BTCUSDT order preparation failed"):
+        executor.prepare_order(
+            OrderRequest(
+                client_order_id="dust-1",
+                symbol="BTCUSDT",
+                venue_symbol="BTC/USDT",
+                side="sell",
+                quantity=0.0001,
+                order_type="market",
+                submitted_at=pd.Timestamp("2025-01-01", tz="UTC").to_pydatetime(),
+                position_effect="close",
+            ),
+            reference_price=50_000.0,
         )
 
 

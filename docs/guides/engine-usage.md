@@ -849,6 +849,13 @@ adapter at submission.
   adapter preparation may only round a quantity *down*: a prepared order
   whose quantity exceeds the requested one, drops a limit price, or changes
   the venue symbol halts the account before checkpointing or submission.
+  A size the adapter refuses as below the venue minimum
+  (`OrderBelowVenueMinimumError`) halts too, except on an ungrouped
+  reduce/close: that exit is skipped for its symbol with a `decision_skipped`
+  event (reason `close_below_venue_minimum`) and an alert sent once per held
+  quantity, and the other orders still go out. The position stays in the
+  ledger because the venue still holds it; see the
+  [runbook](operational-runbook.md#unclosable-remainders) for what to do.
   After preparation the order is replayed through the same notional, cash,
   position, and exposure checks as the original request.
 - `max_gross_exposure` / `max_net_exposure`: backtest/sim validate every
@@ -867,7 +874,8 @@ adapter at submission.
   market exits for the run's open positions and fills them at the next observed
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
-  confirmed broker fills. The halt persists across restart, emergency exits
+  confirmed broker fills; a close below the venue minimum is skipped as above,
+  and the breach alert names what remains open. The halt persists across restart, emergency exits
   remain active while halted, and broker orders must reach a terminal state
   before `reset_halt()` is allowed. After operator review, `reset_halt()` starts
   a new risk epoch.
