@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
@@ -146,6 +147,16 @@ def _require_ccxt() -> object:
         ) from e
 
 
+def _imported_ccxt() -> Any | None:
+    """ccxt if already imported, else None.
+
+    Only a ccxt exchange raises ccxt errors, and building one imports ccxt, so
+    an error seen while ccxt is not imported is not ccxt's. Error paths use
+    this instead of ``_require_ccxt`` so the happy path never imports the SDK.
+    """
+    return sys.modules.get("ccxt")
+
+
 def _network_errors_unavailable[**P, R](read: Callable[P, R]) -> Callable[P, R]:
     """Classify ccxt's NetworkError family on a reconciliation read.
 
@@ -161,12 +172,16 @@ def _network_errors_unavailable[**P, R](read: Callable[P, R]) -> Callable[P, R]:
 
     @functools.wraps(read)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        ccxt = _require_ccxt()
         try:
             return read(*args, **kwargs)
-        except ccxt.InvalidNonce:
-            raise
-        except ccxt.NetworkError as exc:
+        except Exception as exc:
+            ccxt = _imported_ccxt()
+            if (
+                ccxt is None
+                or not isinstance(exc, ccxt.NetworkError)
+                or isinstance(exc, ccxt.InvalidNonce)
+            ):
+                raise
             raise BrokerUnavailableError(str(exc)) from exc
 
     return wrapper
@@ -689,7 +704,8 @@ class CryptoAdapter:
             # WHY: ccxt's base Exchange.amount_to_precision raises exactly
             # InvalidOrder only when the amount truncates to zero, and no
             # exchange override raises at all; subclasses mean something else.
-            if type(exc) is not _require_ccxt().InvalidOrder:
+            ccxt = _imported_ccxt()
+            if ccxt is None or type(exc) is not ccxt.InvalidOrder:
                 raise
             raise OrderBelowVenueMinimumError(f"{symbol} quantity rounds to zero: {exc}") from exc
         quantity = float(rounded)
@@ -792,7 +808,6 @@ class CryptoAdapter:
         except NotImplementedError as exc:
             raise OrderRejectedError(str(exc), account_fault=True) from exc
         try:
-            ccxt = _require_ccxt()
             order = self._order_request(signal)
         except Exception as exc:
             raise OrderRejectedError(
@@ -801,8 +816,13 @@ class CryptoAdapter:
             ) from exc
         try:
             result = self._exchange.create_order(**order)
-        except ccxt.BaseError as exc:
-            if type(exc).__name__ not in _PLACEMENT_REFUSALS:
+        except Exception as exc:
+            ccxt = _imported_ccxt()
+            if (
+                ccxt is None
+                or not isinstance(exc, ccxt.BaseError)
+                or type(exc).__name__ not in _PLACEMENT_REFUSALS
+            ):
                 raise
             raise OrderRejectedError(str(exc), account_fault=_is_account_refusal(exc)) from exc
         return self._backfill_fee(result, signal["symbol"])

@@ -923,6 +923,7 @@ def test_prepare_order_types_an_amount_rounding_to_zero(authed_adapter, mock_ccx
         authed_adapter.prepare_order(dict(_DUST_SIGNAL))
 
 
+@pytest.mark.sdk_contract
 def test_prepare_order_types_ccxts_zero_precision_refusal(authed_adapter, mock_ccxt_exchange):
     # ccxt's amount_to_precision raises exactly InvalidOrder when the amount
     # truncates to zero instead of returning "0".
@@ -935,6 +936,7 @@ def test_prepare_order_types_ccxts_zero_precision_refusal(authed_adapter, mock_c
         authed_adapter.prepare_order(dict(_DUST_SIGNAL))
 
 
+@pytest.mark.sdk_contract
 def test_prepare_order_keeps_other_precision_errors_untyped(authed_adapter, mock_ccxt_exchange):
     ccxt = _require_ccxt()
     mock_ccxt_exchange.amount_to_precision.side_effect = ccxt.ContractUnavailable("delisted")
@@ -1242,6 +1244,7 @@ _MARKET_BUY = {
 }
 
 
+@pytest.mark.sdk_contract
 @pytest.mark.parametrize(
     ("error_name", "account_fault"),
     [
@@ -1282,6 +1285,7 @@ def test_place_order_classifies_definite_venue_refusals(
     assert raised.value.account_fault is account_fault
 
 
+@pytest.mark.sdk_contract
 @pytest.mark.parametrize(
     "error_name",
     [
@@ -1324,9 +1328,9 @@ def _raise(error: Exception):
 @pytest.mark.parametrize(
     ("step", "account_fault"),
     [
-        ("load_markets:NetworkError", False),
-        ("load_markets:AuthenticationError", True),
-        ("market:BadSymbol", False),
+        pytest.param("load_markets:NetworkError", False, marks=pytest.mark.sdk_contract),
+        pytest.param("load_markets:AuthenticationError", True, marks=pytest.mark.sdk_contract),
+        pytest.param("market:BadSymbol", False, marks=pytest.mark.sdk_contract),
         ("signal", False),
         ("contract", False),
     ],
@@ -1334,7 +1338,6 @@ def _raise(error: Exception):
 def test_place_order_refuses_every_failure_before_sending(
     authed_adapter, mock_ccxt_exchange, step, account_fault
 ):
-    ccxt = _require_ccxt()
     signal = dict(_MARKET_BUY)
     if step == "signal":
         signal["quantity"] = -1.0
@@ -1342,7 +1345,8 @@ def test_place_order_refuses_every_failure_before_sending(
         signal["contract_month"] = "202612"
     else:
         method, error_name = step.split(":")
-        getattr(mock_ccxt_exchange, method).side_effect = _raise(getattr(ccxt, error_name)("x"))
+        error = getattr(_require_ccxt(), error_name)("x")
+        getattr(mock_ccxt_exchange, method).side_effect = _raise(error)
 
     with pytest.raises(OrderRejectedError, match="BTC/USDT not sent") as raised:
         authed_adapter.place_order(signal)
@@ -1352,6 +1356,7 @@ def test_place_order_refuses_every_failure_before_sending(
     mock_ccxt_exchange.create_order.assert_not_called()
 
 
+@pytest.mark.sdk_contract
 def test_place_order_does_not_classify_a_failure_after_creation(authed_adapter, mock_ccxt_exchange):
     ccxt = _require_ccxt()
     mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "closed", "filled": 1}
@@ -1384,6 +1389,7 @@ _RECONCILIATION_READS = {
 }
 
 
+@pytest.mark.sdk_contract
 @pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
 @pytest.mark.parametrize(
     "error_name",
@@ -1410,6 +1416,7 @@ def test_reconciliation_reads_classify_network_errors_as_unavailable(
     assert raised.value.__cause__ is original
 
 
+@pytest.mark.sdk_contract
 @pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
 @pytest.mark.parametrize(
     "error_name",
@@ -1436,6 +1443,7 @@ def test_reconciliation_reads_leave_non_network_errors_unclassified(
     assert not isinstance(raised.value, BrokerUnavailableError)
 
 
+@pytest.mark.sdk_contract
 def test_order_lookup_network_errors_are_not_reclassified(authed_adapter, mock_ccxt_exchange):
     ccxt = _require_ccxt()
     mock_ccxt_exchange.has = {"fetchOrder": True}
@@ -1443,6 +1451,25 @@ def test_order_lookup_network_errors_are_not_reclassified(authed_adapter, mock_c
 
     with pytest.raises(ccxt.RequestTimeout):
         authed_adapter.get_order("ord_1", "BTC/USDT")
+
+
+_CLASSIFYING_CALLS = {
+    "read": ("fetch_balance", lambda a: a.get_balance("USDT")),
+    "prepare_order": ("amount_to_precision", lambda a: a.prepare_order(dict(_DUST_SIGNAL))),
+    "place_order": ("create_order", lambda a: a.place_order(dict(_MARKET_BUY))),
+}
+
+
+@pytest.mark.parametrize("call", sorted(_CLASSIFYING_CALLS))
+def test_errors_pass_through_unchanged_without_ccxt(authed_adapter, mock_ccxt_exchange, call):
+    method, invoke = _CLASSIFYING_CALLS[call]
+    original = RuntimeError("boom")
+    getattr(mock_ccxt_exchange, method).side_effect = original
+
+    with patch.dict("sys.modules", {"ccxt": None}), pytest.raises(RuntimeError) as raised:
+        invoke(authed_adapter)
+
+    assert raised.value is original
 
 
 def test_cancel_order_returns_refreshed_cumulative_state(authed_adapter, mock_ccxt_exchange):
