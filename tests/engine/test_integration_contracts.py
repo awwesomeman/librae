@@ -6,6 +6,7 @@ from librae.integrations import (
     BrokerBalance,
     BrokerOrderReport,
     BrokerPosition,
+    BrokerUnavailableError,
     ExecutionReport,
     LiveStateStore,
     MarketDataCalendarProvider,
@@ -33,6 +34,7 @@ def test_public_integration_contracts_are_importable() -> None:
     assert BrokerOrderReport is not None
     assert BrokerPosition is not None
     assert BrokerBalance is not None
+    assert issubclass(BrokerUnavailableError, Exception)
 
 
 def test_order_adapter_contract_includes_position_reconciliation() -> None:

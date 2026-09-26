@@ -35,7 +35,13 @@ from librae.core.strategy import (
 )
 from librae.live.engine import LiveTrader, _market_data_calendar_id, _market_data_route_owner
 from librae.live.execution_identity import ExecutionIdentity
-from librae.live.executor import ExecutionReport, LiveExecutor, OrderRequest, PositionRequest
+from librae.live.executor import (
+    BrokerUnavailableError,
+    ExecutionReport,
+    LiveExecutor,
+    OrderRequest,
+    PositionRequest,
+)
 from librae.live.state import LiveRebalance, MemoryLiveStateStore, TrackedOrder
 from librae.orchestration.live import build_live_trader
 
@@ -5313,6 +5319,159 @@ class TestLiveExecutionLifecycle:
         }
 
         runner._maybe_reconcile_runtime()
+
+        assert runner._halted is True
+
+    def _periodic_reconciliation_runner(self, adapter: MagicMock):
+        """Runner whose clock advances one full interval per round."""
+        clock = [TEST_CLOCK_NOW]
+        runner = self._make_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", reconciliation_interval_seconds=1),
+            clock=lambda: clock[0],
+        )
+        runner._last_reconciliation_at = TEST_CLOCK_NOW - timedelta(seconds=1)
+        alerts: list[str] = []
+        # Titles without the "[strategy] " prefix.
+        runner._notify = lambda method, **kwargs: alerts.append(
+            kwargs.get("title", "").split("] ", 1)[-1]
+        )
+
+        def reconcile_round() -> None:
+            runner._maybe_reconcile_runtime()
+            clock[0] += timedelta(seconds=1)
+
+        return runner, alerts, reconcile_round
+
+    @staticmethod
+    def _reconciliation_alerts(alerts: list[str]) -> list[str]:
+        return [title for title in alerts if title.startswith("Periodic Reconciliation")]
+
+    @pytest.mark.parametrize("read", ["get_position", "list_open_orders"])
+    def test_periodic_unavailable_broker_skips_round_without_halting(self, read):
+        adapter = _mock_order_adapter()
+        getattr(adapter, read).side_effect = BrokerUnavailableError("gateway reconnecting")
+        runner, alerts, _ = self._periodic_reconciliation_runner(adapter)
+
+        runner._maybe_reconcile_runtime()
+        runner._maybe_reconcile_runtime()
+
+        assert runner._halted is False
+        assert self._reconciliation_alerts(alerts) == []
+        # The skipped round still consumed its interval: no immediate retry.
+        assert getattr(adapter, read).call_count == 1
+        assert runner._last_reconciliation_at == TEST_CLOCK_NOW
+
+    def test_periodic_unavailable_broker_alerts_once_at_threshold(self):
+        adapter = _mock_order_adapter()
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+        runner, alerts, reconcile_round = self._periodic_reconciliation_runner(adapter)
+
+        for _ in range(LiveTrader.CONSECUTIVE_ERROR_THRESHOLD - 1):
+            reconcile_round()
+        assert self._reconciliation_alerts(alerts) == []
+        reconcile_round()
+        reconcile_round()
+
+        assert runner._halted is False
+        assert self._reconciliation_alerts(alerts) == ["Periodic Reconciliation Skipped"]
+
+    def test_periodic_unavailable_broker_halts_after_bound(self):
+        adapter = _mock_order_adapter()
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+        runner, alerts, reconcile_round = self._periodic_reconciliation_runner(adapter)
+
+        for _ in range(LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS - 1):
+            reconcile_round()
+        assert runner._halted is False
+        reconcile_round()
+
+        assert runner._halted is True
+        assert self._reconciliation_alerts(alerts)[-1] == "Periodic Reconciliation Unavailable"
+
+    def test_periodic_unavailable_window_restarts_after_operator_reset(self):
+        adapter = _mock_order_adapter()
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+        runner, _, reconcile_round = self._periodic_reconciliation_runner(adapter)
+        for _ in range(LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS):
+            reconcile_round()
+        assert runner._halted is True
+
+        runner.reset_halt()
+        reconcile_round()
+
+        assert runner._halted is False
+
+    def test_periodic_success_resets_unavailable_count_and_sends_recovery(self):
+        adapter = _mock_order_adapter()
+        flat = adapter.get_position.return_value
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+        runner, alerts, reconcile_round = self._periodic_reconciliation_runner(adapter)
+        for _ in range(LiveTrader.CONSECUTIVE_ERROR_THRESHOLD):
+            reconcile_round()
+
+        adapter.get_position.side_effect = None
+        adapter.get_position.return_value = flat
+        reconcile_round()
+        assert self._reconciliation_alerts(alerts)[-1] == "Periodic Reconciliation Recovered"
+
+        # A fresh outage starts counting from zero again.
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+        for _ in range(LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS - 1):
+            reconcile_round()
+        assert runner._halted is False
+
+    def test_periodic_success_without_alert_sends_no_recovery(self):
+        adapter = _mock_order_adapter()
+        flat = adapter.get_position.return_value
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+        runner, alerts, reconcile_round = self._periodic_reconciliation_runner(adapter)
+        reconcile_round()
+
+        adapter.get_position.side_effect = None
+        adapter.get_position.return_value = flat
+        reconcile_round()
+
+        assert runner._halted is False
+        assert self._reconciliation_alerts(alerts) == []
+
+    def test_periodic_mismatch_after_unavailable_rounds_still_halts(self):
+        adapter = _mock_order_adapter()
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+        runner, alerts, reconcile_round = self._periodic_reconciliation_runner(adapter)
+        for _ in range(LiveTrader.CONSECUTIVE_ERROR_THRESHOLD):
+            reconcile_round()
+
+        adapter.get_position.side_effect = None
+        adapter.get_position.return_value = {
+            "symbol": "BTCUSDT",
+            "size": 1.0,
+            "avg_price": 100.0,
+        }
+        reconcile_round()
+
+        assert runner._halted is True
+        assert alerts[-1] == "Periodic Position Reconciliation Mismatch"
+        assert "Periodic Reconciliation Recovered" not in alerts
+
+    @pytest.mark.parametrize("error", [RuntimeError("boom"), PermissionError("key revoked")])
+    def test_periodic_unclassified_read_failure_halts_immediately(self, error):
+        adapter = _mock_order_adapter()
+        adapter.get_position.side_effect = error
+        runner, alerts, reconcile_round = self._periodic_reconciliation_runner(adapter)
+
+        reconcile_round()
+
+        assert runner._halted is True
+        assert self._reconciliation_alerts(alerts) == ["Periodic Reconciliation Failed"]
+
+    def test_startup_reconciliation_fails_closed_when_broker_unavailable(self):
+        adapter = _mock_order_adapter()
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+        runner = self._make_trader(_HoldStrategy(), adapter)
+
+        runner._reconcile_positions()
 
         assert runner._halted is True
 

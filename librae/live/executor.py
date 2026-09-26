@@ -346,6 +346,18 @@ class BalanceReader(Protocol):
     def get_balance(self, currency: str) -> BrokerBalance: ...
 
 
+class BrokerUnavailableError(Exception):
+    """A read reached no venue answer and had no effect; retrying later is safe.
+
+    Adapters raise it, chained from the SDK error, only from the position,
+    open-order and balance reads, and only for failures they know are
+    transient (timeouts, connection loss, rate limits, venue maintenance).
+    Anything else, including authentication and permission errors, must
+    propagate unchanged: periodic reconciliation tolerates this type for a
+    bounded number of rounds and fails closed on every other exception.
+    """
+
+
 class LiveExecutor:
     """Submit live order requests and normalize broker execution reports."""
 

@@ -97,7 +97,7 @@ from .execution_identity import (
     resolve_execution_identity,
     runtime_state_key,
 )
-from .executor import ExecutionReport, LiveExecutor, OrderRequest
+from .executor import BrokerUnavailableError, ExecutionReport, LiveExecutor, OrderRequest
 from .interfaces import (
     BarCallback,
     BarDataFetcher,
@@ -840,6 +840,7 @@ class LiveTrader:
         self._adv_session_labels: dict[str, str] = {}
         self._adv_filled_quantities: dict[str, float] = {}
         self._last_reconciliation_at: datetime | None = None
+        self._reconciliation_unavailable_rounds = 0
         self._cycle_fetch_seconds: dict[str, float] = {}
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
@@ -1125,6 +1126,12 @@ class LiveTrader:
     # WHY: 3 consecutive errors likely means a persistent issue (API down, DB
     # unreachable), not a transient blip — worth alerting the operator.
     CONSECUTIVE_ERROR_THRESHOLD = 3
+
+    # WHY: a skipped reconciliation round only stretches the interval, so
+    # bounding consecutive skips bounds how long broker/local drift can go
+    # undetected. Twice the alert threshold gives the operator as many rounds
+    # after the alert as before it, before the engine fails closed itself.
+    RECONCILIATION_UNAVAILABLE_HALT_ROUNDS = 6
 
     # A six-poll window catches a sustained two-out-of-three failure pattern
     # without promoting a single transient error. Separate alert and recovery
@@ -1680,23 +1687,68 @@ class LiveTrader:
             < self._reconciliation_interval_seconds
         ):
             return
+        # Stamped before the reads so an unavailable round waits a full
+        # interval too: rounds map to unverified time and a struggling venue
+        # is not polled harder.
         self._last_reconciliation_at = now
         try:
             broker_positions = self._read_broker_positions()
-            if not self._position_books_match(self._positions, broker_positions):
+            if self._position_books_match(self._positions, broker_positions):
+                self._reconcile_open_orders()
+                if not self._halted:
+                    self._reconcile_cash()
+            else:
                 self._halt_live(
                     title="Periodic Position Reconciliation Mismatch",
                     message="Local and broker positions differ for configured symbols",
                 )
-                return
-            self._reconcile_open_orders()
-            if not self._halted:
-                self._reconcile_cash()
+        except BrokerUnavailableError as exc:
+            self._record_reconciliation_unavailable(exc)
+            return
         except Exception as exc:
             logger.exception("Periodic broker reconciliation failed")
             self._halt_live(
                 title="Periodic Reconciliation Failed",
                 message=str(exc),
+            )
+        self._record_reconciliation_answered()
+
+    def _record_reconciliation_unavailable(self, error: BrokerUnavailableError) -> None:
+        rounds = self._reconciliation_unavailable_rounds + 1
+        self._reconciliation_unavailable_rounds = rounds
+        logger.warning(
+            "Periodic broker reconciliation skipped: broker unavailable (%d consecutive)",
+            rounds,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        if rounds >= self.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS:
+            # The halt alert supersedes the outage alert, and an operator
+            # reset starts a fresh unverified window.
+            self._reconciliation_unavailable_rounds = 0
+            self._halt_live(
+                title="Periodic Reconciliation Unavailable",
+                message=f"Broker unavailable for {rounds} consecutive rounds: {error}",
+            )
+        elif rounds == self.CONSECUTIVE_ERROR_THRESHOLD:
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Periodic Reconciliation Skipped",
+                message=(
+                    f"Broker unavailable for {rounds} consecutive rounds: {error}; "
+                    "trading continues, halts after "
+                    f"{self.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS}."
+                ),
+            )
+
+    def _record_reconciliation_answered(self) -> None:
+        rounds = self._reconciliation_unavailable_rounds
+        self._reconciliation_unavailable_rounds = 0
+        if rounds >= self.CONSECUTIVE_ERROR_THRESHOLD and not self._halted:
+            logger.info("Periodic broker reconciliation recovered after %d skipped rounds", rounds)
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Periodic Reconciliation Recovered",
+                message=f"Broker answered after {rounds} skipped rounds; alert cleared.",
             )
 
     def _halt_live(self, *, title: str, message: str) -> None:
