@@ -53,7 +53,11 @@ from librae.core.trading_calendar import (
 )
 from librae.core.utils import floor_to_step, validate_contract_month, validate_futures_selector
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
-from librae.live.executor import OrderBelowVenueMinimumError, PositionRequest
+from librae.live.executor import (
+    BrokerUnavailableError,
+    OrderBelowVenueMinimumError,
+    PositionRequest,
+)
 
 from .base import (
     AdapterInfo,
@@ -659,6 +663,14 @@ class IBKRAdapter:
                 "to enable order placement."
             )
 
+    def _require_connected(self) -> None:
+        # ib_async keeps serving its position, trade and account caches after
+        # an unexpected socket drop (only an explicit disconnect resets them;
+        # ib_async 2.1.0 Wrapper.connectionClosed), so a read on a dropped
+        # session would reconcile against stale facts.
+        if not self._ib.isConnected():
+            raise BrokerUnavailableError("IBKR client is not connected to TWS/IB Gateway")
+
     @staticmethod
     def _routing_exchange(signal: dict) -> str:
         if signal["security_type"] == "STK":
@@ -945,6 +957,7 @@ class IBKRAdapter:
     def list_open_orders(self, symbol: str) -> list[dict]:
         """Return open trades maintained by the connected IBKR client."""
         self._require_auth()
+        self._require_connected()
         return [
             self._trade_to_order(trade)
             for trade in self._ib.openTrades()
@@ -1051,6 +1064,7 @@ class IBKRAdapter:
         matching the scope of the other adapters' position snapshot.
         """
         self._require_auth()
+        self._require_connected()
         symbol = request.venue_symbol
         if request.security_type is None:
             raise ValueError(f"IBKR position request for {symbol} requires security_type")
@@ -1100,6 +1114,7 @@ class IBKRAdapter:
         this for cash-drift alerting (``LiveTrader._reconcile_cash``).
         """
         self._require_auth()
+        self._require_connected()
         values = self._ib.accountSummary()
         matches = [
             value

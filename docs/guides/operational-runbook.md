@@ -75,6 +75,16 @@ session is running): a broker-failure alert, which fires through the same
 [Kill-switch rehearsal](#kill-switch-rehearsal) for a session that exercises
 real broker calls.
 
+Periodic reconciliation alerts (thresholds and rules in
+[Engine usage → Reconciliation](engine-usage.md#reconciliation-live-only)):
+
+| Alert title | Meaning | Action |
+|---|---|---|
+| Periodic Reconciliation Skipped | Many recent rounds got no venue answer, in a row or intermittently; trading continues with thinner verification | Check venue status and connectivity; nothing to do if it recovers. An IBKR client never reconnects on its own: restart the deployment once the gateway is back |
+| Periodic Reconciliation Recovered | Skipped rounds fell back to a few of the recent ones | None |
+| Periodic Reconciliation Unavailable | The venue missed too many rounds in a row; halted | Once it answers, check positions and orders at the broker, then `reset_halt()` |
+| Periodic Reconciliation Failed, Periodic Position Reconciliation Mismatch | An unclassified read error (auth, permission, bad response) or a broker/local disagreement; halted at once | Find the cause before `reset_halt()` |
+
 ## Kill-switch rehearsal
 
 **Rehearsal script:** `scripts/rehearse_kill_switch.py` — builds a real
