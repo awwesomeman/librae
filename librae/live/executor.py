@@ -283,7 +283,8 @@ class ExecutionReport:
     Costs are denominated in the portfolio cash currency; commission may be
     negative for a broker rebate. A report with ``status="filled"`` or
     ``"partial"`` must carry broker-confirmed quantity, average price, and
-    execution timestamp.
+    execution timestamp. ``rejection_reason`` and ``account_fault`` carry an
+    ``OrderRejectedError`` raised at placement.
     """
 
     order_id: str
@@ -298,6 +299,8 @@ class ExecutionReport:
     slippage: float
     tax: float
     executed_at: datetime | None
+    rejection_reason: str = ""
+    account_fault: bool = False
 
     @property
     def has_fill(self) -> bool:
@@ -368,6 +371,22 @@ class OrderBelowVenueMinimumError(ValueError):
     strand every other exit behind a remainder the venue will not take, and
     keeps every other case fail-closed.
     """
+
+
+class OrderRejectedError(Exception):
+    """The venue definitively refused this placement; nothing was created there.
+
+    Adapters raise it, chained from the SDK error, only from ``place_order``
+    and only for refusals they know left no order behind. ``account_fault``
+    marks a refusal of the account rather than the order (credentials,
+    permissions, clock), which every later order would repeat. Anything else,
+    including a timeout or an unrecognised error, must propagate unchanged:
+    the engine then treats the outcome as unknown and looks the order up.
+    """
+
+    def __init__(self, reason: str, *, account_fault: bool = False) -> None:
+        super().__init__(reason)
+        self.account_fault = account_fault
 
 
 class LiveExecutor:
@@ -606,9 +625,11 @@ class LiveExecutor:
     def submit_order(self, request: OrderRequest) -> ExecutionReport | None:
         """Submit a request and return its normalized broker state.
 
-        ``None`` means placement failed or the adapter response violated the
-        execution-report contract. Accepted but unfilled orders are returned
-        as such; acknowledgement is never treated as a fill.
+        ``None`` means the placement outcome is unknown or the adapter
+        response violated the execution-report contract. An
+        ``OrderRejectedError`` becomes a rejected report with no order id.
+        Accepted but unfilled orders are returned as such; acknowledgement is
+        never treated as a fill.
         """
         if self._simulation:
             return None
@@ -620,6 +641,30 @@ class LiveExecutor:
                 request,
                 raw,
                 broker_client_order_id=self.broker_client_order_id(adapter, request),
+            )
+        except OrderRejectedError as exc:
+            logger.error(
+                "Order REJECTED by venue: %s %s qty=%.4f: %s",
+                request.side,
+                request.symbol,
+                request.quantity,
+                exc,
+            )
+            return ExecutionReport(
+                order_id="",
+                client_order_id=request.client_order_id,
+                symbol=request.symbol,
+                side=request.side,
+                status="rejected",
+                requested_quantity=request.quantity,
+                filled_quantity=0.0,
+                average_price=None,
+                commission=0.0,
+                slippage=0.0,
+                tax=0.0,
+                executed_at=None,
+                rejection_reason=str(exc),
+                account_fault=exc.account_fault,
             )
         except Exception:
             logger.exception(

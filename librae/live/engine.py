@@ -3699,15 +3699,18 @@ class LiveTrader:
                 self._persist_state(tracked)
                 return
             if report.status in ("cancelled", "rejected"):
-                if self._fail_group_or_halt(
-                    tracked,
-                    title=f"Order {report.status.title()}",
-                    message=(
-                        f"{request.symbol} order_id={report.order_id or 'unassigned'} "
-                        f"filled={report.filled_quantity:.4f}/"
-                        f"{report.requested_quantity:.4f}"
-                    ),
-                ):
+                title = f"Order {report.status.title()}"
+                message = (
+                    f"{request.symbol} order_id={report.order_id or 'unassigned'} "
+                    f"filled={report.filled_quantity:.4f}/"
+                    f"{report.requested_quantity:.4f}"
+                ) + (f"; venue: {report.rejection_reason}" if report.rejection_reason else "")
+                if report.account_fault:
+                    # Every later order would be refused the same way, so a
+                    # group boundary cannot contain it.
+                    self._halt_live(title=title, message=message)
+                    return
+                if self._fail_group_or_halt(tracked, title=title, message=message):
                     return
                 continue
             if (

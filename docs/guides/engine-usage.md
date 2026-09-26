@@ -521,7 +521,19 @@ fill delta. Submitted, accepted, and partial orders remain in a durable,
 serial queue and are polled before another strategy decision. Repeated
 cumulative reports are idempotent; filled quantity, notional, commission,
 slippage, and tax can only advance. Cancelled/rejected orders halt dependent
-work. While an order remains active, polling still refreshes the OHLCV cache,
+work. A placement that raises has one of two outcomes:
+
+- **Definite refusal** (the adapter raised `OrderRejectedError`): the order
+  is recorded as rejected, with no lookup, and the alert carries the venue's
+  reason. As for any rejected order, an ungrouped order halts the account and
+  a grouped leg fails only its group; an `account_fault` refusal halts the
+  account either way. Nothing stays unresolved.
+- **Unknown outcome** (any other exception): the engine looks the order up
+  by client id. If it is not found, the whole account halts with
+  *Ambiguous Order Placement*, grouped or not, and the order stays tracked,
+  so `reset_halt()` refuses until it resolves.
+
+While an order remains active, polling still refreshes the OHLCV cache,
 heartbeat, and staleness state, but it does not run a new strategy decision.
 An optional local wall-clock timeout cancels an over-age order, preserves any
 confirmed partial fill, and halts dependent work for review. A non-terminal

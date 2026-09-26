@@ -34,6 +34,7 @@ from librae.live.execution_identity import ExecutionIdentity, account_fingerprin
 from librae.live.executor import (
     BrokerUnavailableError,
     OrderBelowVenueMinimumError,
+    OrderRejectedError,
     PositionRequest,
 )
 
@@ -58,6 +59,41 @@ SUPPORTED_TIME_IN_FORCE: dict[str, frozenset[str]] = {
     "limit": frozenset({"day", "gtc", "ioc", "fok"}),
     "market": frozenset({"ioc"}),
 }
+
+# ccxt classes that, raised by create_order, mean the venue (or ccxt before
+# sending) refused the order and nothing was created. Matched by exact type
+# so a subclass ccxt adds later stays an unknown outcome. Left out on
+# purpose: DuplicateOrderId (an order with that id may exist; lookup
+# resolves it), OrderNotFound/OrderNotCached (not placement refusals), and
+# the NetworkError/OperationFailed families (the request may have landed).
+_ORDER_REFUSALS = frozenset(
+    {
+        "InvalidOrder",
+        "OrderImmediatelyFillable",
+        "OrderNotFillable",
+        "ContractUnavailable",
+        "InsufficientFunds",
+        "BadRequest",
+        "BadSymbol",
+        "OperationRejected",
+        "MarketClosed",
+        "NotSupported",
+        "ArgumentsRequired",
+    }
+)
+# Refusals of the account rather than the order: every later order repeats them.
+_ACCOUNT_REFUSALS = frozenset(
+    {
+        "AuthenticationError",
+        "AccountSuspended",
+        "PermissionDenied",
+        "AccountNotEnabled",
+        "RestrictedLocation",
+        "ManualInteractionNeeded",
+        # The venue refused the request's timestamp (Binance -1021: clock skew).
+        "InvalidNonce",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -763,14 +799,21 @@ class CryptoAdapter:
             # A stale local book must not let an exit open opposite exposure;
             # the venue refuses the order instead.
             params["reduceOnly"] = True
-        result = self._exchange.create_order(
-            symbol=signal["symbol"],
-            type=order_type,
-            side=signal["side"],
-            amount=signal["quantity"],
-            price=price,
-            params=params,
-        )
+        ccxt = _require_ccxt()
+        try:
+            result = self._exchange.create_order(
+                symbol=signal["symbol"],
+                type=order_type,
+                side=signal["side"],
+                amount=signal["quantity"],
+                price=price,
+                params=params,
+            )
+        except ccxt.BaseError as exc:
+            name = type(exc).__name__
+            if name not in _ORDER_REFUSALS | _ACCOUNT_REFUSALS:
+                raise
+            raise OrderRejectedError(str(exc), account_fault=name in _ACCOUNT_REFUSALS) from exc
         return self._backfill_fee(result, signal["symbol"])
 
     def _backfill_fee(self, order: dict, symbol: str) -> dict:
