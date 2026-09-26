@@ -29,6 +29,11 @@ The pre-commit hook runs the Ruff checks. Tests stay offline: external
 boundaries (brokers, DB, network) use mocks unless explicitly documented
 otherwise.
 
+A test that needs an optional broker SDK installed is marked
+`sdk_contract`: core CI runs without the SDKs, and a separate job runs the
+marked tests with them. Run those with
+`uv run pytest -q -m sdk_contract tests/` when the SDK extras are installed.
+
 ## Changing code
 
 - Place every new feature against the

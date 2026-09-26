@@ -5,15 +5,15 @@ on:
     branches:
       - main
     paths:
-      - "librae/brokers/**"
-      - "tests/sdk_contracts/**"
+      - "librae/**"
+      - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/optional-sdk-tests.yml"
   pull_request:
     paths:
-      - "librae/brokers/**"
-      - "tests/sdk_contracts/**"
+      - "librae/**"
+      - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/optional-sdk-tests.yml"
@@ -42,9 +42,9 @@ jobs:
       - name: Install optional SDKs
         run: >-
           uv sync --frozen --python ${{ matrix.python }}
-          --extra test --extra crypto-live --extra tw-live --extra us-live
+          --extra test --extra db --extra crypto-live --extra tw-live --extra us-live
 
-      - name: Run offline SDK contract tests
+      - name: Run offline SDK tests
         run: >-
           uv run --python ${{ matrix.python }}
-          pytest -q tests/sdk_contracts/
+          pytest -q -m sdk_contract tests/
