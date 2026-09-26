@@ -370,6 +370,32 @@ class TestHaltOnAHaltedAccount:
         assert "fail-safe" in halt["message"]
         assert f"already halted; {len(SYMBOLS)} recovery exits keep working" in halt["message"]
 
+    def test_a_refused_exit_after_a_second_halt_is_recorded_not_cancelling_the_rest(self):
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = lambda signal: _resting(signal["client_order_id"])
+        trader, events, _ = _trader(adapter)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        refused = trader._active_orders[0]
+        adapter.get_order.side_effect = lambda order_id, _symbol: _resting(
+            order_id, "rejected" if order_id == refused.order_id else "open"
+        )
+
+        trader.halt("fail-safe")
+        trader._poll_cycle()
+
+        adapter.cancel_order.assert_not_called()
+        assert trader._halted is True
+        assert refused not in trader._active_orders
+        assert len(trader._active_orders) == len(SYMBOLS) - 1
+        [skip] = [
+            event
+            for event in events
+            if event.event_type == "decision_skipped"
+            and event.detail.get("reason") == "close_rejected"
+        ]
+        assert skip.symbol == refused.request.symbol
+
 
 class TestAfterShutdown:
     @pytest.mark.parametrize("call", ["halt", "reset_halt", "halt_reset_readiness"])
