@@ -889,6 +889,15 @@ adapter at submission.
   mode then re-verifies the broker before the first new decision (see
   [Reconciliation](#reconciliation-live-only)). See the recovery procedure in
   [the operational runbook](operational-runbook.md).
+- Threading: `halt()`, `reset_halt()` and `halt_reset_readiness()` are safe
+  from any thread. Each waits for the poll cycle in progress, which lasts as
+  long as that cycle's broker and market-data calls, and applies between
+  cycles, so it never interleaves with an order submission. Errors stay
+  synchronous: a refused `reset_halt()` raises to its caller.
+- `LiveTrader.request_halt(reason)` records a halt without waiting; `run()`
+  maps `SIGUSR1` to it on POSIX. The loop applies pending requests first in
+  its next cycle, before order work and before a pending `request_flatten`,
+  which the halted account then refuses. A restart drops a pending request.
 - `LiveTrader.request_flatten(reason)` is the operator flatten: the same
   close-everything-and-halt as a drawdown breach, with exits carrying reason
   `operator_flatten`. It is safe from any thread because it only records the

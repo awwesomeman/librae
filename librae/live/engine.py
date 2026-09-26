@@ -18,7 +18,8 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from inspect import getattr_static
 from math import isclose, isfinite
-from threading import Event, Lock
+from queue import Empty, SimpleQueue
+from threading import Event, Lock, RLock
 from time import perf_counter
 from typing import TYPE_CHECKING, Literal
 
@@ -913,7 +914,13 @@ class LiveTrader:
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
         self._stop_event = Event()
         self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
-        # The only state another thread writes; the polling loop acts on it.
+        # Held for each cycle: an operator call from another thread waits for
+        # the cycle in progress and applies between cycles.
+        self._cycle_lock = RLock()
+        # Requests another thread or a signal records; the loop acts on them.
+        # Halt requests stay lock-free so a signal handler, which interrupts
+        # the loop thread mid-cycle, can never block on a lock that thread holds.
+        self._halt_requests: SimpleQueue[str] = SimpleQueue()
         self._flatten_request_lock = Lock()
         self._flatten_request: tuple[int, str] | None = None
         self._flatten_request_sequence = 0
@@ -1910,7 +1917,8 @@ class LiveTrader:
         self._running = True
         self._setup_signal_handlers()
         try:
-            self._initialize_run()
+            with self._cycle_lock:
+                self._initialize_run()
             if self._on_ready:
                 self._on_ready(self._run_id)
         except BaseException:
@@ -1938,28 +1946,31 @@ class LiveTrader:
         shutdown_reason = "normal"
         try:
             while self._running:
-                cycle_started_at = self._utc_now()
-                cycle_started = perf_counter()
-                self._cycle_fetch_seconds = {}
-                self._cycle_strategy_seconds = 0.0
-                self._cycle_order_seconds = 0.0
-                try:
-                    self._poll_cycle()
-                    self._consecutive_errors = 0
-                except Exception:
-                    self._consecutive_errors += 1
-                    logger.exception(
-                        "Error in poll cycle (%d consecutive), will retry next interval",
-                        self._consecutive_errors,
-                    )
-                    if self._consecutive_errors == self.CONSECUTIVE_ERROR_THRESHOLD:
-                        self._notify(
-                            "send_alert",
-                            title=f"[{strategy_name}] Poll Error",
-                            message=f"{self._consecutive_errors} consecutive failures. Check logs.",
+                with self._cycle_lock:
+                    cycle_started_at = self._utc_now()
+                    cycle_started = perf_counter()
+                    self._cycle_fetch_seconds = {}
+                    self._cycle_strategy_seconds = 0.0
+                    self._cycle_order_seconds = 0.0
+                    try:
+                        self._poll_cycle()
+                        self._consecutive_errors = 0
+                    except Exception:
+                        self._consecutive_errors += 1
+                        logger.exception(
+                            "Error in poll cycle (%d consecutive), will retry next interval",
+                            self._consecutive_errors,
                         )
-                finally:
-                    self._finish_cycle_diagnostics(cycle_started_at, cycle_started)
+                        if self._consecutive_errors == self.CONSECUTIVE_ERROR_THRESHOLD:
+                            self._notify(
+                                "send_alert",
+                                title=f"[{strategy_name}] Poll Error",
+                                message=(
+                                    f"{self._consecutive_errors} consecutive failures. Check logs."
+                                ),
+                            )
+                    finally:
+                        self._finish_cycle_diagnostics(cycle_started_at, cycle_started)
 
                 iteration += 1
                 if max_iterations is not None and iteration >= max_iterations:
@@ -2024,10 +2035,27 @@ class LiveTrader:
         return self._run_id
 
     def halt(self, reason: str = "operator requested halt") -> None:
-        """Fail closed immediately until an operator calls ``reset_halt``."""
+        """Fail closed until an operator calls ``reset_halt``.
+
+        Safe from any thread: it waits for the cycle in progress, which lasts
+        as long as that cycle's broker and market-data calls, and applies
+        before the next one.
+        """
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("halt reason must be a non-empty string")
-        self._halt_live(title="Manual Halt", message=reason.strip())
+        with self._cycle_lock:
+            self._halt_live(title="Manual Halt", message=reason.strip())
+
+    def request_halt(self, reason: str = "operator requested halt") -> None:
+        """Ask the polling loop to halt as ``halt`` does, without waiting.
+
+        Safe from any thread and from a signal handler: it only records the
+        request. The loop applies it first thing in its next cycle, before
+        any order work or a pending flatten. A restart drops a pending one.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("halt reason must be a non-empty string")
+        self._halt_requests.put(reason.strip())
 
     def request_flatten(self, reason: str = "operator requested flatten") -> None:
         """Ask the polling loop to close every position and halt, as a drawdown breach does.
@@ -2057,61 +2085,71 @@ class LiveTrader:
         per-subscription evaluator the runtime uses for market data, so a
         closed market is not mistaken for a stalled one.
         """
-        return halt_recovery.evaluate_reset_readiness(
-            active_orders=self._active_orders,
-            positions=self._positions,
-            last_prices=self._last_prices,
-            last_bar_ts=self._last_bar_ts,
-            subscriptions=self._market_data_subscriptions,
-            now=self._utc_now(),
-            staleness_grace=self._staleness_grace,
-        )
+        with self._cycle_lock:
+            return halt_recovery.evaluate_reset_readiness(
+                active_orders=self._active_orders,
+                positions=self._positions,
+                last_prices=self._last_prices,
+                last_bar_ts=self._last_bar_ts,
+                subscriptions=self._market_data_subscriptions,
+                now=self._utc_now(),
+                staleness_grace=self._staleness_grace,
+            )
 
     def reset_halt(self) -> None:
         """Start a new risk epoch after operator review.
 
         Fails closed with the structured reason from ``halt_reset_readiness``
         rather than an unhandled valuation error, and records the refusal so
-        an operator can see it after the fact.
+        an operator can see it after the fact. Safe from any thread, waiting
+        for the cycle in progress as ``halt`` does; a halt request still
+        pending then applies on the next cycle.
         """
-        readiness = self.halt_reset_readiness()
-        if not readiness.ready:
-            halt_recovery.refuse_reset(
-                readiness,
-                on_runtime_event=self._on_runtime_event,
-                utc_now=self._utc_now,
-            )
-        equity, _ = self._calc_account_snapshot()
-        if self._halted:
-            # The operator may have touched the account while halted: compare
-            # it with the broker on the next cycle, before any new decision.
-            # Armed before the halt clears so a cycle polling on another
-            # thread never sees an unhalted, unverified account.
-            self._last_reconciliation_at = None
-            self._resume_unverified = True
-        self._halted = False
-        # A new risk epoch starts a fresh unverified window.
-        self._reconciliation_unavailable_rounds = 0
-        self._reconciliation_history.clear()
-        self._reconciliation_degraded = False
-        self._skipped_close_alerts.clear()
-        self._equity_peak = equity
-        self._prev_equity = equity
-        self._status_window_equity = equity
-        self._persist_state()
+        with self._cycle_lock:
+            readiness = self.halt_reset_readiness()
+            if not readiness.ready:
+                halt_recovery.refuse_reset(
+                    readiness,
+                    on_runtime_event=self._on_runtime_event,
+                    utc_now=self._utc_now,
+                )
+            equity, _ = self._calc_account_snapshot()
+            if self._halted:
+                # The operator may have touched the account while halted:
+                # compare it with the broker on the next cycle, before any new
+                # decision.
+                self._last_reconciliation_at = None
+                self._resume_unverified = True
+            self._halted = False
+            # A new risk epoch starts a fresh unverified window.
+            self._reconciliation_unavailable_rounds = 0
+            self._reconciliation_history.clear()
+            self._reconciliation_degraded = False
+            self._skipped_close_alerts.clear()
+            self._equity_peak = equity
+            self._prev_equity = equity
+            self._status_window_equity = equity
+            self._persist_state()
 
     def _setup_signal_handlers(self) -> None:
-        """Handle SIGTERM/SIGINT for graceful shutdown."""
+        """Handle SIGTERM/SIGINT as graceful shutdown and SIGUSR1 as a halt request."""
 
         def _handler(signum: int, frame: types.FrameType | None) -> None:
             logger.info("Received signal %d, shutting down gracefully", signum)
             self.stop()
 
+        def _halt_handler(signum: int, frame: types.FrameType | None) -> None:
+            # Runs on the loop thread, possibly mid-cycle: record, never apply.
+            self.request_halt("SIGUSR1 operator halt")
+
         signal.signal(signal.SIGTERM, _handler)
         signal.signal(signal.SIGINT, _handler)
+        if hasattr(signal, "SIGUSR1"):
+            signal.signal(signal.SIGUSR1, _halt_handler)
 
     def _poll_cycle(self) -> None:
         """Process completed market-data events without live catch-up orders."""
+        self._run_requested_halt()
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
         self._run_requested_flatten()
@@ -4725,6 +4763,21 @@ class LiveTrader:
             detail,
             outcome,
         )
+
+    def _run_requested_halt(self) -> None:
+        """Apply pending ``request_halt`` calls from the polling thread.
+
+        First in the cycle, so a planned order is never submitted, and a
+        pending flatten is refused rather than having its exits cancelled.
+        """
+        reasons: list[str] = []
+        while True:
+            try:
+                reasons.append(self._halt_requests.get_nowait())
+            except Empty:
+                break
+        if reasons:
+            self._halt_live(title="Manual Halt", message="; ".join(reasons))
 
     def _run_requested_flatten(self) -> None:
         """Act on a pending ``request_flatten`` from the polling thread."""
