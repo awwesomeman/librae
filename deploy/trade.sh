@@ -39,6 +39,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NETWORK="quant_network"
 READY_FILE="/tmp/librae-ready"
+# The ready marker lives on a tmpfs, which Docker mounts empty at every
+# container start, restart-policy restarts included, so a previous runner's
+# marker never reads as readiness of one still starting. Source: "When the
+# container stops, the tmpfs mount is removed"
+# (https://docs.docker.com/engine/storage/tmpfs/); observed empty after both
+# an automatic and a manual restart on Docker Engine 29.4.0, 2026-09-26.
+READY_MOUNT="/run/librae"
 START_TIMEOUT_SECONDS="${TRADE_START_TIMEOUT_SECONDS:-30}"
 STOP_TIMEOUT_SECONDS="${TRADE_STOP_TIMEOUT_SECONDS:-90}"
 
@@ -310,7 +317,7 @@ cmd_start() {
 
     local container
     container="$(container_name "${deployment_id}")"
-    local ready_file="${READY_FILE}-${deployment_id}"
+    local ready_file="${READY_MOUNT}/ready"
     local ready_token="${deployment_id}-$(date +%s)-$$-${RANDOM}-${RANDOM}"
     local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?Set TRADE_TIMESCALE_DSN in .env.secrets}"
 
@@ -604,6 +611,7 @@ finally:
         --name "${container}" \
         --network "${NETWORK}" \
         --restart unless-stopped \
+        --tmpfs "${READY_MOUNT}" \
         --label "io.librae.managed=true" \
         --label "io.librae.deployment_id=${deployment_id}" \
         --label "io.librae.account_id=${account_id}" \
@@ -650,6 +658,9 @@ cmd_inspect() {
     reason="$(docker inspect --format '{{.State.Error}}' "${container}")"
     ready_file="$(container_ready_file "${container}")"
     ready_token="$(container_ready_token "${container}")"
+    if [[ "${ready_file}" != "${READY_MOUNT}/"* ]]; then
+        echo "${deployment_id} was created before restart-safe readiness; run trade.sh start to adopt it." >&2
+    fi
     ready="false"
     run_id=""
     if [[ "${status}" == "running" ]]; then
@@ -734,12 +745,13 @@ cmd_restart() {
 cmd_halt() {
     local deployment_id="${1:?Usage: trade.sh halt <deployment_id>}"
     validate_deployment_id "${deployment_id}"
-    local container status
+    local container status ready_file ready_token marker refused
     container="$(container_name "${deployment_id}")"
     if ! container_exists "${container}"; then
         echo "${container} not found." >&2
         return 1
     fi
+    refused="${container} is not ready; nothing was signalled. Retry once inspect reports phase=running."
     # Not validate_existing_binding: its advice to stop would leave resting
     # orders working, the opposite of what a halt is for.
     if [[ "$(docker inspect --format '{{ index .Config.Labels "io.librae.managed" }}' \
@@ -750,12 +762,30 @@ cmd_halt() {
     # The runner publishes readiness only after installing its SIGUSR1
     # handler. Before that, the container's PID 1 would drop the signal.
     status="$(cmd_inspect "${deployment_id}")"
-    if ! grep -Fxq "phase=running" <<<"${status}"; then
-        echo "${container} is not ready; nothing was signalled. Retry once inspect reports phase=running." >&2
+    ready_file="$(container_ready_file "${container}")"
+    ready_token="$(container_ready_token "${container}")"
+    marker="$(docker exec "${container}" cat "${ready_file}" 2>/dev/null)" || marker=""
+    if ! grep -Fxq "phase=running" <<<"${status}" \
+        || ! valid_ready_marker "${marker}" "${ready_token}"; then
+        echo "${refused}" >&2
         return 1
     fi
-    docker kill --signal USR1 "${container}" >/dev/null
-    echo "Halt requested for ${container}; its next poll cycle applies it."
+    # Signal the runner from inside, not with `docker kill`: after
+    # `docker kill --signal USR1` the unless-stopped policy did not restart
+    # the container's next exit, while a signal sent through `docker exec`
+    # left it restarting (Docker Engine 29.4.0, observed 2026-09-26).
+    # The signal is sent only while the validated marker is still in place:
+    # a container that restarted since has an empty tmpfs, and its new PID 1
+    # would drop the signal before installing its handler. A crash after the
+    # check takes this exec'd process with it: the kernel kills every process
+    # in a PID namespace whose init exits (pid_namespaces(7)).
+    if ! docker exec "${container}" python -c \
+        'import os, signal, sys; from pathlib import Path; ready = Path(sys.argv[1]).read_text(encoding="utf-8").strip() == sys.argv[2]; os.kill(1, signal.SIGUSR1) if ready else sys.exit(1)' \
+        "${ready_file}" "${marker}" >/dev/null 2>&1; then
+        echo "${refused}" >&2
+        return 1
+    fi
+    echo "Halt requested for ${container}; it is in effect once the Manual Halt alert arrives. If the container restarts before that, run halt again."
 }
 
 cmd_stop() {
