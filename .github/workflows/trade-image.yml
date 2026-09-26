@@ -93,6 +93,14 @@ jobs:
           signal.signal(signal.SIGTERM, stop)
           signal.signal(signal.SIGINT, stop)
           signal.signal(signal.SIGUSR1, halt)
+          # After a crash CI holds readiness, so it can check the restarted
+          # container is not ready until this process writes its marker.
+          restarted = Path("/tmp/librae-restarted")
+          release = Path("/tmp/librae-release-ready")
+          while restarted.exists() and not release.exists():
+              time.sleep(0.1)
+          restarted.unlink(missing_ok=True)
+          release.unlink(missing_ok=True)
           marker = ":".join(
               (
                   os.environ["LIBRAE_READY_TOKEN"],
@@ -101,7 +109,12 @@ jobs:
               )
           )
           Path(os.environ["LIBRAE_READY_FILE"]).write_text(f"{marker}\n", encoding="utf-8")
+          crash = Path("/tmp/librae-crash-requested")
           while running:
+              if crash.exists():
+                  crash.unlink()
+                  restarted.touch()
+                  raise SystemExit(1)
               time.sleep(0.1)
           PY
           printf '%s\n' \
@@ -280,6 +293,26 @@ jobs:
             sleep 1
           done
           docker exec quant_smoke-ci test -f /tmp/librae-halt-requested
+          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
+          docker exec quant_smoke-ci rm /tmp/librae-halt-requested
+          docker exec quant_smoke-ci touch /tmp/librae-crash-requested
+          for attempt in $(seq 1 30); do
+            state="$(docker inspect --format '{{.State.Status}} {{.RestartCount}}' quant_smoke-ci)"
+            [[ "${state}" == "running 1" ]] && break
+            sleep 1
+          done
+          test "${state}" = "running 1"
+          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=failed"
+          if ./deploy/trade.sh halt smoke-ci; then
+            echo "halt signalled a restarted runner before it was ready" >&2
+            exit 1
+          fi
+          docker exec quant_smoke-ci test ! -e /tmp/librae-halt-requested
+          docker exec quant_smoke-ci touch /tmp/librae-release-ready
+          for attempt in $(seq 1 30); do
+            ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running" >/dev/null && break
+            sleep 1
+          done
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
           ./deploy/trade.sh restart smoke-ci | grep -Fx "phase=running"
           if ./deploy/trade.sh start failing-ci ci-fail USD failing sim 60; then

@@ -222,9 +222,11 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
 ([engine behavior](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)).
 
 - It refuses a deployment that is not ready or not managed, and signals
-  nothing: the engine installs its handler before it reports ready. Retry once
-  `trade.sh inspect` reports `phase=running`; stopping instead would leave
-  resting orders working.
+  nothing: the engine installs its handler before it reports ready, and a
+  container that restarted on its own stays not ready until its new process
+  reports ready ([readiness](optional-infrastructure.md#reference-vm-flow)).
+  Retry once `trade.sh inspect` reports `phase=running`; stopping instead
+  would leave resting orders working.
 - The next poll cycle applies it, so it can take up to the poll interval.
   Confirm with the **Manual Halt** alert (reason `SIGUSR1 operator halt`) or
   `docker logs`.

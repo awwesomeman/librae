@@ -5,7 +5,7 @@ import re
 import shutil
 import subprocess
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import get_args, get_type_hints
 
 import pytest
@@ -191,6 +191,8 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert "./deploy/trade.sh start smoke-ci ci USD smoke sim 60" in workflow
     assert "./deploy/trade.sh start smoke-registry ci USD smoke sim 1" in workflow
     assert "./deploy/trade.sh restart smoke-ci" in workflow
+    assert "touch /tmp/librae-crash-requested" in workflow
+    assert "halt signalled a restarted runner before it was ready" in workflow
     assert "./deploy/trade.sh inspect failing-ci" in workflow
     assert "librae-account-lease-owner" in workflow
     assert 'io.librae.account_id" }}' in workflow
@@ -264,6 +266,7 @@ def _run_trade_script(
     # under Git Bash on Windows to exhaust a two-second budget first.
     start_timeout_seconds: str = "2",
     stale_ready_marker: str = "",
+    restart_count: str = "0",
     arguments: list[str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bash = _find_bash()
@@ -319,9 +322,9 @@ elif [[ "$1" == "inspect" ]]; then
         *io.librae.ready_token*) printf '%s\\n' "${FAKE_READY_TOKEN}" ;;
         *".State.Status}} {{.RestartCount"*)
             if [[ -s "${FAKE_DOCKER_STATE_FILE}" ]]; then
-                printf '%s 0\\n' "$(cat "${FAKE_DOCKER_STATE_FILE}")"
+                printf '%s %s\\n' "$(cat "${FAKE_DOCKER_STATE_FILE}")" "${FAKE_RESTART_COUNT}"
             else
-                printf '%s\\n' "running 0"
+                printf '%s\\n' "running ${FAKE_RESTART_COUNT}"
             fi
             ;;
         *State.Running*) printf '%s\\n' "false" ;;
@@ -332,7 +335,7 @@ elif [[ "$1" == "inspect" ]]; then
                 printf '%s\\n' "running"
             fi
             ;;
-        *RestartCount*) printf '%s\\n' "0" ;;
+        *RestartCount*) printf '%s\\n' "${FAKE_RESTART_COUNT}" ;;
     esac
 elif [[ "$1" == "run" && "$2" == "--rm" ]]; then
     expected_account_id=""
@@ -397,12 +400,13 @@ fi
             "FAKE_EXISTING_STRATEGY": existing_strategy,
             "FAKE_EXISTING_MODE": existing_mode,
             "FAKE_EXISTING_MANAGED": existing_managed,
-            "FAKE_READY_FILE": f"/tmp/librae-ready-{deployment_id}",
+            "FAKE_READY_FILE": "/run/librae/ready",
             "FAKE_READY_TOKEN": ready_token,
             "FAKE_READY_MARKER": ready_marker,
             "FAKE_READY_MARKER_EXIT_CODE": str(ready_marker_exit_code),
             "FAKE_STATUS_AFTER_READY_READ": status_after_ready_read,
             "FAKE_STALE_READY_MARKER": stale_ready_marker,
+            "FAKE_RESTART_COUNT": restart_count,
         }
     )
     if arguments is not None:
@@ -474,7 +478,7 @@ def test_trade_script_does_not_accept_an_unrelated_ready_marker(tmp_path: Path) 
 
     assert result.returncode != 0
     assert "did not become ready" in result.stderr
-    assert any("LIBRAE_READY_FILE=/tmp/librae-ready-not-ready" in call for call in docker_calls)
+    assert any("LIBRAE_READY_FILE=/run/librae/ready" in call for call in docker_calls)
     assert not any(call.endswith("cat /tmp/librae-ready") for call in docker_calls)
 
 
@@ -518,6 +522,56 @@ def test_trade_script_rejects_marker_for_another_attempt(tmp_path: Path) -> None
     assert "did not become ready" in result.stderr
 
 
+def test_trade_script_keeps_the_ready_marker_on_a_mount_recreated_each_start(
+    tmp_path: Path,
+) -> None:
+    # The marker must not survive a restart-policy restart, or the next runner
+    # reads ready before it installs its handlers. Docker recreates a tmpfs
+    # empty at each container start; the real restart is exercised in CI.
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=f"registry.example/librae-trade@sha256:{'7' * 64}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    final_run = next(call for call in docker_calls if call.startswith("run -d "))
+    arguments = final_run.split()
+    tmpfs_mount = PurePosixPath(arguments[arguments.index("--tmpfs") + 1])
+    ready_file = next(
+        argument.removeprefix("LIBRAE_READY_FILE=")
+        for argument in arguments
+        if argument.startswith("LIBRAE_READY_FILE=")
+    )
+    assert "--restart unless-stopped" in final_run
+    assert PurePosixPath(ready_file).parent == tmpfs_mount
+    assert f"--label io.librae.ready_file={ready_file}" in final_run
+
+
+def test_trade_script_reports_a_restarted_runner_failed_until_it_marks_ready(
+    tmp_path: Path,
+) -> None:
+    starting, _ = _run_trade_script(
+        tmp_path / "starting",
+        image_reference=f"registry.example/librae-trade@sha256:{'8' * 64}",
+        arguments=["inspect", "smoke-main"],
+        all_containers="quant_smoke-main",
+        restart_count="1",
+        ready_marker="",
+    )
+    ready, _ = _run_trade_script(
+        tmp_path / "ready",
+        image_reference=f"registry.example/librae-trade@sha256:{'8' * 64}",
+        arguments=["inspect", "smoke-main"],
+        all_containers="quant_smoke-main",
+        restart_count="1",
+    )
+
+    assert starting.returncode == 0, starting.stderr
+    assert "phase=failed" in starting.stdout.splitlines()
+    assert ready.returncode == 0, ready.stderr
+    assert "phase=running" in ready.stdout.splitlines()
+
+
 def _halt(tmp_path: Path, **kwargs) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     return _run_trade_script(
         tmp_path,
@@ -541,6 +595,18 @@ def test_trade_script_halt_refuses_a_deployment_that_is_not_ready(tmp_path: Path
 
     assert result.returncode != 0
     assert "not ready" in result.stderr
+    assert not any(call.startswith("kill") for call in docker_calls)
+
+
+def test_trade_script_halt_refuses_a_restarted_runner_before_it_marks_ready(
+    tmp_path: Path,
+) -> None:
+    result, docker_calls = _halt(
+        tmp_path, all_containers="quant_smoke-main", restart_count="1", ready_marker=""
+    )
+
+    assert result.returncode != 0
+    assert "not ready; nothing was signalled" in result.stderr
     assert not any(call.startswith("kill") for call in docker_calls)
 
 
@@ -650,8 +716,8 @@ def test_trade_script_uses_account_specific_identity_config_and_credentials(
     assert "--label io.librae.strategy=momentum" in final_run
     assert "--label io.librae.mode=live" in final_run
     assert "--label io.librae.runtime_revision=sha256:" in final_run
-    assert "--label io.librae.ready_file=/tmp/librae-ready-momentum-main" in final_run
-    assert "LIBRAE_READY_FILE=/tmp/librae-ready-momentum-main" in final_run
+    assert "--label io.librae.ready_file=/run/librae/ready" in final_run
+    assert "LIBRAE_READY_FILE=/run/librae/ready" in final_run
     assert "--runtime-revision sha256:" in final_run
     assert "--config /app/deployment/config.yaml" in final_run
     assert "--add-host host.docker.internal:host-gateway" in final_run

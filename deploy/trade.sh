@@ -39,6 +39,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NETWORK="quant_network"
 READY_FILE="/tmp/librae-ready"
+# The ready marker lives on a tmpfs, which Docker mounts empty at every
+# container start, restart-policy restarts included, so a previous runner's
+# marker never reads as readiness of one still starting. Source: "When the
+# container stops, the tmpfs mount is removed"
+# (https://docs.docker.com/engine/storage/tmpfs/); observed empty after both
+# an automatic and a manual restart on Docker Engine 29.4.0, 2026-09-26.
+READY_MOUNT="/run/librae"
 START_TIMEOUT_SECONDS="${TRADE_START_TIMEOUT_SECONDS:-30}"
 STOP_TIMEOUT_SECONDS="${TRADE_STOP_TIMEOUT_SECONDS:-90}"
 
@@ -310,7 +317,7 @@ cmd_start() {
 
     local container
     container="$(container_name "${deployment_id}")"
-    local ready_file="${READY_FILE}-${deployment_id}"
+    local ready_file="${READY_MOUNT}/ready"
     local ready_token="${deployment_id}-$(date +%s)-$$-${RANDOM}-${RANDOM}"
     local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?Set TRADE_TIMESCALE_DSN in .env.secrets}"
 
@@ -604,6 +611,7 @@ finally:
         --name "${container}" \
         --network "${NETWORK}" \
         --restart unless-stopped \
+        --tmpfs "${READY_MOUNT}" \
         --label "io.librae.managed=true" \
         --label "io.librae.deployment_id=${deployment_id}" \
         --label "io.librae.account_id=${account_id}" \

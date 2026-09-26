@@ -514,7 +514,11 @@ The repository's `build_live_trader()` wiring does this after state restore,
 durable ownership, and startup broker reconciliation. A custom runner must write
 `${LIBRAE_READY_TOKEN}:<run_id>:<32-character-lowercase-hex-generation>` to
 `LIBRAE_READY_FILE` after completing the same startup checks. An absent,
-malformed, or stale marker does not make the deployment ready.
+malformed, or stale marker does not make the deployment ready. The file lives
+on a tmpfs that Docker mounts empty at every container start, so after an
+automatic restart the deployment is not ready until the new process writes its
+own marker. The mount belongs to the container `trade.sh start` creates;
+`trade.sh restart` reuses the existing container as it was created.
 
 Use the lifecycle commands without relying on shell process memory:
 
