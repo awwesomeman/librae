@@ -740,12 +740,18 @@ cmd_halt() {
         echo "${container} not found." >&2
         return 1
     fi
-    validate_existing_binding "${container}" "managed" "true"
+    # Not validate_existing_binding: its advice to stop would leave resting
+    # orders working, the opposite of what a halt is for.
+    if [[ "$(docker inspect --format '{{ index .Config.Labels "io.librae.managed" }}' \
+        "${container}")" != "true" ]]; then
+        echo "${deployment_id} is not a managed deployment; nothing was signalled." >&2
+        return 1
+    fi
     # The runner publishes readiness only after installing its SIGUSR1
     # handler. Before that, the container's PID 1 would drop the signal.
     status="$(cmd_inspect "${deployment_id}")"
     if ! grep -Fxq "phase=running" <<<"${status}"; then
-        echo "${container} is not ready, so it cannot take a halt; stop it instead." >&2
+        echo "${container} is not ready; nothing was signalled. Retry once inspect reports phase=running." >&2
         return 1
     fi
     docker kill --signal USR1 "${container}" >/dev/null

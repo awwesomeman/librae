@@ -544,6 +544,17 @@ def test_trade_script_halt_refuses_a_deployment_that_is_not_ready(tmp_path: Path
     assert not any(call.startswith("kill") for call in docker_calls)
 
 
+def test_trade_script_halt_refuses_an_unmanaged_container(tmp_path: Path) -> None:
+    result, docker_calls = _halt(
+        tmp_path, all_containers="quant_smoke-main", existing_managed="false"
+    )
+
+    assert result.returncode != 0
+    assert "smoke-main is not a managed deployment; nothing was signalled" in result.stderr
+    assert "Stop the old deployment" not in result.stderr
+    assert not any(call.startswith("kill") for call in docker_calls)
+
+
 def test_trade_script_halt_refuses_an_unknown_deployment(tmp_path: Path) -> None:
     result, docker_calls = _halt(tmp_path)
 
