@@ -853,8 +853,9 @@ adapter at submission.
   (`OrderBelowVenueMinimumError`) halts too, except on an ungrouped
   reduce/close: that exit is skipped for its symbol with a `decision_skipped`
   event (reason `close_below_venue_minimum`) and an alert sent once per held
-  quantity, and the other orders still go out. The position stays in the
-  ledger because the venue still holds it; see the
+  quantity and risk epoch, and the other orders still go out. A price outside
+  the venue's band is a bad order, not a remainder, and still halts. The
+  position stays in the ledger because the venue still holds it; see the
   [runbook](operational-runbook.md#unclosable-remainders) for what to do.
   After preparation the order is replayed through the same notional, cash,
   position, and exposure checks as the original request.
@@ -893,9 +894,12 @@ adapter at submission.
   `operator_flatten`. It is safe from any thread because it only records the
   request; the polling loop acts on it at the start of its next cycle, before
   strategy evaluation, after cancelling any working order. A halted account
-  refuses it, since a halt can mean the book is not safe to trade from, and a
-  restart drops a pending request. Sim queues the exits for the next observed
-  open, as for a drawdown breach. `reset_halt()` is the resume path.
+  refuses it, since a halt can mean the book is not safe to trade from; after
+  `reset_halt()` it waits for the reconciliation round that verifies the book.
+  A restart drops a pending request. A position with no current mark cannot be
+  priced, so its exit is skipped with a `decision_skipped` event (reason
+  `close_without_mark`) and an alert. Sim queues the exits for the next
+  observed open, as for a drawdown breach. `reset_halt()` is the resume path.
 - Volume-aware slippage (`CostModel.volume_impact_ticks`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `volume_impact_ticks > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 The backtest timeframe is inferred independently for each symbol. Every symbol

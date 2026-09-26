@@ -10,9 +10,11 @@ polling thread, so the caller's thread never touches engine state.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from threading import Thread, get_ident
+from threading import Lock, Thread, get_ident
+from unittest.mock import MagicMock
 
 import pytest
+from librae.brokers.crypto_adapter import CryptoAdapter, _require_ccxt
 from librae.core.executor import REASON_OPERATOR_FLATTEN
 from librae.core.run_config import RiskPolicy
 from librae.core.strategy import OrderIntent, PortfolioWeights, PositionState, Strategy
@@ -78,6 +80,37 @@ def _trader(adapter, strategy: Strategy | None = None, **kwargs):
     return trader, events, alerts
 
 
+def _crypto_adapter(limits: dict | None = None, *, zero_amount: str = ""):
+    """Order adapter whose preparation is the real CryptoAdapter's.
+
+    ``zero_amount`` names a symbol whose amount ccxt refuses as rounding to zero.
+    """
+    exchange = MagicMock()
+    exchange.market.side_effect = lambda symbol: {
+        "symbol": symbol,
+        "type": "spot",
+        "spot": True,
+        "limits": limits or {},
+    }
+
+    def amount_to_precision(symbol, amount):
+        if symbol == zero_amount:
+            raise _require_ccxt().InvalidOrder(
+                f"binance amount of {symbol} must be greater than minimum amount precision"
+            )
+        return str(amount)
+
+    exchange.amount_to_precision.side_effect = amount_to_precision
+    exchange.price_to_precision.side_effect = lambda _symbol, price: str(price)
+    crypto = CryptoAdapter.__new__(CryptoAdapter)
+    crypto._exchange = exchange
+    crypto._read_only = False
+    crypto._exchange_id = "binance"
+    adapter = _adapter(below_minimum="")
+    adapter.prepare_order.side_effect = crypto.prepare_order
+    return adapter
+
+
 def _submitted(adapter) -> list[str]:
     return [call.args[0]["canonical_symbol"] for call in adapter.place_order.call_args_list]
 
@@ -125,6 +158,49 @@ class TestBelowMinimumClose:
         assert "flatten attempt failed" not in breach["message"]
         assert "DUST" in breach["message"]
 
+    def test_flatten_skips_a_remainder_ccxt_rounds_to_zero(self):
+        adapter = _crypto_adapter(zero_amount="DUST")
+        trader, events, _ = _trader(adapter)
+        trader._risk_policy = RiskPolicy(max_drawdown_rate=0.2)
+        trader._cash = 0.0
+        trader._equity_peak = 1_000.0
+
+        trader._record_equity(TEST_CLOCK_NOW)
+
+        assert _submitted(adapter) == ["AAA", "BBB"]
+        assert set(trader._positions) == {"DUST"}
+        assert trader._halted is True
+        [skip] = _dust_skips(events)
+        assert "rounds to zero" in skip.detail["message"]
+
+    def test_close_limit_below_the_price_band_still_halts(self):
+        adapter = _crypto_adapter({"price": {"min": 10.0, "max": None}})
+        trader, events, alerts = _trader(adapter)
+
+        complete = trader._execute_live_decision(
+            [OrderIntent(action="close", symbol="AAA", limit_price=5.0)], _bars(), TEST_CLOCK_NOW
+        )
+
+        assert complete is False
+        assert trader._halted is True
+        assert _titled(alerts, "Live Order Preflight Rejected")
+        assert _dust_skips(events) == []
+        adapter.place_order.assert_not_called()
+
+    def test_reset_halt_forgets_which_remainders_were_alerted(self):
+        adapter = _adapter()
+        trader, _, alerts = _trader(adapter)
+        trader._positions = {"DUST": _position("DUST", 0.01)}
+        close_dust = [OrderIntent(action="close", symbol="DUST")]
+
+        trader._execute_live_decision(close_dust, _bars(), TEST_CLOCK_NOW)
+        trader._halted = True
+        trader._last_bar_ts = {"DUST": TEST_CLOCK_NOW}
+        trader.reset_halt()
+        trader._execute_live_decision(close_dust, _bars(), TEST_CLOCK_NOW)
+
+        assert len(_titled(alerts, "Close Below Venue Minimum")) == 2
+
     def test_repeated_dust_close_alerts_once_per_position_quantity(self):
         adapter = _adapter()
         trader, events, alerts = _trader(adapter)
@@ -169,6 +245,32 @@ class TestBelowMinimumClose:
         [order] = [call.args[0] for call in adapter.place_order.call_args_list]
         assert order["position_effect"] == "add"
         assert trader._positions["DUST"].quantity == pytest.approx(2.0)
+
+    def test_skipped_reduce_leaves_the_planned_book_unchanged(self):
+        adapter = _adapter()
+
+        def prepare_order(signal):
+            if signal["position_effect"] == "reduce":
+                raise OrderBelowVenueMinimumError("DUST notional 50.0 is below minimum 60")
+            return signal
+
+        adapter.prepare_order.side_effect = prepare_order
+        trader, events, _ = _trader(adapter)
+        trader._positions = {"DUST": _position("DUST")}
+
+        trader._execute_live_decision(
+            [
+                OrderIntent(action="close", symbol="DUST", quantity=0.5),
+                OrderIntent(action="close", symbol="DUST"),
+            ],
+            _bars(),
+            TEST_CLOCK_NOW,
+        )
+
+        [order] = [call.args[0] for call in adapter.place_order.call_args_list]
+        assert order["position_effect"] == "close"
+        assert order["quantity"] == pytest.approx(1.0)
+        assert len(_dust_skips(events)) == 1
 
     def test_entry_below_minimum_still_halts(self):
         adapter = _adapter()
@@ -306,9 +408,9 @@ class TestOperatorFlatten:
         assert trader._halted is True
         assert trader._live_rebalance is None
 
-    def test_position_without_a_mark_stays_open_and_is_named(self):
+    def test_position_without_a_mark_stays_open_and_is_recorded(self):
         adapter = _adapter(below_minimum="")
-        trader, _, alerts = _trader(adapter)
+        trader, events, alerts = _trader(adapter)
         del trader._last_prices["DUST"]
 
         trader.request_flatten("desk asked to stop")
@@ -317,8 +419,89 @@ class TestOperatorFlatten:
         assert _submitted(adapter) == ["AAA", "BBB"]
         assert set(trader._positions) == {"DUST"}
         assert trader._halted is True
-        [flatten] = _titled(alerts, "Operator Flatten")
+        [skip] = [
+            event
+            for event in events
+            if event.event_type == "decision_skipped"
+            and event.detail.get("reason") == "close_without_mark"
+        ]
+        assert skip.symbol == "DUST"
+        assert skip.detail["quantity"] == pytest.approx(1.0)
+        assert len(_titled(alerts, "Close Without Mark: DUST")) == 1
+        [flatten] = [alert for alert in alerts if alert["title"].endswith("Operator Flatten")]
         assert "DUST" in flatten["message"]
+
+    def test_each_skip_reason_alerts_on_its_own(self):
+        adapter = _adapter()
+        trader, _, alerts = _trader(adapter)
+        trader._positions = {"DUST": _position("DUST")}
+
+        trader._execute_live_decision(
+            [OrderIntent(action="close", symbol="DUST")], _bars(), TEST_CLOCK_NOW
+        )
+        del trader._last_prices["DUST"]
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+
+        assert len(_titled(alerts, "Close Below Venue Minimum: DUST")) == 1
+        assert len(_titled(alerts, "Close Without Mark: DUST")) == 1
+
+    def test_request_arriving_while_one_is_handled_is_kept(self):
+        adapter = _adapter(below_minimum="")
+        trader, _, alerts = _trader(adapter)
+        trader._halted = True
+
+        class InterleavingLock:
+            """Lets a second request land between the loop's read and its clear."""
+
+            def __init__(self) -> None:
+                self._lock = Lock()
+                self.entries = 0
+
+            def __enter__(self):
+                self.entries += 1
+                if self.entries == 3:
+                    trader.request_flatten("second request")
+                return self._lock.__enter__()
+
+            def __exit__(self, *exc):
+                return self._lock.__exit__(*exc)
+
+        trader._flatten_request_lock = InterleavingLock()
+        trader.request_flatten("first request")
+        trader._poll_cycle()
+        trader._halted = False
+        trader._poll_cycle()
+
+        [refused] = _titled(alerts, "Operator Flatten Refused")
+        assert "first request" in refused["message"]
+        [flatten] = [alert for alert in alerts if alert["title"].endswith("Operator Flatten")]
+        assert "second request" in flatten["message"]
+        assert trader._positions == {}
+
+    def test_request_after_a_reset_waits_for_a_matching_reconciliation(self):
+        adapter = _adapter(below_minimum="")
+        adapter.get_position.side_effect = lambda request: {
+            "symbol": request.symbol,
+            "size": 1.0,
+            "avg_price": 100.0,
+            "unrealized_pnl": 0.0,
+        }
+        trader, _, _ = _trader(adapter)
+        trader._halted = True
+        trader._last_bar_ts = {symbol: TEST_CLOCK_NOW for symbol in SYMBOLS}
+        trader.reset_halt()
+
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+
+        adapter.place_order.assert_not_called()
+        assert trader._halted is False
+
+        trader._poll_cycle()
+
+        assert _submitted(adapter) == SYMBOLS
+        assert trader._halted is True
 
     def test_halted_account_refuses_the_request(self):
         adapter = _adapter(below_minimum="")

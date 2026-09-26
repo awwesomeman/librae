@@ -851,7 +851,7 @@ class LiveTrader:
         self._reconciliation_unavailable_rounds = 0
         self._reconciliation_history: deque[bool] = deque(maxlen=self.FETCH_HEALTH_WINDOW)
         self._reconciliation_degraded = False
-        self._below_minimum_alerted_quantity: dict[str, float] = {}
+        self._skipped_close_alerts: dict[tuple[str, str], float] = {}
         self._cycle_fetch_seconds: dict[str, float] = {}
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
@@ -915,7 +915,8 @@ class LiveTrader:
         self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
         # The only state another thread writes; the polling loop acts on it.
         self._flatten_request_lock = Lock()
-        self._flatten_request: str | None = None
+        self._flatten_request: tuple[int, str] | None = None
+        self._flatten_request_sequence = 0
         if not self._restored_state:
             # A restored run already notified on_run_registered inside
             # _restore_state, before it fires the state_recovered event —
@@ -2039,7 +2040,8 @@ class LiveTrader:
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("flatten reason must be a non-empty string")
         with self._flatten_request_lock:
-            self._flatten_request = reason.strip()
+            self._flatten_request_sequence += 1
+            self._flatten_request = (self._flatten_request_sequence, reason.strip())
 
     def halt_reset_readiness(self) -> HaltResetReadiness:
         """Whether ``reset_halt`` would be allowed, and why not.
@@ -2092,6 +2094,7 @@ class LiveTrader:
         self._reconciliation_unavailable_rounds = 0
         self._reconciliation_history.clear()
         self._reconciliation_degraded = False
+        self._skipped_close_alerts.clear()
         self._equity_peak = equity
         self._prev_equity = equity
         self._status_window_equity = equity
@@ -2870,43 +2873,42 @@ class LiveTrader:
             message=f"{message}; no leg was submitted, unrelated orders remain eligible.",
         )
 
-    def _report_close_below_venue_minimum(
+    def _report_skipped_close(
         self,
-        request: OrderRequest,
+        symbol: str,
+        *,
+        quantity: float,
         held: float,
         ts: datetime,
-        error: OrderBelowVenueMinimumError,
+        reason: str,
+        title: str,
+        cause: str,
     ) -> None:
-        """Record a skipped exit every time; alert once per held quantity.
+        """Record a skipped exit every time; alert once per reason and held quantity.
 
-        A strategy that keeps closing the same dust would otherwise page the
-        operator every bar about a remainder that has not changed.
+        A strategy that keeps closing the same remainder would otherwise page
+        the operator every bar about a position that has not changed.
         """
-        symbol = request.symbol
-        logger.warning("Close below venue minimum skipped: %s", error)
+        logger.warning("%s skipped for %s: %s", title, symbol, cause)
         if self._on_runtime_event:
             self._on_runtime_event(
                 RuntimeEvent(
                     ts=ts,
                     event_type="decision_skipped",
                     symbol=symbol,
-                    detail={
-                        "reason": "close_below_venue_minimum",
-                        "quantity": request.quantity,
-                        "message": str(error),
-                    },
+                    detail={"reason": reason, "quantity": quantity, "message": cause},
                 )
             )
-        alerted = self._below_minimum_alerted_quantity.get(symbol)
+        alerted = self._skipped_close_alerts.get((reason, symbol))
         if alerted is not None and isclose(alerted, held, rel_tol=0.0, abs_tol=EPSILON):
             return
-        self._below_minimum_alerted_quantity[symbol] = held
+        self._skipped_close_alerts[(reason, symbol)] = held
         self._notify(
             "send_alert",
-            title=f"[{self._executor.strategy_name}] Close Below Venue Minimum: {symbol}",
+            title=f"[{self._executor.strategy_name}] {title}: {symbol}",
             message=(
-                f"{request.position_effect} of {request.quantity:g} skipped: {error}; "
-                f"{held:g} stays open in the ledger, other orders remain eligible."
+                f"exit of {quantity:g} skipped: {cause}; {held:g} stays open in the "
+                "ledger, other orders remain eligible."
             ),
         )
 
@@ -3184,12 +3186,22 @@ class LiveTrader:
         planning_exposure_prices = dict(exposure_prices)
         for group_id, unit_actions in units:
             grouped = group_id is not None
-            # Staged on copies so a skipped unit leaves no trace in the plan.
-            unit_positions = deepcopy(staged_positions)
+            # Staged on copies whenever the unit can be dropped: a group, or a
+            # close/reduce, whose exit may be skipped. Only a close intent plans
+            # an exit (an opposite-side entry is refused), so entries commit in
+            # place as they always have.
+            isolated = grouped or any(action.action == "close" for action in unit_actions)
+            unit_positions = deepcopy(staged_positions) if isolated else staged_positions
             unit_cash = planning_cash
-            unit_exposure_prices = dict(planning_exposure_prices)
-            unit_bar_quantities = dict(planned_bar_quantity_by_symbol)
-            unit_adv_quantities = dict(planned_adv_quantity_by_symbol)
+            unit_exposure_prices = (
+                dict(planning_exposure_prices) if isolated else planning_exposure_prices
+            )
+            unit_bar_quantities = (
+                dict(planned_bar_quantity_by_symbol) if isolated else planned_bar_quantity_by_symbol
+            )
+            unit_adv_quantities = (
+                dict(planned_adv_quantity_by_symbol) if isolated else planned_adv_quantity_by_symbol
+            )
             unit_skipped = False
             unit_requests: list[OrderRequest] = []
             preparation_scales: list[float] = []
@@ -3368,9 +3380,16 @@ class LiveTrader:
                         # exit behind a remainder it cannot close.
                         if grouped or request.position_effect not in ("reduce", "close"):
                             raise
-                        self._report_close_below_venue_minimum(
-                            request, positions_before_action[symbol].quantity, ts, exc
+                        self._report_skipped_close(
+                            symbol,
+                            quantity=request.quantity,
+                            held=positions_before_action[symbol].quantity,
+                            ts=ts,
+                            reason="close_below_venue_minimum",
+                            title="Close Below Venue Minimum",
+                            cause=str(exc),
                         )
+                        assert isolated, "a skipped exit must be staged on copies"
                         unit_skipped = True
                         break
                     preparation_scales.append(prepared.quantity / request.quantity)
@@ -4652,13 +4671,24 @@ class LiveTrader:
                 OrderIntent(action="close", symbol=symbol, reason=reason)
                 for symbol in self._positions
             ]
-            # A position with no mark has no reference price, so its exit is
-            # skipped like any ungrouped close without one and it stays open.
             reference_bars = {
                 symbol: {"close": self._last_prices[symbol]}
                 for symbol in self._positions
                 if symbol in self._last_prices
             }
+            # An exit with no reference price cannot be sized or checked, so it
+            # stays open, recorded, instead of failing every other exit.
+            for symbol, position in self._positions.items():
+                if symbol not in reference_bars:
+                    self._report_skipped_close(
+                        symbol,
+                        quantity=position.quantity,
+                        held=position.quantity,
+                        ts=ts,
+                        reason="close_without_mark",
+                        title="Close Without Mark",
+                        cause="no current valuation mark to price the exit",
+                    )
             # Live emergency exits submit the full remaining quantity. Broker
             # execution reports remain authoritative for partial fills.
             flattened = self._execute_live_decision(
@@ -4699,11 +4729,12 @@ class LiveTrader:
     def _run_requested_flatten(self) -> None:
         """Act on a pending ``request_flatten`` from the polling thread."""
         with self._flatten_request_lock:
-            reason = self._flatten_request
-        if reason is None:
+            request = self._flatten_request
+        if request is None:
             return
+        reason = request[1]
         if self._halted:
-            self._clear_flatten_request()
+            self._clear_flatten_request(request)
             logger.error("Operator flatten refused while halted: %s", reason)
             self._notify(
                 "send_alert",
@@ -4714,13 +4745,17 @@ class LiveTrader:
                 ),
             )
             return
+        if self._resume_unverified:
+            # A reset book is not traded on until a reconciliation round
+            # matches it; the request waits for that like any decision.
+            return
         if not self._executor.simulation and self._active_orders:
             # Exits queue behind working orders, so those are cancelled first;
             # a cancellation the venue has not confirmed retries next cycle.
             self._cancel_active_orders()
             if self._active_orders:
                 return
-        self._clear_flatten_request()
+        self._clear_flatten_request(request)
         self._flatten_account_and_halt(
             self._utc_now(),
             reason=REASON_OPERATOR_FLATTEN,
@@ -4728,6 +4763,8 @@ class LiveTrader:
             detail=reason,
         )
 
-    def _clear_flatten_request(self) -> None:
+    def _clear_flatten_request(self, handled: tuple[int, str]) -> None:
+        # A request that arrived after ``handled`` was read stays pending.
         with self._flatten_request_lock:
-            self._flatten_request = None
+            if self._flatten_request == handled:
+                self._flatten_request = None
