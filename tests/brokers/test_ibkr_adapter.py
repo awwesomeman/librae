@@ -6,6 +6,7 @@ The optional SDK contract is covered separately without opening a socket.
 
 from __future__ import annotations
 
+import sys
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
@@ -54,11 +55,9 @@ def _position_request(
     )
 
 
-def test_missing_ib_async_names_install_extra():
-    with (
-        patch.dict("sys.modules", {"ib_async": None}),
-        pytest.raises(ImportError, match="us-live"),
-    ):
+def test_missing_ib_async_names_install_extra(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ib_async", None)
+    with pytest.raises(ImportError, match="us-live"):
         _require_ib_async()
 
 

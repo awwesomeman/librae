@@ -30,9 +30,16 @@ boundaries (brokers, DB, network) use mocks unless explicitly documented
 otherwise.
 
 A test that needs an optional broker SDK installed is marked
-`sdk_contract`: core CI runs without the SDKs, and a separate job runs the
-marked tests with them. Run those with
-`uv run pytest -q -m sdk_contract tests/` when the SDK extras are installed.
+`sdk_contract`. Core CI runs without the SDKs. The
+[optional-sdk-tests](.github/workflows/optional-sdk-tests.yml) job runs the
+marked tests with the SDKs installed, but collects only the directories it
+lists: a marked test anywhere else needs its directory added there. To run
+them locally, sync every SDK extra (`uv sync` removes extras left out):
+
+```bash
+uv sync --extra test --extra dev --extra db --extra crypto-live --extra tw-live --extra us-live
+uv run pytest -q -m sdk_contract tests/
+```
 
 ## Changing code
 

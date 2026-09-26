@@ -103,10 +103,21 @@ _ACCOUNT_REFUSALS = frozenset(
 _PLACEMENT_REFUSALS = _ORDER_REFUSALS | _ACCOUNT_REFUSALS
 
 
+def _is_ccxt_error(exc: BaseException, family: str = "BaseError") -> bool:
+    """Whether ``exc`` is an instance of ccxt's ``family`` error class.
+
+    Looks ccxt up in ``sys.modules`` instead of importing it: only a ccxt
+    exchange raises ccxt errors, and building one imports ccxt, so an error
+    seen while ccxt is not imported is not ccxt's, and no call path that
+    succeeds ever imports the SDK.
+    """
+    ccxt = sys.modules.get("ccxt")
+    return ccxt is not None and isinstance(exc, getattr(ccxt, family))
+
+
 def _is_account_refusal(exc: BaseException) -> bool:
     """Whether ccxt raised ``exc`` as a refusal of the account, not the order."""
-    cls = type(exc)
-    return cls.__module__.startswith("ccxt.") and cls.__name__ in _ACCOUNT_REFUSALS
+    return _is_ccxt_error(exc) and type(exc).__name__ in _ACCOUNT_REFUSALS
 
 
 logger = logging.getLogger(__name__)
@@ -147,16 +158,6 @@ def _require_ccxt() -> object:
         ) from e
 
 
-def _imported_ccxt() -> Any | None:
-    """ccxt if already imported, else None.
-
-    Only a ccxt exchange raises ccxt errors, and building one imports ccxt, so
-    an error seen while ccxt is not imported is not ccxt's. Error paths use
-    this instead of ``_require_ccxt`` so the happy path never imports the SDK.
-    """
-    return sys.modules.get("ccxt")
-
-
 def _network_errors_unavailable[**P, R](read: Callable[P, R]) -> Callable[P, R]:
     """Classify ccxt's NetworkError family on a reconciliation read.
 
@@ -175,12 +176,7 @@ def _network_errors_unavailable[**P, R](read: Callable[P, R]) -> Callable[P, R]:
         try:
             return read(*args, **kwargs)
         except Exception as exc:
-            ccxt = _imported_ccxt()
-            if (
-                ccxt is None
-                or not isinstance(exc, ccxt.NetworkError)
-                or isinstance(exc, ccxt.InvalidNonce)
-            ):
+            if not _is_ccxt_error(exc, "NetworkError") or _is_ccxt_error(exc, "InvalidNonce"):
                 raise
             raise BrokerUnavailableError(str(exc)) from exc
 
@@ -704,8 +700,7 @@ class CryptoAdapter:
             # WHY: ccxt's base Exchange.amount_to_precision raises exactly
             # InvalidOrder only when the amount truncates to zero, and no
             # exchange override raises at all; subclasses mean something else.
-            ccxt = _imported_ccxt()
-            if ccxt is None or type(exc) is not ccxt.InvalidOrder:
+            if not _is_ccxt_error(exc) or type(exc).__name__ != "InvalidOrder":
                 raise
             raise OrderBelowVenueMinimumError(f"{symbol} quantity rounds to zero: {exc}") from exc
         quantity = float(rounded)
@@ -817,12 +812,7 @@ class CryptoAdapter:
         try:
             result = self._exchange.create_order(**order)
         except Exception as exc:
-            ccxt = _imported_ccxt()
-            if (
-                ccxt is None
-                or not isinstance(exc, ccxt.BaseError)
-                or type(exc).__name__ not in _PLACEMENT_REFUSALS
-            ):
+            if not _is_ccxt_error(exc) or type(exc).__name__ not in _PLACEMENT_REFUSALS:
                 raise
             raise OrderRejectedError(str(exc), account_fault=_is_account_refusal(exc)) from exc
         return self._backfill_fee(result, signal["symbol"])

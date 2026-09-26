@@ -6,6 +6,7 @@ The optional SDK contract is covered separately without a broker login.
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -65,11 +66,9 @@ def _mock_shioaji_actions():
     return SimpleNamespace(Action=SimpleNamespace(Buy="Buy", Sell="Sell"))
 
 
-def test_missing_shioaji_names_install_extra():
-    with (
-        patch.dict("sys.modules", {"shioaji": None}),
-        pytest.raises(ImportError, match="tw-live"),
-    ):
+def test_missing_shioaji_names_install_extra(monkeypatch):
+    monkeypatch.setitem(sys.modules, "shioaji", None)
+    with pytest.raises(ImportError, match="tw-live"):
         _require_shioaji()
 
 
