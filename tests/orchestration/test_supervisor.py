@@ -78,6 +78,9 @@ class _FakeSupervisor:
         self.processes[deployment_id] = status
         return status
 
+    def halt(self, deployment_id: str) -> DeploymentStatus:
+        return self.inspect(deployment_id)
+
 
 def _start(supervisor: Supervisor, spec: DeploymentSpec) -> DeploymentStatus:
     return supervisor.start(spec)
@@ -265,3 +268,36 @@ def test_docker_supervisor_rejects_non_reference_entrypoint(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="requires entrypoint"):
         DockerSupervisor(tmp_path / "trade.sh").start(invalid)
+
+
+def test_docker_supervisor_halts_without_stopping(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    status = "\n".join(
+        (
+            "deployment_id=momentum-1",
+            "account_id=account-1",
+            "currency=USD",
+            "phase=running",
+            "run_id=run-1",
+            "process_id=42",
+            "exit_code=",
+            "restart_count=0",
+            "reason=",
+        )
+    )
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        stdout = status if command[2] == "inspect" else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    supervisor = DockerSupervisor(tmp_path / "trade.sh")
+
+    halted = supervisor.halt("momentum-1")
+
+    assert halted.phase == "running"
+    assert [call[2:] for call in calls] == [["halt", "momentum-1"], ["inspect", "momentum-1"]]

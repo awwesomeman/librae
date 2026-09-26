@@ -6,6 +6,7 @@
 #       [mode] [poll_seconds] [--config <path>] [--credentials <path>]
 #   ./deploy/trade.sh inspect <deployment_id>
 #   ./deploy/trade.sh restart <deployment_id>
+#   ./deploy/trade.sh halt <deployment_id>
 #   ./deploy/trade.sh stop <deployment_id> [--force]
 #   ./deploy/trade.sh stop --all [--force]
 #   mode: sim (default, no real orders) | live (places real orders)
@@ -17,6 +18,7 @@
 #       --credentials .credentials/ibkr-main.env
 #   ./deploy/trade.sh inspect momentum-live
 #   ./deploy/trade.sh restart momentum-live
+#   ./deploy/trade.sh halt momentum-live
 #   ./deploy/trade.sh stop momentum-live
 #
 # Strategy code comes from the selected immutable image. Without
@@ -729,6 +731,27 @@ cmd_restart() {
     cmd_inspect "${deployment_id}"
 }
 
+cmd_halt() {
+    local deployment_id="${1:?Usage: trade.sh halt <deployment_id>}"
+    validate_deployment_id "${deployment_id}"
+    local container status
+    container="$(container_name "${deployment_id}")"
+    if ! container_exists "${container}"; then
+        echo "${container} not found." >&2
+        return 1
+    fi
+    validate_existing_binding "${container}" "managed" "true"
+    # The runner publishes readiness only after installing its SIGUSR1
+    # handler. Before that, the container's PID 1 would drop the signal.
+    status="$(cmd_inspect "${deployment_id}")"
+    if ! grep -Fxq "phase=running" <<<"${status}"; then
+        echo "${container} is not ready, so it cannot take a halt; stop it instead." >&2
+        return 1
+    fi
+    docker kill --signal USR1 "${container}" >/dev/null
+    echo "Halt requested for ${container}; its next poll cycle applies it."
+}
+
 cmd_stop() {
     local force="false"
     if [[ "${*: -1}" == "--force" ]]; then
@@ -772,7 +795,7 @@ cmd_stop() {
     fi
 }
 
-SUBCOMMAND="${1:?Usage: trade.sh <start|stop|inspect|restart> ...}"
+SUBCOMMAND="${1:?Usage: trade.sh <start|stop|inspect|restart|halt> ...}"
 shift
 
 # Load non-trading deployment settings from the project root. Live credentials
@@ -798,8 +821,9 @@ case "${SUBCOMMAND}" in
     stop)  cmd_stop "$@" ;;
     inspect) cmd_inspect "$@" ;;
     restart) cmd_restart "$@" ;;
+    halt) cmd_halt "$@" ;;
     *)
-        echo "Unknown subcommand: ${SUBCOMMAND} (expected start|stop|inspect|restart)" >&2
+        echo "Unknown subcommand: ${SUBCOMMAND} (expected start|stop|inspect|restart|halt)" >&2
         exit 1
         ;;
 esac

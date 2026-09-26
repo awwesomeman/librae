@@ -264,6 +264,7 @@ def _run_trade_script(
     # under Git Bash on Windows to exhaust a two-second budget first.
     start_timeout_seconds: str = "2",
     stale_ready_marker: str = "",
+    arguments: list[str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bash = _find_bash()
 
@@ -404,21 +405,24 @@ fi
             "FAKE_STALE_READY_MARKER": stale_ready_marker,
         }
     )
-    command = [
-        bash,
-        str(isolated_trade_script),
-        "start",
-        deployment_id,
-        account_id,
-        currency,
-        strategy,
-        mode,
-        "60",
-    ]
-    if config_file is not None:
-        command.extend(("--config", str(config_file)))
-    if credentials_file is not None:
-        command.extend(("--credentials", str(credentials_file)))
+    if arguments is not None:
+        command = [bash, str(isolated_trade_script), *arguments]
+    else:
+        command = [
+            bash,
+            str(isolated_trade_script),
+            "start",
+            deployment_id,
+            account_id,
+            currency,
+            strategy,
+            mode,
+            "60",
+        ]
+        if config_file is not None:
+            command.extend(("--config", str(config_file)))
+        if credentials_file is not None:
+            command.extend(("--credentials", str(credentials_file)))
     result = subprocess.run(
         command,
         cwd=ROOT,
@@ -512,6 +516,40 @@ def test_trade_script_rejects_marker_for_another_attempt(tmp_path: Path) -> None
 
     assert result.returncode != 0
     assert "did not become ready" in result.stderr
+
+
+def _halt(tmp_path: Path, **kwargs) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    return _run_trade_script(
+        tmp_path,
+        image_reference=f"registry.example/librae-trade@sha256:{'e' * 64}",
+        deployment_id="smoke-main",
+        arguments=["halt", "smoke-main"],
+        **kwargs,
+    )
+
+
+def test_trade_script_halt_signals_a_ready_deployment(tmp_path: Path) -> None:
+    result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main")
+
+    assert result.returncode == 0, result.stderr
+    assert "kill --signal USR1 quant_smoke-main" in docker_calls
+    assert not any(call.startswith(("stop", "rm", "run", "start")) for call in docker_calls)
+
+
+def test_trade_script_halt_refuses_a_deployment_that_is_not_ready(tmp_path: Path) -> None:
+    result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main", ready_marker="")
+
+    assert result.returncode != 0
+    assert "not ready" in result.stderr
+    assert not any(call.startswith("kill") for call in docker_calls)
+
+
+def test_trade_script_halt_refuses_an_unknown_deployment(tmp_path: Path) -> None:
+    result, docker_calls = _halt(tmp_path)
+
+    assert result.returncode != 0
+    assert "quant_smoke-main not found" in result.stderr
+    assert not any(call.startswith("kill") for call in docker_calls)
 
 
 def test_trade_script_rejects_strategy_account_mismatch_before_replacement(

@@ -159,8 +159,8 @@ manifest. The engine independently holds a durable account lease before any
 broker reconciliation or order work, so separate manifests and launch paths
 cannot concurrently control the same declared `account_id`.
 
-The `Supervisor` protocol exposes only `start`, `stop`, `inspect`, and
-`restart`. Docker, systemd, Kubernetes, or another concrete process manager
+The `Supervisor` protocol exposes only `start`, `stop`, `inspect`, `restart`,
+and `halt`, which asks a running process to halt trading without stopping it. Docker, systemd, Kubernetes, or another concrete process manager
 implements those operations and remains the lifecycle source of truth.
 `DeploymentStatus` carries observed identity, phase, timestamp, and optional
 process, run, exit, and failure facts; it is not a second state store.

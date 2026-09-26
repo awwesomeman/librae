@@ -87,8 +87,12 @@ jobs:
               global running
               running = False
 
+          def halt(*_args):
+              Path("/tmp/librae-halt-requested").write_text("SIGUSR1\n", encoding="utf-8")
+
           signal.signal(signal.SIGTERM, stop)
           signal.signal(signal.SIGINT, stop)
+          signal.signal(signal.SIGUSR1, halt)
           marker = ":".join(
               (
                   os.environ["LIBRAE_READY_TOKEN"],
@@ -269,6 +273,13 @@ jobs:
               --format '{{.Config.Image}}' \
               quant_smoke-ci
           )" = "${TRADE_IMAGE_REF}"
+          ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
+          ./deploy/trade.sh halt smoke-ci
+          for attempt in $(seq 1 10); do
+            docker exec quant_smoke-ci test -f /tmp/librae-halt-requested && break
+            sleep 1
+          done
+          docker exec quant_smoke-ci test -f /tmp/librae-halt-requested
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
           ./deploy/trade.sh restart smoke-ci | grep -Fx "phase=running"
           if ./deploy/trade.sh start failing-ci ci-fail USD failing sim 60; then
