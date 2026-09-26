@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,12 +37,12 @@ def _execution_adapter() -> MagicMock:
     return adapter
 
 
-def test_disabled_notifier_does_not_load_optional_integration() -> None:
-    with patch.dict("sys.modules", {"librae.notifications.telegram": None}):
-        from librae.orchestration.live import _build_notifier
+def test_disabled_notifier_does_not_load_optional_integration(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "librae.notifications.telegram", None)
+    from librae.orchestration.live import _build_notifier
 
-        assert _build_notifier(None) is None
-        assert _build_notifier({"enabled": False}) is None
+    assert _build_notifier(None) is None
+    assert _build_notifier({"enabled": False}) is None
 
 
 def test_status_schedule_is_separate_from_notifier_transport() -> None:
@@ -95,13 +96,13 @@ def test_ready_callback_binds_marker_to_deployment_token(
     assert len(generation) == 32
 
 
-def test_missing_db_dependency_is_reported_by_deployment_factory() -> None:
+def test_missing_db_dependency_is_reported_by_deployment_factory(monkeypatch) -> None:
     config = make_test_cfg(mode="sim")
+    monkeypatch.setitem(sys.modules, "librae.db.timescale_state", None)
 
     with (
         patch("librae.orchestration.live._build_adapter", return_value=MagicMock()),
         patch("librae.orchestration.live._build_notifier", return_value=None),
-        patch.dict("sys.modules", {"librae.db.timescale_state": None}),
         pytest.raises(ModuleNotFoundError, match="Install Librae's 'db' extra"),
     ):
         build_live_trader(MagicMock(), lambda frame: frame, config=config)

@@ -47,4 +47,4 @@ jobs:
       - name: Run offline SDK tests
         run: >-
           uv run --python ${{ matrix.python }}
-          pytest -q -m sdk_contract tests/
+          pytest -q -m sdk_contract tests/sdk_contracts/ tests/brokers/ tests/engine/
