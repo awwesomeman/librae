@@ -1,18 +1,23 @@
-"""A close the venue cannot accept must not strand every other exit.
+"""Closing the account must reach every position the venue can still take.
 
 An ungrouped reduce/close that the adapter rejects as below the venue minimum
 is skipped for that symbol, recorded, and alerted once, while the remaining
 exits still go out. Entries and every other preparation error stay fail-closed.
+An operator flatten runs the drawdown path's close-everything-and-halt on the
+polling thread, so the caller's thread never touches engine state.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from threading import Thread, get_ident
 
 import pytest
+from librae.core.executor import REASON_OPERATOR_FLATTEN
 from librae.core.run_config import RiskPolicy
-from librae.core.strategy import OrderIntent, PositionState
-from librae.live.executor import OrderBelowVenueMinimumError
+from librae.core.strategy import OrderIntent, PortfolioWeights, PositionState, Strategy
+from librae.live.executor import OrderBelowVenueMinimumError, OrderRequest
+from librae.live.state import LiveRebalance, TrackedOrder
 
 from tests.engine import test_live_runner
 from tests.engine.test_live_runner import (
@@ -56,12 +61,12 @@ def _adapter(below_minimum: str = "DUST"):
     return adapter
 
 
-def _trader(adapter, **kwargs):
+def _trader(adapter, strategy: Strategy | None = None, **kwargs):
     events: list = []
     alerts: list[dict] = []
     # Importing the class itself would make pytest collect its tests here too.
     trader = test_live_runner.TestLiveExecutionLifecycle()._make_trader(
-        _HoldStrategy(),
+        strategy or _HoldStrategy(),
         adapter,
         config=_test_cfg(mode="live", symbols=SYMBOLS),
         on_runtime_event=events.append,
@@ -106,7 +111,7 @@ class TestBelowMinimumClose:
         trader._cash = 0.0
         trader._equity_peak = 1_000.0
 
-        trader._record_equity(TEST_CLOCK_NOW, _bars())
+        trader._record_equity(TEST_CLOCK_NOW)
 
         assert _submitted(adapter) == ["AAA", "BBB"]
         assert set(trader._positions) == {"DUST"}
@@ -218,3 +223,205 @@ class TestBelowMinimumClose:
         assert trader._halted is False
         assert _dust_skips(events) == []
         assert [event.detail["reason"] for event in events] == ["group_preflight_rejected"]
+
+
+class _CountingStrategy(Strategy):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def on_bar(self, ctx):
+        self.calls += 1
+        return []
+
+
+def _accepted(order_id: str) -> dict:
+    return {"id": order_id, "status": "open", "amount": 1.0, "filled": 0.0}
+
+
+class TestOperatorFlatten:
+    def test_request_from_another_thread_only_records_it(self):
+        adapter = _adapter(below_minimum="")
+        trader, events, alerts = _trader(adapter)
+        persisted: list = []
+        trader._persist_state = lambda *orders: persisted.append(orders)
+
+        caller = Thread(target=trader.request_flatten, args=("desk asked to stop",))
+        caller.start()
+        caller.join()
+
+        assert trader._halted is False
+        assert set(trader._positions) == set(SYMBOLS)
+        adapter.prepare_order.assert_not_called()
+        adapter.place_order.assert_not_called()
+        assert persisted == []
+        assert events == []
+        assert alerts == []
+
+    def test_request_rejects_an_empty_reason(self):
+        trader, _, _ = _trader(_adapter())
+
+        with pytest.raises(ValueError, match="reason"):
+            trader.request_flatten("  ")
+
+    def test_next_cycle_flattens_and_halts_before_strategy_evaluation(self):
+        adapter = _adapter()
+        submitting_threads: list[int] = []
+
+        def place_order(signal):
+            submitting_threads.append(get_ident())
+            return _broker_report(order_id=signal["client_order_id"], quantity=signal["quantity"])
+
+        adapter.place_order.side_effect = place_order
+        strategy = _CountingStrategy()
+        trader, events, alerts = _trader(adapter, strategy=strategy)
+
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+        trader._poll_cycle()
+
+        assert _submitted(adapter) == ["AAA", "BBB"]
+        assert submitting_threads == [get_ident(), get_ident()]
+        assert set(trader._positions) == {"DUST"}
+        assert trader._halted is True
+        assert strategy.calls == 0
+        assert len(_dust_skips(events)) == 1
+        [flatten] = _titled(alerts, "Operator Flatten")
+        assert "desk asked to stop" in flatten["message"]
+        assert "DUST" in flatten["message"]
+
+    def test_deferred_rebalance_does_not_survive_the_flatten(self):
+        trader, _, _ = _trader(_adapter(below_minimum=""))
+        trader._live_rebalance = LiveRebalance(
+            targets=PortfolioWeights({"AAA": 0.5}),
+            reference_prices={"AAA": 100.0},
+            reference_volumes={"AAA": 1_000.0},
+            lagged_adv_by_symbol={},
+            decided_at=TEST_CLOCK_NOW,
+            delay_bars=1,
+        )
+
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert trader._live_rebalance is None
+
+    def test_position_without_a_mark_stays_open_and_is_named(self):
+        adapter = _adapter(below_minimum="")
+        trader, _, alerts = _trader(adapter)
+        del trader._last_prices["DUST"]
+
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+
+        assert _submitted(adapter) == ["AAA", "BBB"]
+        assert set(trader._positions) == {"DUST"}
+        assert trader._halted is True
+        [flatten] = _titled(alerts, "Operator Flatten")
+        assert "DUST" in flatten["message"]
+
+    def test_halted_account_refuses_the_request(self):
+        adapter = _adapter(below_minimum="")
+        trader, _, alerts = _trader(adapter)
+        trader._halted = True
+
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+        trader._poll_cycle()
+
+        adapter.place_order.assert_not_called()
+        assert set(trader._positions) == set(SYMBOLS)
+        assert len(_titled(alerts, "Operator Flatten Refused")) == 1
+
+    def test_resting_order_is_cancelled_before_the_exits(self):
+        adapter = _adapter(below_minimum="")
+        adapter.get_order.return_value = _accepted("rest-1")
+        adapter.cancel_order.return_value = {
+            "id": "rest-1",
+            "status": "pendingcancel",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        strategy = _CountingStrategy()
+        trader, _, _ = _trader(adapter, strategy=strategy)
+        trader._active_orders = [
+            TrackedOrder(
+                request=OrderRequest(
+                    client_order_id="rest-1",
+                    symbol="AAA",
+                    side="buy",
+                    quantity=1.0,
+                    order_type="limit",
+                    limit_price=90.0,
+                    submitted_at=TEST_CLOCK_NOW,
+                ),
+                placement_attempted=True,
+                placement_attempted_at=TEST_CLOCK_NOW,
+                order_id="rest-1",
+                status="accepted",
+            )
+        ]
+
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+
+        adapter.cancel_order.assert_called_once()
+        adapter.place_order.assert_not_called()
+        assert trader._halted is False
+        assert strategy.calls == 0
+
+        adapter.get_order.return_value = {
+            "id": "rest-1",
+            "status": "canceled",
+            "amount": 1.0,
+            "filled": 0.0,
+        }
+        trader._poll_cycle()
+
+        assert _submitted(adapter) == SYMBOLS
+        assert trader._positions == {}
+        assert trader._halted is True
+        assert strategy.calls == 0
+
+    def test_resting_exit_keeps_advancing_while_halted(self):
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = lambda signal: _accepted(signal["client_order_id"])
+        trader, _, _ = _trader(adapter)
+        trader._positions = {"AAA": _position("AAA")}
+
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        [exit_order] = trader._active_orders
+        assert exit_order.request.reason == REASON_OPERATOR_FLATTEN
+
+        adapter.get_order.return_value = _broker_report(
+            order_id=exit_order.request.client_order_id, quantity=1.0
+        )
+        trader._poll_cycle()
+
+        adapter.cancel_order.assert_not_called()
+        assert trader._active_orders == []
+        assert trader._positions == {}
+
+    def test_sim_exits_at_the_next_observed_open_and_halts(self):
+        strategy = _CountingStrategy()
+        runner = test_live_runner.TestLiveTrader()._make_runner(
+            strategy=strategy,
+            config=_test_cfg(mode="sim"),
+        )
+        position_events: list = []
+        runner._on_position_event = lambda event, _sequence: position_events.append(event)
+        runner._positions = {"BTCUSDT": _position("BTCUSDT")}
+        runner._last_prices = {"BTCUSDT": 100.0}
+
+        runner.request_flatten("desk asked to stop")
+        runner._poll_cycle()
+
+        assert runner._halted is True
+        assert runner._positions == {}
+        assert [(event.event_type, event.reason) for event in position_events] == [
+            ("close", REASON_OPERATOR_FLATTEN)
+        ]
+        assert strategy.calls == 0

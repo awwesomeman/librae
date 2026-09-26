@@ -183,6 +183,19 @@ again — three were real bugs, all fixed:
   old check only required a mark to exist, so a dead feed's last price could
   be used to revalue the book. See the halt-recovery procedure above.
 
+## Operator flatten
+
+To stop and close every position, call `trader.request_flatten(reason)`
+instead of halting and closing at the venue, which desynchronises the
+checkpoint. The loop cancels working orders, submits the exits, halts, and
+sends an **Operator Flatten** alert naming anything that remains open. Exits
+still resting keep being polled while halted. Once
+`trader.halt_reset_readiness()` is ready, `trader.reset_halt()` resumes. A
+request on a halted account is refused with an **Operator Flatten Refused**
+alert; a request pending at a restart is dropped, so request it again. Engine
+behavior is in
+[engine-usage.md](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics).
+
 ## Unclosable remainders
 
 A **Close Below Venue Minimum: <symbol>** alert means an exit was skipped

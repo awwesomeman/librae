@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from inspect import getattr_static
 from math import isclose, isfinite
-from threading import Event
+from threading import Event, Lock
 from time import perf_counter
 from typing import TYPE_CHECKING, Literal
 
@@ -27,6 +27,7 @@ import pandas as pd
 from librae.core import EPSILON
 from librae.core.executor import (
     REASON_DRAWDOWN_BREACH,
+    REASON_OPERATOR_FLATTEN,
     ExecutionLiquidityUnavailableError,
     ExecutionPriceUnavailableError,
     ExecutionResult,
@@ -907,6 +908,9 @@ class LiveTrader:
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
         self._stop_event = Event()
         self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
+        # The only state another thread writes; the polling loop acts on it.
+        self._flatten_request_lock = Lock()
+        self._flatten_request: str | None = None
         if not self._restored_state:
             # A restored run already notified on_run_registered inside
             # _restore_state, before it fires the state_recovered event —
@@ -1761,7 +1765,7 @@ class LiveTrader:
     def _has_active_recovery_orders(self) -> bool:
         """Whether every tracked order is an engine-owned recovery order."""
         return bool(self._active_orders) and all(
-            tracked.request.reason == REASON_DRAWDOWN_BREACH
+            tracked.request.reason in (REASON_DRAWDOWN_BREACH, REASON_OPERATOR_FLATTEN)
             and tracked.request.position_effect in ("reduce", "close")
             for tracked in self._active_orders
         )
@@ -1932,6 +1936,19 @@ class LiveTrader:
             raise ValueError("halt reason must be a non-empty string")
         self._halt_live(title="Manual Halt", message=reason.strip())
 
+    def request_flatten(self, reason: str = "operator requested flatten") -> None:
+        """Ask the polling loop to close every position and halt, as a drawdown breach does.
+
+        Safe from any thread: it only records the request. The loop acts on it
+        at the start of its next cycle, before strategy evaluation, after
+        cancelling any working order. A halted account refuses it, and the
+        request is not persisted, so a restart drops a pending one.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("flatten reason must be a non-empty string")
+        with self._flatten_request_lock:
+            self._flatten_request = reason.strip()
+
     def halt_reset_readiness(self) -> HaltResetReadiness:
         """Whether ``reset_halt`` would be allowed, and why not.
 
@@ -1991,6 +2008,7 @@ class LiveTrader:
         """Process completed market-data events without live catch-up orders."""
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
+        self._run_requested_flatten()
         # Retry unacknowledged audit rows every cycle, not only when a new bar
         # arrives: a stalled feed would otherwise leave them queued
         # indefinitely while the database recovers.
@@ -4156,9 +4174,7 @@ class LiveTrader:
         # and stops are applied, before the strategy sees the bar. Mirrors
         # the backtest engine's ordering so a drawdown breach halts new
         # entries on the same cycle it's detected, not one cycle later ──
-        self._record_equity(
-            ts, raw_bars, used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol
-        )
+        self._record_equity(ts)
         if self._halted:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
@@ -4431,13 +4447,7 @@ class LiveTrader:
             get_cost_model=self._get_cost_model,
         )
 
-    def _record_equity(
-        self,
-        ts: datetime,
-        bars: dict[str, dict[str, float]],
-        *,
-        used_bar_quantity_by_symbol: dict[str, float] | None = None,
-    ) -> None:
+    def _record_equity(self, ts: datetime) -> None:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
         equity, _ = self._calc_account_snapshot()
@@ -4452,9 +4462,9 @@ class LiveTrader:
         ):
             self._flatten_account_and_halt(
                 ts,
-                drawdown,
-                bars,
-                used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
+                reason=REASON_DRAWDOWN_BREACH,
+                title="Max Drawdown Breach",
+                detail=f"drawdown={drawdown:.2%} <= -{self._risk_policy.max_drawdown_rate:.2%}",
             )
             equity, _ = self._calc_account_snapshot()
             drawdown = (
@@ -4523,30 +4533,25 @@ class LiveTrader:
                 self._status_window_equity = equity
 
     def _flatten_account_and_halt(
-        self,
-        ts: datetime,
-        drawdown: float,
-        bars: dict[str, dict[str, float]],
-        *,
-        used_bar_quantity_by_symbol: dict[str, float] | None = None,
+        self, ts: datetime, *, reason: str, title: str, detail: str
     ) -> None:
-        """Queue or submit exits and halt the run's account."""
+        """Queue or submit exits for every position, halt, and alert the outcome."""
         exit_queued = False
         if self._executor.simulation:
-            queue_market_exit_all(
-                self._positions,
-                reason=REASON_DRAWDOWN_BREACH,
-            )
+            queue_market_exit_all(self._positions, reason=reason)
             flattened = not self._positions
             exit_queued = not flattened
         else:
             actions = [
-                OrderIntent(action="close", symbol=symbol, reason=REASON_DRAWDOWN_BREACH)
+                OrderIntent(action="close", symbol=symbol, reason=reason)
                 for symbol in self._positions
             ]
+            # A position with no mark has no reference price, so its exit is
+            # skipped like any ungrouped close without one and it stays open.
             reference_bars = {
-                symbol: {"close": self._get_last_price(symbol, position)}
-                for symbol, position in self._positions.items()
+                symbol: {"close": self._last_prices[symbol]}
+                for symbol in self._positions
+                if symbol in self._last_prices
             }
             # Live emergency exits submit the full remaining quantity. Broker
             # execution reports remain authoritative for partial fills.
@@ -4559,6 +4564,7 @@ class LiveTrader:
         self._halted = True
         self._pending_decision = []
         self._pending_resting_since = {}
+        self._live_rebalance = None
         self._persist_state()
         if flattened and self._positions:
             outcome = f"closed all but {', '.join(sorted(self._positions))}, which remain open"
@@ -4572,18 +4578,50 @@ class LiveTrader:
             outcome = "flatten attempt failed"
         self._notify(
             "send_alert",
-            title=f"[{self._executor.strategy_name}] Max Drawdown Breach",
-            message=(
-                f"account_id={self._account_id} drawdown={drawdown:.2%} <= "
-                f"-{self._risk_policy.max_drawdown_rate:.2%} — {outcome} and halted"
-            ),
+            title=f"[{self._executor.strategy_name}] {title}",
+            message=f"account_id={self._account_id} {detail} — {outcome} and halted",
         )
         logger.warning(
-            "LiveTrader account %s halted at %s: drawdown %.2f%% breached "
-            "max_drawdown_rate=%.2f%% — %s",
+            "LiveTrader account %s halted at %s: %s %s — %s",
             self._account_id,
             ts,
-            drawdown * 100,
-            self._risk_policy.max_drawdown_rate * 100,
+            title,
+            detail,
             outcome,
         )
+
+    def _run_requested_flatten(self) -> None:
+        """Act on a pending ``request_flatten`` from the polling thread."""
+        with self._flatten_request_lock:
+            reason = self._flatten_request
+        if reason is None:
+            return
+        if self._halted:
+            self._clear_flatten_request()
+            logger.error("Operator flatten refused while halted: %s", reason)
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Operator Flatten Refused",
+                message=(
+                    f"account_id={self._account_id} {reason} — the account is halted, so "
+                    "its book may not be safe to trade from; nothing was submitted."
+                ),
+            )
+            return
+        if not self._executor.simulation and self._active_orders:
+            # Exits queue behind working orders, so those are cancelled first;
+            # a cancellation the venue has not confirmed retries next cycle.
+            self._cancel_active_orders()
+            if self._active_orders:
+                return
+        self._clear_flatten_request()
+        self._flatten_account_and_halt(
+            self._utc_now(),
+            reason=REASON_OPERATOR_FLATTEN,
+            title="Operator Flatten",
+            detail=reason,
+        )
+
+    def _clear_flatten_request(self) -> None:
+        with self._flatten_request_lock:
+            self._flatten_request = None

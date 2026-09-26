@@ -3237,7 +3237,7 @@ class TestLiveTrader:
 
         ts = datetime(2025, 1, 1, tzinfo=UTC)
         for _ in range(3):
-            runner._record_equity(ts, {})
+            runner._record_equity(ts)
 
         notifier.send_status.assert_called_once()
         kwargs = notifier.send_status.call_args.kwargs
@@ -4115,18 +4115,7 @@ class TestLiveTrader:
         callbacks: list[tuple[float, float, float]] = []
         runner._on_bar = lambda *args: callbacks.append((args[4], args[5], args[6]))
 
-        runner._record_equity(
-            datetime(2025, 1, 2, tzinfo=UTC),
-            {
-                "BTCUSDT": {
-                    "open": 100.0,
-                    "high": 100.0,
-                    "low": 100.0,
-                    "close": 100.0,
-                    "volume": 10_000.0,
-                }
-            },
-        )
+        runner._record_equity(datetime(2025, 1, 2, tzinfo=UTC))
 
         assert runner._positions["BTCUSDT"].pending_market_exit_reason == REASON_DRAWDOWN_BREACH
         assert runner._cash == pytest.approx(0.0)
@@ -6151,8 +6140,9 @@ class TestLiveExecutionLifecycle:
 
         first._flatten_account_and_halt(
             datetime(2025, 1, 2, tzinfo=UTC),
-            -0.2,
-            {"BTCUSDT": {"close": 80.0}},
+            reason=REASON_DRAWDOWN_BREACH,
+            title="Max Drawdown Breach",
+            detail="drawdown=-20.00%",
         )
 
         assert first._halted is True

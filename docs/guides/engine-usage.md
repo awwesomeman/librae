@@ -887,6 +887,14 @@ adapter at submission.
   `halt_reset_readiness()` reports the same answer without raising. See the
   recovery procedure in
   [the operational runbook](operational-runbook.md).
+- `LiveTrader.request_flatten(reason)` is the operator flatten: the same
+  close-everything-and-halt as a drawdown breach, with exits carrying reason
+  `operator_flatten`. It is safe from any thread because it only records the
+  request; the polling loop acts on it at the start of its next cycle, before
+  strategy evaluation, after cancelling any working order. A halted account
+  refuses it, since a halt can mean the book is not safe to trade from, and a
+  restart drops a pending request. Sim queues the exits for the next observed
+  open, as for a drawdown breach. `reset_halt()` is the resume path.
 - Volume-aware slippage (`CostModel.volume_impact_ticks`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `volume_impact_ticks > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 The backtest timeframe is inferred independently for each symbol. Every symbol
@@ -1000,7 +1008,8 @@ When no order or grouped execution is active, the checks repeat every
   configured-symbol snapshot halts. A first run with no checkpoint must be
   flat: broker exposure alone cannot reconstruct the engine's cash, accumulated
   entry costs, or risk epoch, so a non-flat first run halts and requires the
-  matching checkpoint or an operator flatten. Crypto spot uses base-asset
+  matching checkpoint or closing that exposure at the venue; `request_flatten`
+  closes only positions in the engine's own ledger. Crypto spot uses base-asset
   balance inventory, not the derivatives-only positions endpoint. A sell that
   reduces or closes owned inventory is valid; opening or adding a short is
   refused in every mode (see quantity and short feasibility above).
