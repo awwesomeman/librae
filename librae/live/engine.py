@@ -4840,7 +4840,7 @@ class LiveTrader:
         self._live_rebalance = None
         self._persist_state()
         if flattened and self._positions and set(self._positions) == held_before:
-            outcome = f"closed none; {', '.join(sorted(self._positions))} remain open"
+            outcome = f"no position fully closed; {', '.join(sorted(self._positions))} remain open"
         elif flattened and self._positions:
             outcome = f"closed all but {', '.join(sorted(self._positions))}, which remain open"
         elif flattened:
