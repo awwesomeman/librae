@@ -304,17 +304,6 @@ class ExecutionReport:
         return self.filled_quantity > EPSILON
 
 
-class OrderBelowVenueMinimumError(ValueError):
-    """``prepare_order`` refused a size below the venue's minimum amount or notional.
-
-    Adapters raise it only from that minimum check; every other preparation
-    failure, including a maximum, stays a plain ``ValueError``. The engine
-    skips an ungrouped reduce/close refused this way, because halting would
-    strand every other exit behind a remainder the venue will not take, and
-    keeps every other case fail-closed.
-    """
-
-
 class OrderAdapter(Protocol):
     """Required live order lifecycle and position-reconciliation gateway.
 
@@ -366,6 +355,17 @@ class BrokerUnavailableError(Exception):
     Anything else, including authentication and permission errors, must
     propagate unchanged: periodic reconciliation tolerates this type for a
     bounded number of rounds and fails closed on every other exception.
+    """
+
+
+class OrderBelowVenueMinimumError(ValueError):
+    """``prepare_order`` refused a size below the venue's minimum amount, notional or lot.
+
+    Adapters raise it only from that minimum check; every other preparation
+    failure, including a maximum, stays a plain ``ValueError``. The engine
+    skips an ungrouped reduce/close refused this way, because halting would
+    strand every other exit behind a remainder the venue will not take, and
+    keeps every other case fail-closed.
     """
 
 
