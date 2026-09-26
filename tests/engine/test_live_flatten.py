@@ -161,6 +161,7 @@ class TestBelowMinimumClose:
         assert "flatten attempt failed" not in breach["message"]
         assert "DUST" in breach["message"]
 
+    @pytest.mark.sdk_contract
     def test_flatten_skips_a_remainder_ccxt_rounds_to_zero(self):
         adapter = _crypto_adapter(zero_amount="DUST")
         trader, events, _ = _trader(adapter)
