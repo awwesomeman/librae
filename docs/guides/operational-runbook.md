@@ -127,8 +127,8 @@ Procedure it exercises:
    reconciliation alerts above. Until that round matches, marks and the
    max-drawdown circuit are paused, so watch the book manually.
    The round gates on positions and open orders only. Cash moved while
-   halted (a withdrawal, say) raises only Cash Reconciliation Drift, and the
-   local ledger is never overwritten from the broker, so sizing keeps using
+   halted (a withdrawal, say) raises at most Cash Reconciliation Drift, once
+   beyond its tolerance, and the local ledger is never overwritten from the broker, so sizing keeps using
    the old cash. Restore the balance before `reset_halt()`, or stop flat and
    start a new checkpoint with `account.initial_cash` set to the broker
    balance (see
