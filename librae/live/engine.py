@@ -284,8 +284,16 @@ def _bind_market_data_source(
             bars = base_fetcher(_symbol, tf, limit, drop_incomplete=drop_incomplete)
             if bars.empty:
                 return bars
+            # By time, never by bar count: a warmup spans far more bars than
+            # the endpoint accepts as a limit. Start one merge tolerance early
+            # so a settlement stamped just before the first bar still lands.
+            first_bar = pd.Timestamp(bars["ts"].iloc[0]) - _FUNDING_TS_TOLERANCE
             funding = _rates_or_none(
-                fetch_funding_rate_history, "funding", instrument.venue_symbol, limit=limit
+                fetch_funding_rate_history,
+                "funding",
+                instrument.venue_symbol,
+                since=int(first_bar.timestamp() * 1000),
+                limit=None,
             )
             if funding is None or funding.empty:
                 return bars
@@ -309,7 +317,7 @@ def _bind_market_data_source(
             bars = base_fetcher(_symbol, tf, limit, drop_incomplete=drop_incomplete)
             if bars.empty:
                 return bars
-            # Deliberately not the bar limit funding uses. Only the newest
+            # Deliberately not the bar window funding covers. Only the newest
             # bar ever accrues (the engine charges the current event, see
             # _apply_financing_cash_flows), so the fetch needs to reach back
             # one staleness bound, not across the warmup window -- and this
