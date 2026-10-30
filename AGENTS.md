@@ -35,3 +35,10 @@ general industry practice and these docs disagree, these docs win.
   writing, find the doc that already owns the concept and link to it; keep
   new text short and scannable. This includes rules: change the canonical
   doc above rather than restating a rule elsewhere.
+
+## Rules shared across repos
+
+Rules that are not specific to one repo live in the `AGENTS.md` of all four
+repos: quant-strategies, librae, factrix and quant-research-vault. Changing one
+here means changing the other three, each in its own language, style and
+workflow; skip a file that already has an equivalent rule.
