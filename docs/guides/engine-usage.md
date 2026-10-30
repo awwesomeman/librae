@@ -912,7 +912,10 @@ adapter at submission.
   [the operational runbook](operational-runbook.md).
 - Halt durability: every halt applies in memory, writes its checkpoint, and
   only then cancels, each cancel recording itself before it is sent; the alert
-  names a cancellation that fails. If the checkpoint write fails, nothing is
+  names a cancellation that fails. Each later cycle retries that cancellation
+  before any order work and stops there while it fails; so does a repeated
+  `halt()`, which raises until it runs through. A **Halt Cancellation
+  Completed** alert follows once no order is tracked. If the checkpoint write fails, nothing is
   cancelled yet, the halt alert still goes out naming the failure, the error
   propagates (to `halt()`'s caller, or as a poll-cycle error), and the run
   stays halted. A drawdown or operator flatten whose exits cannot be queued,
