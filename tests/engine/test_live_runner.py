@@ -5370,7 +5370,9 @@ class TestLiveExecutionLifecycle:
         assert self._placed(adapter) == [("BBB", "close")]
         assert complete is True
         [alert] = alerts
-        assert alert["title"].endswith("Free Balance Unavailable: AAA")
+        assert alert["title"].endswith("Unpriced Entry: AAA")
+        assert "could not be priced (KeyError: 'AAA')" in alert["message"]
+        assert "free balance" not in alert["message"]
         [skip] = [event for event in runtime_events if event.event_type == "decision_skipped"]
         assert skip.detail["reason"] == "free_balance_unavailable"
 
@@ -5397,7 +5399,7 @@ class TestLiveExecutionLifecycle:
         assert runner._active_orders == []
         [alert] = alerts
         assert alert["title"].endswith("Insufficient Free Balance: group 'pair'")
-        assert "needs 200.00 USDT" in alert["message"]
+        assert "2 legs need 200.00 USDT" in alert["message"]
         assert "group 'pair' cancelled" in alert["message"]
         [skip] = [event for event in runtime_events if event.event_type == "decision_skipped"]
         assert skip.detail["reason"] == "insufficient_free_balance"
@@ -5422,26 +5424,51 @@ class TestLiveExecutionLifecycle:
         assert self._placed(adapter) == [("AAA", "open"), ("BBB", "open")]
         adapter.get_balance.assert_called_once()
 
-    @pytest.mark.parametrize("exit_first", [True, False], ids=["exit-first", "entry-first"])
-    def test_rotation_funded_by_its_own_exit_is_sent_whole(self, exit_first):
+    def test_rotation_funded_by_its_own_exit_is_sent_whole(self):
         adapter = _mock_order_adapter()
         adapter.get_balance.return_value = self._broker_free(0.0)
         adapter.place_order.side_effect = self._filled
         runner = self._pair_runner(adapter)
         alerts = self._send_alerts(runner)
         runner._positions["BBB"] = self._held("BBB", group_id="rot")
-        legs = [
-            OrderIntent(action="close", symbol="BBB", group_id="rot"),
-            OrderIntent(action="long", symbol="AAA", quantity=1.0, group_id="rot"),
-        ]
 
         runner._execute_live_decision(
-            legs if exit_first else legs[::-1], self._bars("AAA", "BBB"), TEST_CLOCK_NOW
+            [
+                OrderIntent(action="close", symbol="BBB", group_id="rot"),
+                OrderIntent(action="long", symbol="AAA", quantity=1.0, group_id="rot"),
+            ],
+            self._bars("AAA", "BBB"),
+            TEST_CLOCK_NOW,
         )
 
-        assert sorted(self._placed(adapter)) == [("AAA", "open"), ("BBB", "close")]
+        assert self._placed(adapter) == [("BBB", "close"), ("AAA", "open")]
         assert alerts == []
         assert set(runner._positions) == {"AAA"}
+
+    def test_entry_first_rotation_needs_its_entry_funded_up_front(self):
+        """An exit queued after the entry has freed nothing when the entry goes out."""
+        adapter = _mock_order_adapter()
+        adapter.get_balance.return_value = self._broker_free(0.0)
+        adapter.place_order.side_effect = self._filled
+        runner = self._pair_runner(adapter)
+        alerts = self._send_alerts(runner)
+        runner._positions["BBB"] = self._held("BBB", group_id="rot")
+
+        runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="AAA", quantity=1.0, group_id="rot"),
+                OrderIntent(action="close", symbol="BBB", group_id="rot"),
+            ],
+            self._bars("AAA", "BBB"),
+            TEST_CLOCK_NOW,
+        )
+
+        adapter.place_order.assert_not_called()
+        assert runner._active_orders == []
+        assert set(runner._positions) == {"BBB"}
+        [alert] = alerts
+        assert "2 legs need 100.00 USDT" in alert["message"]
+        assert "group 'rot' cancelled" in alert["message"]
 
     def test_unfunded_rebalance_addition_stops_the_rebalance(self):
         adapter = _mock_order_adapter()
@@ -5493,6 +5520,51 @@ class TestLiveExecutionLifecycle:
         skips = [event for event in runtime_events if event.event_type == "decision_skipped"]
         assert len(skips) == 4
         assert self._placed(adapter) == [("BTCUSDT", "open")]
+
+    def test_a_different_refusal_for_the_same_symbol_alerts_again(self):
+        adapter = _mock_order_adapter()
+        runner = self._make_trader(_HoldStrategy(), adapter)
+        alerts = self._send_alerts(runner)
+        runner._last_prices = {"BTCUSDT": 100.0}
+
+        for hour, balance in enumerate(
+            (self._broker_free(50.0), BrokerUnavailableError("timeout"))
+        ):
+            if isinstance(balance, Exception):
+                adapter.get_balance.side_effect = balance
+            else:
+                adapter.get_balance.return_value = balance
+            runner._execute_live_decision(
+                [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)],
+                self._bars("BTCUSDT"),
+                TEST_CLOCK_NOW + timedelta(hours=hour),
+            )
+
+        assert [alert["title"].split("] ")[1] for alert in alerts] == [
+            "Insufficient Free Balance: BTCUSDT",
+            "Free Balance Unavailable: BTCUSDT",
+        ]
+
+    def test_refusals_under_fresh_group_ids_alert_once_and_stay_bounded(self):
+        adapter = _mock_order_adapter()
+        adapter.get_balance.return_value = self._broker_free(50.0)
+        runner = self._pair_runner(adapter)
+        alerts = self._send_alerts(runner)
+
+        for hour in range(5):
+            runner._execute_live_decision(
+                [
+                    OrderIntent(action="long", symbol="AAA", quantity=1.0, group_id=f"g{hour}"),
+                    OrderIntent(action="long", symbol="BBB", quantity=1.0, group_id=f"g{hour}"),
+                ],
+                self._bars("AAA", "BBB"),
+                TEST_CLOCK_NOW + timedelta(hours=hour),
+            )
+
+        adapter.place_order.assert_not_called()
+        assert len(alerts) == 1
+        # One key per refusal kind and symbol, however many group ids were refused.
+        assert len(runner._unfunded_entry_alerts) == 2
 
     def test_entry_without_a_balance_capability_is_submitted_with_a_warning(self, caplog):
         adapter = _mock_order_adapter()

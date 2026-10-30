@@ -545,16 +545,19 @@ for example when a withdrawal left the account holding less than the ledger.
 - An entry the free balance cannot cover, or whose requirement or balance
   cannot be read, is not submitted. Each time, a `decision_skipped` event
   (reason `insufficient_free_balance` or `free_balance_unavailable`) names the
-  requirement and the free balance or the error; the alert does too, but only
-  once per symbol or group until a later check passes or `reset_halt()`.
+  requirement and the free balance or the error. The alert does too, but only
+  once per cause and symbol until a check for that symbol passes or
+  `reset_halt()`.
 - Nothing halts. The orders queued after it still go out, and a target
   rebalance stops until the next decision.
-- A group is checked once, before its first leg is sent, against what all its
-  legs need net of what its own exits release. Its legs go out serially, so
-  withholding a later leg would leave the earlier ones unhedged, and a
-  rotation funded by its own exit passes whichever leg comes first. A group
-  that fails is cancelled whole, exit legs included, before anything is sent.
-  A group restored from a checkpoint is not rechecked.
+- A group is checked once, before its first leg is sent, since its legs go
+  out serially and withholding a later leg would leave the earlier ones
+  unhedged. Its entry legs are charged in full, and only the exits queued
+  before its first entry are credited: an exit queued after it has released
+  nothing when the entry goes out. A rotation funded by its own exit must
+  therefore list the exit first. A group that fails is cancelled whole, exit
+  legs included, before anything is sent. A group restored from a checkpoint
+  is not rechecked.
 - Ungrouped exits (`reduce`/`close`) are never checked.
 - An adapter without `get_balance` skips the check and logs a warning.
 

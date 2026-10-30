@@ -882,7 +882,7 @@ class LiveTrader:
         self._skipped_close_alerts: dict[tuple[str, str], float] = {}
         # Not checkpointed: a restart re-alerts once, and a group restored
         # mid-way is never rechecked, since its earlier legs may have filled.
-        self._unfunded_entry_alerts: set[str] = set()
+        self._unfunded_entry_alerts: set[tuple[str, str]] = set()
         self._groups_to_fund: set[str] = set()
         # Set only while a flatten submits its exits, before it halts the account.
         self._flatten_at: datetime | None = None
@@ -3983,11 +3983,9 @@ class LiveTrader:
         the entry too. Exits are never checked on their own, and the orders
         queued after a dropped entry still go out.
 
-        A group is checked once, at its first leg, against what all its legs
-        need net of what its own exits release: its legs go out serially, so
-        withholding a later leg would leave the earlier ones unhedged, and a
-        rotation whose exit funds its entry must not wait for that exit to
-        fill. A refused group is cancelled whole before any leg is sent.
+        A group is checked once, at its first leg, since its legs go out
+        serially and withholding a later leg would leave the earlier ones
+        unhedged. A refused group is cancelled whole before any leg is sent.
         Returns whether anything was dropped.
         """
         request = tracked.request
@@ -4013,33 +4011,31 @@ class LiveTrader:
                 subject,
             )
             return False
+        entry_symbols = {
+            leg.request.symbol for leg in legs if leg.request.position_effect in ("open", "add")
+        }
         currency = self._currency
         required: float | None = None
         free: float | None = None
-        read_error: Exception | None = None
+        error: Exception | None = None
         try:
-            required = sum(self._cash_needed_by(leg.request) for leg in legs)
-            balance = self._timed_order_call(lambda: adapter.get_balance(currency))
-            free = float(balance["free"])
-            if not isfinite(free):
-                raise ValueError(f"free balance is not finite: {free}")
+            required = self._cash_needed_up_front(legs)
         except Exception as exc:
-            free, read_error = None, exc
+            error = exc
         else:
-            if free + EPSILON >= required:
-                self._unfunded_entry_alerts.discard(subject)
-                return False
-        if read_error is None:
-            reason = "insufficient_free_balance"
-            title = "Insufficient Free Balance"
-            cause = f"the broker free balance is {free:.2f} {currency}"
-        else:
-            reason = "free_balance_unavailable"
-            title = "Free Balance Unavailable"
-            cause = (
-                "the broker free balance could not be read "
-                f"({type(read_error).__name__}: {read_error})"
-            )
+            try:
+                balance = self._timed_order_call(lambda: adapter.get_balance(currency))
+                free = float(balance["free"])
+                if not isfinite(free):
+                    raise ValueError(f"free balance is not finite: {free}")
+            except Exception as exc:
+                free, error = None, exc
+            else:
+                if free + EPSILON >= required:
+                    self._unfunded_entry_alerts = {
+                        key for key in self._unfunded_entry_alerts if key[1] not in entry_symbols
+                    }
+                    return False
 
         scope = "other orders remain eligible"
         if self._live_rebalance is not None:
@@ -4051,13 +4047,29 @@ class LiveTrader:
             scope = f"group {group_id!r} cancelled, other groups unaffected"
         for leg in legs:
             self._cancel_tracked_order(leg)
-        need = f"{required:.2f} {currency}" if required is not None else "an unpriced amount"
         if group_id is None:
             what = f"{request.side} {request.quantity:g} to {request.position_effect}"
+            needs = "needs"
         else:
-            what = f"{len(legs)} legs"
-        message = f"{what} needs {need} but {cause}; not submitted, {scope}."
-        logger.warning("%s for %s: %s", title, subject, message, exc_info=read_error)
+            what, needs = f"{len(legs)} legs", "need"
+        failure = f"{type(error).__name__}: {error}"
+        if required is None:
+            reason, title = "free_balance_unavailable", "Unpriced Entry"
+            outcome = f"{what} could not be priced ({failure})"
+        elif error is not None:
+            reason, title = "free_balance_unavailable", "Free Balance Unavailable"
+            outcome = (
+                f"{what} {needs} {required:.2f} {currency} but the broker free balance "
+                f"could not be read ({failure})"
+            )
+        else:
+            reason, title = "insufficient_free_balance", "Insufficient Free Balance"
+            outcome = (
+                f"{what} {needs} {required:.2f} {currency} but the broker free balance "
+                f"is {free:.2f} {currency}"
+            )
+        message = f"{outcome}; not submitted, {scope}."
+        logger.warning("%s for %s: %s", title, subject, message, exc_info=error)
         if self._on_runtime_event:
             self._on_runtime_event(
                 RuntimeEvent(
@@ -4074,14 +4086,31 @@ class LiveTrader:
                     },
                 )
             )
-        if subject not in self._unfunded_entry_alerts:
-            self._unfunded_entry_alerts.add(subject)
+        # Keyed by symbol rather than group id, which may be new every decision.
+        alert_keys = {(title, symbol) for symbol in entry_symbols}
+        if not alert_keys <= self._unfunded_entry_alerts:
+            self._unfunded_entry_alerts |= alert_keys
             self._notify(
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] {title}: {subject}",
                 message=message,
             )
         return True
+
+    def _cash_needed_up_front(self, legs: list[TrackedOrder]) -> float:
+        """Cash *legs* need from the account when their first entry goes out.
+
+        Only exits queued before that entry are credited: one queued after it
+        has released nothing yet when the entry is placed.
+        """
+        need = 0.0
+        entry_reached = False
+        for leg in legs:
+            is_entry = leg.request.position_effect in ("open", "add")
+            entry_reached = entry_reached or is_entry
+            if is_entry or not entry_reached:
+                need += self._cash_needed_by(leg.request)
+        return need
 
     def _cash_needed_by(self, request: OrderRequest) -> float:
         """Cash an order takes from the account, negative for what an exit releases."""
