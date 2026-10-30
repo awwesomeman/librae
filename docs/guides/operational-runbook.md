@@ -262,10 +262,11 @@ A halt or Halt Persisted alert that says `cancelling tracked orders failed
 (<error>)` is recorded, but its cancellation stopped at that error, so orders
 it did not reach keep working. Every later cycle retries the cancellation and
 does nothing else until it runs through, so a Poll Error alert follows if the
-error persists; **Halt Cancellation Completed** reports that it reached every
-tracked order. A failure while the run starts stops it instead, and the next
-start retries the cancellation. Meanwhile cancel at the venue anything that
-must not fill, and find the cause before `reset_halt()`.
+error persists. **Halt Cancellation Completed** follows only once no order is
+tracked; until then cancel at the venue anything that must not fill. A failure
+while the run starts stops it instead; the next start cancels tracked orders
+again unless every one is a recovery exit, and those keep working. Find the
+cause before `reset_halt()`.
 
 A process that exits before **Halt Persisted** restarts from the last written
 checkpoint, unhalted: nothing in the engine can recover a halt the store never

@@ -1913,17 +1913,17 @@ class LiveTrader:
             return
         if self._halt_cancels_pending:
             # A recorded halt owes a cancellation only after one failed, and
-            # an alert named that failure.
+            # an alert named that failure. It stays owed while any order is
+            # tracked: a cancel the venue has not confirmed may still fill.
             self._cancel_active_orders()
+            if self._active_orders:
+                return
             self._halt_cancels_pending = False
             logger.warning("Halt cancellation completed after an earlier failure")
             self._notify(
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] Halt Cancellation Completed",
-                message=(
-                    "The cancellation that failed earlier has now reached every tracked "
-                    f"order; {len(self._active_orders)} remain tracked."
-                ),
+                message="The cancellation that failed earlier is done; no order is tracked.",
             )
 
     def _fail_group_or_halt(
@@ -2031,6 +2031,8 @@ class LiveTrader:
                     f"another live process already owns state_key={self._state_key!r}"
                 )
             self._lease_acquired = True
+            # Not persisted: a start decides from the checkpoint, as a new process does.
+            self._halt_cancels_pending = False
             restored_halted = self._halted
             try:
                 if self._halted and not self._has_active_recovery_orders():

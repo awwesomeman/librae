@@ -301,6 +301,53 @@ class TestHaltCancellationFailure:
         assert trader._active_orders == []
         assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
 
+    def test_it_is_not_reported_done_while_an_order_is_still_tracked(self):
+        adapter = _resting_adapter()
+        trader, _, alerts = _trader(adapter)
+        _buy_two(trader)
+        answers = adapter.get_order.side_effect
+        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
+        with pytest.raises(ValueError, match="order id changed"):
+            trader.halt("desk asked to stop")
+
+        adapter.get_order.side_effect = answers
+        cancels = adapter.cancel_order.side_effect
+        # Swallowed per order: the retry runs through with AAA still working.
+        adapter.cancel_order.side_effect = RuntimeError("venue busy")
+        trader._poll_cycle()
+
+        assert [order.request.symbol for order in trader._active_orders] == ["AAA"]
+        assert _titled(alerts, "Halt Cancellation Completed") == []
+
+        adapter.cancel_order.side_effect = cancels
+        trader._poll_cycle()
+        trader._poll_cycle()
+
+        assert trader._active_orders == []
+        assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
+
+    def test_a_reset_leaves_no_cancellation_owed(self):
+        adapter = _resting_adapter()
+        trader, _, alerts = _trader(adapter)
+        trader._positions = {}
+        _buy_two(trader)
+        answers = adapter.get_order.side_effect
+        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
+        with pytest.raises(ValueError, match="order id changed"):
+            trader.halt("desk asked to stop")
+        # The orders resolve before any retry, so the operator may reset.
+        trader._active_orders = []
+        adapter.get_order.side_effect = answers
+        trader.reset_halt()
+
+        _buy_two(trader)
+        adapter.cancel_order.reset_mock()
+        trader._retry_halt()
+
+        adapter.cancel_order.assert_not_called()
+        assert not any(order.cancel_requested for order in trader._active_orders)
+        assert _titled(alerts, "Halt Cancellation Completed") == []
+
 
 class TestFlattenCheckpointFailure:
     def test_an_outage_still_halts_and_alerts_then_the_exits_go_out(self):
