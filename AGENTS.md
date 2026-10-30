@@ -21,8 +21,7 @@ general industry practice and these docs disagree, these docs win.
 - **Inventing or over-building**: for a non-trivial design, start from the
   field's mainstream practice (official docs, widely adopted libraries,
   standard references) rather than a home-grown scheme, then trim it to the
-  product boundary in `architecture.md`. No abstractions or options for needs
-  that have not appeared.
+  product boundary in `architecture.md`.
 - **No AI attribution** in commits or squash messages: no `Co-Authored-By`,
   no "Generated with", no `Signed-off-by`.
 - **Commit identity**: if `git config user.email` is empty, ask instead of
