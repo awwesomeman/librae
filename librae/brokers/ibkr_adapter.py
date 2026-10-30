@@ -1111,7 +1111,8 @@ class IBKRAdapter:
         available to confirm ``accountSummary()``'s tag semantics match what's
         assumed here (``TotalCashValue``, per-currency). Based on ib_async's
         public docs only; confirm against a real session before relying on
-        this for cash-drift alerting (``LiveTrader._reconcile_cash``).
+        this for cash-drift alerting or the free-balance check before an
+        entry, which both read it through ``LiveTrader``.
         """
         self._require_auth()
         self._require_connected()

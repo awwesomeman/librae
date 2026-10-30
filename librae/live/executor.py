@@ -344,7 +344,11 @@ class OrderAdapter(Protocol):
 
 
 class BalanceReader(Protocol):
-    """Optional account-balance capability used for live reconciliation."""
+    """Optional account-balance capability.
+
+    Live mode reads it for cash reconciliation and for the free-balance check
+    before an entry order; without it neither runs.
+    """
 
     def get_balance(self, currency: str) -> BrokerBalance: ...
 

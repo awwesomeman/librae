@@ -76,7 +76,9 @@ def _mock_order_adapter(mock_class: type[MagicMock] = MagicMock) -> MagicMock:
     """order_adapter mock with realistic flat get_position()/get_balance() —
     a bare MagicMock's auto-generated return values are truthy/float-coercible
     by default, which _reconcile_positions()/_reconcile_cash() would misread
-    as real broker state (an open position, a MagicMock "total") at startup."""
+    as real broker state (an open position, a MagicMock "total") at startup.
+    The balance matches _test_cfg's initial cash, so it funds every entry the
+    ledger sizes."""
     adapter = mock_class()
     adapter.get_position.return_value = {
         "symbol": "",
@@ -84,7 +86,7 @@ def _mock_order_adapter(mock_class: type[MagicMock] = MagicMock) -> MagicMock:
         "avg_price": 0,
         "unrealized_pnl": 0,
     }
-    adapter.get_balance.return_value = {"free": 0.0, "used": 0.0, "total": 0.0}
+    adapter.get_balance.return_value = {"free": 100_000.0, "used": 0.0, "total": 100_000.0}
     adapter.find_order.return_value = None
     adapter.list_open_orders.return_value = []
     adapter.prepare_order.side_effect = lambda signal: signal
@@ -4196,13 +4198,14 @@ class TestLiveExecutionLifecycle:
         clock=None,
         on_ready=None,
         on_runtime_event=None,
+        cost_model: CostModel | None = None,
     ) -> LiveTrader:
         trader = LiveTrader(
             strategy,
             _simple_feature_fn,
             config=config or _test_cfg(mode="live"),
             adapter=lambda *a, **kw: _make_ohlcv_df(),
-            cost_model=_zero_cost_model(),
+            cost_model=cost_model or _zero_cost_model(),
             order_adapter=adapter,
             on_bar=None,
             on_position_event=None,
@@ -4699,7 +4702,7 @@ class TestLiveExecutionLifecycle:
             "size": 500.0 if request.symbol == "AAA" else 0.0,
             "avg_price": 100.0,
         }
-        adapter.get_balance.return_value = {"total": 50_000.0}
+        adapter.get_balance.return_value = {"free": 50_000.0, "used": 0.0, "total": 50_000.0}
 
         restored = self._make_trader(
             _HoldStrategy(),
@@ -5084,6 +5087,203 @@ class TestLiveExecutionLifecycle:
         assert runner._halted is False
         assert set(runner._positions) == {"SOLO"}
         assert "no open position" in runtime_events[0].detail["message"]
+
+    @staticmethod
+    def _broker_free(free: float) -> dict[str, float]:
+        return {"free": free, "used": 0.0, "total": free}
+
+    @staticmethod
+    def _send_alerts(runner: LiveTrader) -> list[dict]:
+        alerts: list[dict] = []
+        runner._notify = lambda method, **kwargs: (
+            alerts.append(kwargs) if method == "send_alert" else None
+        )
+        return alerts
+
+    def test_entry_short_of_the_broker_free_balance_is_not_submitted(self):
+        adapter = _mock_order_adapter()
+        adapter.get_balance.return_value = self._broker_free(50.0)
+        runtime_events = []
+        runner = self._make_trader(_HoldStrategy(), adapter, on_runtime_event=runtime_events.append)
+        alerts = self._send_alerts(runner)
+        runner._last_prices = {"BTCUSDT": 100.0}
+
+        complete = runner._execute_live_decision(
+            [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)],
+            {"BTCUSDT": {"close": 100.0, "volume": 10_000.0}},
+            TEST_CLOCK_NOW,
+        )
+
+        adapter.place_order.assert_not_called()
+        adapter.get_balance.assert_called_once_with("USDT")
+        assert complete is True
+        assert runner._halted is False
+        assert runner._active_orders == []
+        assert runner._positions == {}
+        [alert] = alerts
+        assert alert["title"].endswith("Insufficient Free Balance: BTCUSDT")
+        assert "needs 100.00 USDT" in alert["message"]
+        assert "free balance is 50.00 USDT" in alert["message"]
+        assert runtime_events[-1].detail["reason"] == "insufficient_free_balance"
+
+    def test_entry_requirement_is_the_margin_and_costs_the_ledger_debits(self):
+        """A perpetual at 10x needs a tenth of its notional, not all of it."""
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report(quantity=10.0, average=100.0)
+        perpetual = CostModel(
+            multiplier=1.0,
+            commission_rate=0.001,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+            long_margin_rate=0.1,
+            short_margin_rate=0.1,
+            long_margin_mode="dynamic",
+            short_margin_mode="dynamic",
+        )
+        runner = self._make_trader(_HoldStrategy(), adapter, cost_model=perpetual)
+        runner._last_prices = {"BTCUSDT": 100.0}
+        bars = {"BTCUSDT": {"close": 100.0, "volume": 10_000.0}}
+        entry = [OrderIntent(action="long", symbol="BTCUSDT", quantity=10.0)]
+
+        # 10 x 100 notional at a 0.1 margin rate, plus 0.1% commission.
+        adapter.get_balance.return_value = self._broker_free(101.0)
+        runner._execute_live_decision(entry, bars, TEST_CLOCK_NOW)
+        adapter.get_balance.return_value = self._broker_free(100.9)
+        runner._execute_live_decision(entry, bars, TEST_CLOCK_NOW + timedelta(hours=1))
+
+        assert adapter.place_order.call_count == 1
+        assert runner._positions["BTCUSDT"].quantity == 10.0
+
+    @pytest.mark.parametrize(
+        ("balance", "title"),
+        [
+            ({"free": 0.0, "used": 0.0, "total": 0.0}, "Insufficient Free Balance: AAA"),
+            (BrokerUnavailableError("timeout"), "Free Balance Unavailable: AAA"),
+            (RuntimeError("permission denied"), "Free Balance Unavailable: AAA"),
+        ],
+        ids=["zero-free", "unavailable", "unclassified-error"],
+    )
+    def test_exit_goes_out_behind_an_entry_the_free_balance_cannot_fund(self, balance, title):
+        adapter = _mock_order_adapter()
+        if isinstance(balance, Exception):
+            adapter.get_balance.side_effect = balance
+        else:
+            adapter.get_balance.return_value = balance
+        adapter.place_order.return_value = _broker_report(order_id="exit-1", average=100.0)
+        runner = self._make_trader(
+            _HoldStrategy(), adapter, config=_test_cfg(mode="live", symbols=["AAA", "BBB"])
+        )
+        alerts = self._send_alerts(runner)
+        runner._last_prices = {"AAA": 100.0, "BBB": 100.0}
+        runner._positions["BBB"] = PositionState(
+            symbol="BBB",
+            side="long",
+            entry_price=100.0,
+            quantity=1.0,
+            entry_at=TEST_CLOCK_NOW,
+            periods_held=1,
+            entry_commission=0.0,
+            entry_slippage=0.0,
+            entry_tax=0.0,
+            total_entry_cost=100.0,
+        )
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="AAA", quantity=1.0),
+                OrderIntent(action="close", symbol="BBB"),
+            ],
+            {
+                "AAA": {"close": 100.0, "volume": 10_000.0},
+                "BBB": {"close": 100.0, "volume": 10_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        [signal] = [call.args[0] for call in adapter.place_order.call_args_list]
+        assert (signal["canonical_symbol"], signal["position_effect"]) == ("BBB", "close")
+        # Only the entry reads the balance.
+        adapter.get_balance.assert_called_once_with("USDT")
+        assert complete is True
+        assert runner._halted is False
+        assert runner._positions == {}
+        [alert] = alerts
+        assert alert["title"].endswith(title)
+        assert "needs 100.00 USDT" in alert["message"]
+        if isinstance(balance, Exception):
+            assert f"{type(balance).__name__}: {balance}" in alert["message"]
+
+    def test_unfunded_grouped_entry_cancels_its_group(self):
+        adapter = _mock_order_adapter()
+        adapter.get_balance.return_value = self._broker_free(50.0)
+        runner = self._make_trader(
+            _HoldStrategy(), adapter, config=_test_cfg(mode="live", symbols=["AAA", "BBB"])
+        )
+        alerts = self._send_alerts(runner)
+        runner._last_prices = {"AAA": 100.0, "BBB": 100.0}
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="AAA", quantity=1.0, group_id="pair"),
+                OrderIntent(action="long", symbol="BBB", quantity=1.0, group_id="pair"),
+            ],
+            {
+                "AAA": {"close": 100.0, "volume": 10_000.0},
+                "BBB": {"close": 100.0, "volume": 10_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        adapter.place_order.assert_not_called()
+        assert complete is True
+        assert runner._halted is False
+        assert runner._active_orders == []
+        [alert] = alerts
+        assert "group 'pair' cancelled" in alert["message"]
+
+    def test_unfunded_rebalance_addition_stops_the_rebalance(self):
+        adapter = _mock_order_adapter()
+        adapter.get_balance.return_value = self._broker_free(0.0)
+        runner = self._make_trader(
+            _HoldStrategy(), adapter, config=_test_cfg(mode="live", symbols=["AAA", "BBB"])
+        )
+        alerts = self._send_alerts(runner)
+        runner._last_prices = {"AAA": 100.0, "BBB": 100.0}
+
+        complete = runner._execute_live_decision(
+            PortfolioWeights(weights={"AAA": 0.5, "BBB": 0.5}),
+            {
+                "AAA": {"close": 100.0, "volume": 10_000.0},
+                "BBB": {"close": 100.0, "volume": 10_000.0},
+            },
+            TEST_CLOCK_NOW,
+        )
+
+        adapter.place_order.assert_not_called()
+        assert complete is True
+        assert runner._halted is False
+        assert runner._live_rebalance is None
+        [alert] = alerts
+        assert "target rebalance stopped" in alert["message"]
+
+    def test_entry_without_a_balance_capability_is_submitted_with_a_warning(self, caplog):
+        adapter = _mock_order_adapter()
+        del adapter.get_balance
+        adapter.place_order.return_value = _broker_report(average=100.0)
+        runner = self._make_trader(_HoldStrategy(), adapter)
+        runner._last_prices = {"BTCUSDT": 100.0}
+
+        with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
+            runner._execute_live_decision(
+                [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)],
+                {"BTCUSDT": {"close": 100.0, "volume": 10_000.0}},
+                TEST_CLOCK_NOW,
+            )
+
+        adapter.place_order.assert_called_once()
+        assert "Free balance check skipped for the BTCUSDT entry" in caplog.text
 
     def test_quantity_less_grouped_closes_match_validation_sim_and_live(self):
         ts = datetime(2025, 1, 2, tzinfo=UTC)

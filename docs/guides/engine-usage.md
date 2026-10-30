@@ -534,6 +534,24 @@ work. A placement that raises has one of two outcomes:
   *Ambiguous Order Placement*, grouped or not, and the order stays tracked,
   so `reset_halt()` refuses until it resolves.
 
+Before an `open`/`add` order is submitted, its requirement is checked against
+the broker's free balance in the account currency (`get_balance()["free"]`).
+The requirement is `CostModel.estimate_entry_outlay` at the limit price or the
+last close: the margin plus costs the ledger debits, so a margin product needs
+its initial margin, not its notional. The ledger still sizes every order and
+is never overwritten: the check never resizes an entry, it only withholds one,
+for example when a withdrawal left the account holding less than the ledger.
+
+- An entry the free balance cannot cover, or whose balance cannot be read, is
+  not submitted: a `decision_skipped` event (reason `insufficient_free_balance`
+  or `free_balance_unavailable`) and an alert name the symbol, the requirement,
+  and the free balance or the read error.
+- Nothing halts. The orders queued after it still go out; a grouped entry
+  cancels the rest of its group, exit legs included, and a target rebalance
+  stops until the next decision.
+- Exits (`reduce`/`close`) are never checked themselves.
+- An adapter without `get_balance` skips the check and logs a warning.
+
 While an order remains active, polling still refreshes the OHLCV cache,
 heartbeat, and staleness state, but it does not run a new strategy decision.
 An optional local wall-clock timeout cancels an over-age order, preserves any
@@ -1075,7 +1093,9 @@ When no order or grouped execution is active, the checks repeat every
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total
   semantics vary by account mode, so blindly overwriting can corrupt a valid
   ledger. A missing capability or unreadable balance is logged explicitly;
-  best-effort means non-fatal, not silent.
+  best-effort means non-fatal, not silent. Instead, an entry the free
+  balance cannot fund is withheld at submission (see
+  [the order contract](#related-multi-leg-order-contract)).
 
 A periodic round whose broker read raises `BrokerUnavailableError` (the
 adapter's statement that the venue did not answer; see

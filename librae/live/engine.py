@@ -3853,6 +3853,10 @@ class LiveTrader:
             if not tracked.placement_attempted:
                 if not submit_planned:
                     return
+                if request.position_effect in ("open", "add") and self._drop_unfunded_entry(
+                    tracked
+                ):
+                    continue
                 # Persist placement-attempted before network I/O. A crash in
                 # the following call is recovered by client-order lookup and
                 # never blindly retried.
@@ -3962,6 +3966,101 @@ class LiveTrader:
                 return
             if report.status != "filled":
                 return
+
+    def _drop_unfunded_entry(self, tracked: TrackedOrder) -> bool:
+        """Drop an unsubmitted entry the broker's free balance cannot fund.
+
+        The ledger sizes every order and is never overwritten from the broker,
+        so cash that left the account (a withdrawal, a loss booked outside the
+        ledger, another strategy on the account) would still size entries, and
+        a margin venue may accept such an order at a higher effective leverage
+        than the strategy sized for. The requirement is the outlay the ledger
+        debits for the entry, margin plus costs. An unreadable balance drops
+        the entry too. Exits are never checked, and the orders queued after a
+        dropped entry still go out. Returns whether the entry was dropped.
+        """
+        request = tracked.request
+        adapter = self._executor.get_order_adapter(request.symbol)
+        if not callable(getattr(adapter, "get_balance", None)):
+            logger.warning(
+                "Free balance check skipped for the %s entry: order adapter has no "
+                "get_balance capability",
+                request.symbol,
+            )
+            return False
+        price = (
+            request.limit_price
+            if request.limit_price is not None
+            else self._last_prices[request.symbol]
+        )
+        required = self._get_cost_model(request.symbol).estimate_entry_outlay(
+            price,
+            request.quantity,
+            "long" if request.side == "buy" else "short",
+        )
+        currency = self._currency
+        free: float | None = None
+        read_error: Exception | None = None
+        try:
+            free = float(adapter.get_balance(currency)["free"])
+            if not isfinite(free):
+                raise ValueError(f"free balance is not finite: {free}")
+        except Exception as exc:
+            free, read_error = None, exc
+        else:
+            if free + EPSILON >= required:
+                return False
+        if read_error is None:
+            reason = "insufficient_free_balance"
+            title = "Insufficient Free Balance"
+            cause = f"the broker free balance is {free:.2f} {currency}"
+        else:
+            reason = "free_balance_unavailable"
+            title = "Free Balance Unavailable"
+            cause = (
+                "the broker free balance could not be read "
+                f"({type(read_error).__name__}: {read_error})"
+            )
+
+        scope = "other orders remain eligible"
+        if self._live_rebalance is not None:
+            # Replanning would queue the same leg again; the next decision
+            # replans the targets from the current book.
+            self._live_rebalance = None
+            scope = "the target rebalance stopped"
+        self._cancel_tracked_order(tracked)
+        group_id = request.group_id
+        if group_id is not None:
+            for sibling in list(self._active_orders):
+                if sibling.request.group_id == group_id:
+                    self._cancel_tracked_order(sibling)
+            scope = f"group {group_id!r} cancelled, other groups unaffected"
+        message = (
+            f"{request.side} {request.quantity:g} to {request.position_effect} needs "
+            f"{required:.2f} {currency} but {cause}; not submitted, {scope}."
+        )
+        logger.warning("%s for %s: %s", title, request.symbol, message, exc_info=read_error)
+        if self._on_runtime_event:
+            self._on_runtime_event(
+                RuntimeEvent(
+                    ts=self._utc_now(),
+                    event_type="decision_skipped",
+                    symbol=request.symbol,
+                    detail={
+                        "reason": reason,
+                        "quantity": request.quantity,
+                        "required": required,
+                        "free": free,
+                        "message": message,
+                    },
+                )
+            )
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] {title}: {request.symbol}",
+            message=message,
+        )
+        return True
 
     def _live_order_timed_out(self, tracked: TrackedOrder) -> bool:
         """Return whether a placement-attempted order exceeded its local timeout."""

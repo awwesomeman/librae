@@ -92,6 +92,7 @@ Order placement alerts (rules in
 |---|---|---|
 | Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled. A failed flatten or drawdown exit alerts as Close Rejected or Close Cancelled instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted |
 | Ambiguous Order Placement | Placement failed with an error the adapter could not classify and the client-id lookup found nothing: the order may still exist at the venue; halted | Check the broker's order history for the client order id. `reset_halt()` refuses (`unresolved_broker_orders`) until the engine resolves the order |
+| Insufficient Free Balance, Free Balance Unavailable | An entry was not submitted: the broker's free balance was below its requirement, or could not be read (the alert names the amounts or the error). The other queued orders, exits included, still went out, except the rest of a grouped entry's group; not halted | Restore the balance, or stop flat and start from the broker balance (see the `reset_halt()` step of [Kill-switch rehearsal](#kill-switch-rehearsal)); for an unreadable balance, fix what the error names |
 
 ## Kill-switch rehearsal
 
@@ -137,7 +138,9 @@ Procedure it exercises:
    The round gates on positions and open orders only. Cash moved while
    halted (a withdrawal, say) raises at most Cash Reconciliation Drift, once
    beyond its tolerance, and the local ledger is never overwritten from the broker, so sizing keeps using
-   the old cash. Restore the balance before `reset_halt()`, or stop flat and
+   the old cash. Entries are capped by the broker's free balance, though: an
+   entry it cannot fund is withheld whole and alerts Insufficient Free
+   Balance, while exits still go out. Restore the balance before `reset_halt()`, or stop flat and
    start a new checkpoint with `account.initial_cash` set to the broker
    balance (see
    [Development checkpoint compatibility](optional-infrastructure.md#development-checkpoint-compatibility)).
