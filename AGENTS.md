@@ -18,6 +18,10 @@ general industry practice and these docs disagree, these docs win.
 - **Scope creep**: don't add a feature because it seems useful or fits the
   task nearby. Check it against the product boundary in `architecture.md`;
   if it is unclear whether Librae should own it, ask.
+- **Inventing or over-building**: for a non-trivial design, start from the
+  field's mainstream practice (official docs, widely adopted libraries,
+  standard references) rather than a home-grown scheme, then trim it to the
+  product boundary in `architecture.md`.
 - **No AI attribution** in commits or squash messages: no `Co-Authored-By`,
   no "Generated with", no `Signed-off-by`.
 - **Commit identity**: if `git config user.email` is empty, ask instead of
@@ -30,3 +34,10 @@ general industry practice and these docs disagree, these docs win.
   writing, find the doc that already owns the concept and link to it; keep
   new text short and scannable. This includes rules: change the canonical
   doc above rather than restating a rule elsewhere.
+
+## Rules shared across repos
+
+Rules that are not specific to one repo live in the `AGENTS.md` of all four
+repos: quant-strategies, librae, factrix and quant-research-vault. Changing one
+here means changing the other three, each in its own language, style and
+workflow; skip a file that already has an equivalent rule.
