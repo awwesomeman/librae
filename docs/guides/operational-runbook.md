@@ -256,11 +256,16 @@ A halt whose checkpoint write fails is still applied in memory
 | Alert | Meaning | Action |
 |---|---|---|
 | Any halt alert that says `halt not persisted (<error>)`; a flatten's alert may also say `exit submission failed` | Halted in memory; the state store refused the checkpoint. The halt has cancelled nothing yet, and a flatten that says `exit submission failed` submitted nothing. Every later cycle retries the checkpoint and does nothing else until it succeeds, so a Poll Error alert follows if the outage lasts; `halt()` raises the same error until then | Keep the process running and restore the state store. Orders resting at the venue keep working meanwhile: cancel at the venue anything that must not fill |
-| Halt Persisted | The retry succeeded; a restart now resumes halted. A plain halt's cancellations go out now; a flatten's exits, including ones it could not record before, go out and keep working | Continue the normal halt review; `reset_halt()` stops refusing with `halt_not_persisted` |
+| Halt Persisted | The retry succeeded; a restart now resumes halted. A plain halt's cancellations go out now, and the alert names one that fails (below); a flatten's exits, including ones it could not record before, go out and keep working | Continue the normal halt review; `reset_halt()` stops refusing with `halt_not_persisted` |
 
-A halt alert that says `cancelling tracked orders failed (<error>)` is
-recorded, but its cancellation stopped at that error: cancel at the venue
-whatever is still resting, and find the cause before `reset_halt()`.
+A halt or Halt Persisted alert that says `cancelling tracked orders failed
+(<error>)` is recorded, but its cancellation stopped at that error, so orders
+it did not reach keep working. Every later cycle retries the cancellation and
+does nothing else until it runs through, so a Poll Error alert follows if the
+error persists; **Halt Cancellation Completed** reports that it reached every
+tracked order. A failure while the run starts stops it instead, and the next
+start retries the cancellation. Meanwhile cancel at the venue anything that
+must not fill, and find the cause before `reset_halt()`.
 
 A process that exits before **Halt Persisted** restarts from the last written
 checkpoint, unhalted: nothing in the engine can recover a halt the store never

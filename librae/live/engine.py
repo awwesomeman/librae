@@ -853,7 +853,7 @@ class LiveTrader:
         self._halted: bool = False
         # A halt the store has not recorded: a restart would resume unhalted.
         self._halt_unpersisted = False
-        # Whether that halt still owes the cancellation it skipped.
+        # Whether a halt still owes the live cancellation it skipped or that failed.
         self._halt_cancels_pending = False
         self._pending_decision: StrategyDecision = []
         # Bar timestamp each pending intent first rested on, keyed by symbol.
@@ -1850,11 +1850,7 @@ class LiveTrader:
         self._live_rebalance = None
         failure, note = self._persist_halt(cancel_on_retry=True)
         if failure is None and not self._executor.simulation:
-            try:
-                self._cancel_active_orders()
-            except Exception as exc:
-                failure = exc
-                note = f"; cancelling tracked orders failed ({type(exc).__name__}: {exc})"
+            failure, note = self._cancel_for_halt()
         logger.error("%s: %s", title, message)
         self._notify(
             "send_alert",
@@ -1874,7 +1870,7 @@ class LiveTrader:
             self._persist_state()
         except Exception as exc:
             self._halt_unpersisted = True
-            self._halt_cancels_pending = cancel_on_retry
+            self._halt_cancels_pending = cancel_on_retry and not self._executor.simulation
             # The caller re-raises it, which logs the traceback.
             logger.error("Halt checkpoint not written: %s", exc)
             return exc, (
@@ -1883,26 +1879,52 @@ class LiveTrader:
             )
         return None, ""
 
-    def _retry_halt_checkpoint(self) -> None:
-        """Record a halt the store missed before any other work in the cycle.
-
-        A failure propagates and stops the cycle like any checkpoint failure,
-        so no order work runs on a state the store never saw. Once recorded,
-        the cancellation the halt skipped goes out.
-        """
-        if not self._halt_unpersisted:
-            return
-        self._persist_state()
-        self._halt_unpersisted = False
-        logger.warning("Halt checkpoint persisted")
-        self._notify(
-            "send_alert",
-            title=f"[{self._executor.strategy_name}] Halt Persisted",
-            message="The halt is now recorded; a restart resumes halted.",
-        )
-        if self._halt_cancels_pending and not self._executor.simulation:
-            self._halt_cancels_pending = False
+    def _cancel_for_halt(self) -> tuple[Exception | None, str]:
+        """Cancel every tracked order, or keep the cancellation owed and name its failure."""
+        try:
             self._cancel_active_orders()
+        except Exception as exc:
+            self._halt_cancels_pending = True
+            return exc, f"; cancelling tracked orders failed ({type(exc).__name__}: {exc})"
+        self._halt_cancels_pending = False
+        return None, ""
+
+    def _retry_halt(self) -> None:
+        """Finish a halt's checkpoint, then its owed cancellation, before any other work.
+
+        A failure of either propagates and stops the cycle, so no order work
+        runs on a state the store never saw or ahead of the cancellation, and
+        the next cycle tries again.
+        """
+        if self._halt_unpersisted:
+            self._persist_state()
+            self._halt_unpersisted = False
+            logger.warning("Halt checkpoint persisted")
+            failure, note = None, ""
+            if self._halt_cancels_pending:
+                failure, note = self._cancel_for_halt()
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Halt Persisted",
+                message=f"The halt is now recorded; a restart resumes halted{note}.",
+            )
+            if failure is not None:
+                raise failure
+            return
+        if self._halt_cancels_pending:
+            # A recorded halt owes a cancellation only after one failed, and
+            # an alert named that failure.
+            self._cancel_active_orders()
+            self._halt_cancels_pending = False
+            logger.warning("Halt cancellation completed after an earlier failure")
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Halt Cancellation Completed",
+                message=(
+                    "The cancellation that failed earlier has now reached every tracked "
+                    f"order; {len(self._active_orders)} remain tracked."
+                ),
+            )
 
     def _fail_group_or_halt(
         self,
@@ -1980,10 +2002,10 @@ class LiveTrader:
         if not self._halted:
             self._halt_live(title="Manual Halt", message=reason)
             return
-        if self._halt_unpersisted:
-            # Answer with a durable halt or its error, never "already halted".
-            logger.warning("Manual Halt: %s; already halted, not yet persisted", reason)
-            self._retry_halt_checkpoint()
+        if self._halt_unpersisted or self._halt_cancels_pending:
+            # Answer with the finished halt or its error, never "already halted".
+            logger.warning("Manual Halt: %s; already halted, not yet finished", reason)
+            self._retry_halt()
             return
         exits = sum(1 for tracked in self._active_orders if _is_recovery_exit(tracked.request))
         message = f"{reason}; already halted; {exits} recovery exits keep working"
@@ -2280,6 +2302,8 @@ class LiveTrader:
                 self._last_reconciliation_at = None
                 self._resume_unverified = True
             self._halted = False
+            # A reset needs every tracked order resolved: nothing is left to cancel.
+            self._halt_cancels_pending = False
             # A new risk epoch starts a fresh unverified window.
             self._reconciliation_unavailable_rounds = 0
             self._reconciliation_history.clear()
@@ -2309,7 +2333,7 @@ class LiveTrader:
     def _poll_cycle(self) -> None:
         """Process completed market-data events without live catch-up orders."""
         self._run_requested_halt()
-        self._retry_halt_checkpoint()
+        self._retry_halt()
         if not self._executor.simulation and self._active_orders:
             self._advance_live_orders()
         self._run_requested_flatten()

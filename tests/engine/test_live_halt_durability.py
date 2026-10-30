@@ -3,7 +3,8 @@
 The run stays halted in memory, retries the checkpoint first thing in every
 later cycle, and refuses ``reset_halt()`` until the store has recorded the
 halt, so nobody resumes from a state the store never saw. An outage fails
-every write, so the tests do too unless they pin a narrower path.
+every write, so the tests do too unless they pin a narrower path. A halt whose
+cancellation fails retries it the same way and says when it has run through.
 """
 
 from __future__ import annotations
@@ -243,6 +244,62 @@ class TestHaltCheckpointFailure:
         [halt] = _titled(alerts, "Manual Halt")
         assert "not persisted" not in halt["message"]
         assert "cancelling tracked orders failed" in halt["message"]
+
+
+class TestHaltCancellationFailure:
+    @pytest.mark.parametrize("retry_by", ["poll_cycle", "repeat_halt"])
+    def test_it_is_retried_until_it_completes(self, retry_by):
+        adapter = _resting_adapter()
+        trader, _, alerts = _trader(adapter)
+        _buy_two(trader)
+        answers = adapter.get_order.side_effect
+        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
+
+        def retry():
+            if retry_by == "poll_cycle":
+                trader._poll_cycle()
+            else:
+                trader.halt("desk asked again")
+
+        with pytest.raises(ValueError, match="order id changed"):
+            trader.halt("desk asked to stop")
+        with pytest.raises(ValueError, match="order id changed"):
+            retry()
+        assert _titled(alerts, "Halt Cancellation Completed") == []
+
+        adapter.get_order.side_effect = answers
+        retry()
+        retry()
+
+        assert trader._halted is True
+        assert trader._active_orders == [], "the order queued behind the failure is cancelled"
+        assert adapter.cancel_order.call_count == 1
+        adapter.place_order.assert_called_once()
+        assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
+        assert _titled(alerts, "Halt Persisted") == []
+
+    def test_one_failing_after_the_checkpoint_retry_is_retried_too(self):
+        adapter = _resting_adapter()
+        trader, _, alerts = _trader(adapter)
+        _buy_two(trader)
+        outage = _store_outage(trader)
+        with pytest.raises(OSError, match=OUTAGE):
+            trader.halt("desk asked to stop")
+
+        outage["down"] = False
+        answers = adapter.get_order.side_effect
+        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
+        with pytest.raises(ValueError, match="order id changed"):
+            trader._poll_cycle()
+        [persisted] = _titled(alerts, "Halt Persisted")
+        assert "cancelling tracked orders failed" in persisted["message"]
+        assert _titled(alerts, "Halt Cancellation Completed") == []
+
+        adapter.get_order.side_effect = answers
+        trader._poll_cycle()
+
+        assert trader._active_orders == []
+        assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
 
 
 class TestFlattenCheckpointFailure:
