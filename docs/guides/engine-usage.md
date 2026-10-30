@@ -542,14 +542,20 @@ its initial margin, not its notional. The ledger still sizes every order and
 is never overwritten: the check never resizes an entry, it only withholds one,
 for example when a withdrawal left the account holding less than the ledger.
 
-- An entry the free balance cannot cover, or whose balance cannot be read, is
-  not submitted: a `decision_skipped` event (reason `insufficient_free_balance`
-  or `free_balance_unavailable`) and an alert name the symbol, the requirement,
-  and the free balance or the read error.
-- Nothing halts. The orders queued after it still go out; a grouped entry
-  cancels the rest of its group, exit legs included, and a target rebalance
-  stops until the next decision.
-- Exits (`reduce`/`close`) are never checked themselves.
+- An entry the free balance cannot cover, or whose requirement or balance
+  cannot be read, is not submitted. Each time, a `decision_skipped` event
+  (reason `insufficient_free_balance` or `free_balance_unavailable`) names the
+  requirement and the free balance or the error; the alert does too, but only
+  once per symbol or group until a later check passes or `reset_halt()`.
+- Nothing halts. The orders queued after it still go out, and a target
+  rebalance stops until the next decision.
+- A group is checked once, before its first leg is sent, against what all its
+  legs need net of what its own exits release. Its legs go out serially, so
+  withholding a later leg would leave the earlier ones unhedged, and a
+  rotation funded by its own exit passes whichever leg comes first. A group
+  that fails is cancelled whole, exit legs included, before anything is sent.
+  A group restored from a checkpoint is not rechecked.
+- Ungrouped exits (`reduce`/`close`) are never checked.
 - An adapter without `get_balance` skips the check and logs a warning.
 
 While an order remains active, polling still refreshes the OHLCV cache,
@@ -1093,8 +1099,8 @@ When no order or grouped execution is active, the checks repeat every
   `LiveTrader.CASH_RECONCILE_TOLERANCE_PCT` (default 1%). Broker free/total
   semantics vary by account mode, so blindly overwriting can corrupt a valid
   ledger. A missing capability or unreadable balance is logged explicitly;
-  best-effort means non-fatal, not silent. Instead, an entry the free
-  balance cannot fund is withheld at submission (see
+  best-effort means non-fatal, not silent. The broker's free balance acts on
+  entries at submission instead, withholding one it cannot fund (see
   [the order contract](#related-multi-leg-order-contract)).
 
 A periodic round whose broker read raises `BrokerUnavailableError` (the

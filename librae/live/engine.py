@@ -39,6 +39,7 @@ from librae.core.executor import (
     calc_equity,
     calculate_position_weights,
     check_stop_targets,
+    close_position,
     execute_order_intents,
     execute_pending_decision_and_stops,
     execute_portfolio_weights,
@@ -879,6 +880,10 @@ class LiveTrader:
         self._reconciliation_history: deque[bool] = deque(maxlen=self.FETCH_HEALTH_WINDOW)
         self._reconciliation_degraded = False
         self._skipped_close_alerts: dict[tuple[str, str], float] = {}
+        # Not checkpointed: a restart re-alerts once, and a group restored
+        # mid-way is never rechecked, since its earlier legs may have filled.
+        self._unfunded_entry_alerts: set[str] = set()
+        self._groups_to_fund: set[str] = set()
         # Set only while a flatten submits its exits, before it halts the account.
         self._flatten_at: datetime | None = None
         self._cycle_fetch_seconds: dict[str, float] = {}
@@ -2311,6 +2316,7 @@ class LiveTrader:
             self._reconciliation_history.clear()
             self._reconciliation_degraded = False
             self._skipped_close_alerts.clear()
+            self._unfunded_entry_alerts.clear()
             self._equity_peak = equity
             self._prev_equity = equity
             self._status_window_equity = equity
@@ -3715,6 +3721,9 @@ class LiveTrader:
         queued = [TrackedOrder(request=request) for request in requests]
         self._active_orders.extend(queued)
         self._persist_state(*queued)
+        self._groups_to_fund.update(
+            request.group_id for request in requests if request.group_id is not None
+        )
         self._advance_live_orders()
         return not self._active_orders and not self._halted
 
@@ -3827,10 +3836,7 @@ class LiveTrader:
             self._advance_live_orders()
         return self._live_rebalance is None and not self._active_orders and not self._halted
 
-    def _timed_order_call(
-        self,
-        callback: Callable[[], ExecutionReport | None],
-    ) -> ExecutionReport | None:
+    def _timed_order_call[T](self, callback: Callable[[], T]) -> T:
         started = perf_counter()
         try:
             return callback()
@@ -3853,9 +3859,7 @@ class LiveTrader:
             if not tracked.placement_attempted:
                 if not submit_planned:
                     return
-                if request.position_effect in ("open", "add") and self._drop_unfunded_entry(
-                    tracked
-                ):
+                if self._drop_unfunded_entry(tracked):
                     continue
                 # Persist placement-attempted before network I/O. A crash in
                 # the following call is recovered by client-order lookup and
@@ -3976,39 +3980,54 @@ class LiveTrader:
         a margin venue may accept such an order at a higher effective leverage
         than the strategy sized for. The requirement is the outlay the ledger
         debits for the entry, margin plus costs. An unreadable balance drops
-        the entry too. Exits are never checked, and the orders queued after a
-        dropped entry still go out. Returns whether the entry was dropped.
+        the entry too. Exits are never checked on their own, and the orders
+        queued after a dropped entry still go out.
+
+        A group is checked once, at its first leg, against what all its legs
+        need net of what its own exits release: its legs go out serially, so
+        withholding a later leg would leave the earlier ones unhedged, and a
+        rotation whose exit funds its entry must not wait for that exit to
+        fill. A refused group is cancelled whole before any leg is sent.
+        Returns whether anything was dropped.
         """
         request = tracked.request
+        group_id = request.group_id
+        if group_id is None:
+            if request.position_effect not in ("open", "add"):
+                return False
+            legs = [tracked]
+            subject = request.symbol
+        else:
+            if group_id not in self._groups_to_fund:
+                return False
+            self._groups_to_fund.discard(group_id)
+            legs = [order for order in self._active_orders if order.request.group_id == group_id]
+            if all(leg.request.position_effect in ("reduce", "close") for leg in legs):
+                return False
+            subject = f"group {group_id!r}"
         adapter = self._executor.get_order_adapter(request.symbol)
         if not callable(getattr(adapter, "get_balance", None)):
             logger.warning(
                 "Free balance check skipped for the %s entry: order adapter has no "
                 "get_balance capability",
-                request.symbol,
+                subject,
             )
             return False
-        price = (
-            request.limit_price
-            if request.limit_price is not None
-            else self._last_prices[request.symbol]
-        )
-        required = self._get_cost_model(request.symbol).estimate_entry_outlay(
-            price,
-            request.quantity,
-            "long" if request.side == "buy" else "short",
-        )
         currency = self._currency
+        required: float | None = None
         free: float | None = None
         read_error: Exception | None = None
         try:
-            free = float(adapter.get_balance(currency)["free"])
+            required = sum(self._cash_needed_by(leg.request) for leg in legs)
+            balance = self._timed_order_call(lambda: adapter.get_balance(currency))
+            free = float(balance["free"])
             if not isfinite(free):
                 raise ValueError(f"free balance is not finite: {free}")
         except Exception as exc:
             free, read_error = None, exc
         else:
             if free + EPSILON >= required:
+                self._unfunded_entry_alerts.discard(subject)
                 return False
         if read_error is None:
             reason = "insufficient_free_balance"
@@ -4028,18 +4047,17 @@ class LiveTrader:
             # replans the targets from the current book.
             self._live_rebalance = None
             scope = "the target rebalance stopped"
-        self._cancel_tracked_order(tracked)
-        group_id = request.group_id
         if group_id is not None:
-            for sibling in list(self._active_orders):
-                if sibling.request.group_id == group_id:
-                    self._cancel_tracked_order(sibling)
             scope = f"group {group_id!r} cancelled, other groups unaffected"
-        message = (
-            f"{request.side} {request.quantity:g} to {request.position_effect} needs "
-            f"{required:.2f} {currency} but {cause}; not submitted, {scope}."
-        )
-        logger.warning("%s for %s: %s", title, request.symbol, message, exc_info=read_error)
+        for leg in legs:
+            self._cancel_tracked_order(leg)
+        need = f"{required:.2f} {currency}" if required is not None else "an unpriced amount"
+        if group_id is None:
+            what = f"{request.side} {request.quantity:g} to {request.position_effect}"
+        else:
+            what = f"{len(legs)} legs"
+        message = f"{what} needs {need} but {cause}; not submitted, {scope}."
+        logger.warning("%s for %s: %s", title, subject, message, exc_info=read_error)
         if self._on_runtime_event:
             self._on_runtime_event(
                 RuntimeEvent(
@@ -4048,19 +4066,39 @@ class LiveTrader:
                     symbol=request.symbol,
                     detail={
                         "reason": reason,
-                        "quantity": request.quantity,
+                        "group_id": group_id,
+                        "quantity": request.quantity if group_id is None else None,
                         "required": required,
                         "free": free,
                         "message": message,
                     },
                 )
             )
-        self._notify(
-            "send_alert",
-            title=f"[{self._executor.strategy_name}] {title}: {request.symbol}",
-            message=message,
-        )
+        if subject not in self._unfunded_entry_alerts:
+            self._unfunded_entry_alerts.add(subject)
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] {title}: {subject}",
+                message=message,
+            )
         return True
+
+    def _cash_needed_by(self, request: OrderRequest) -> float:
+        """Cash an order takes from the account, negative for what an exit releases."""
+        price = (
+            request.limit_price
+            if request.limit_price is not None
+            else self._last_prices[request.symbol]
+        )
+        cost_model = self._get_cost_model(request.symbol)
+        if request.position_effect in ("open", "add"):
+            side: Literal["long", "short"] = "long" if request.side == "buy" else "short"
+            return cost_model.estimate_entry_outlay(price, request.quantity, side)
+        position = self._positions.get(request.symbol)
+        if position is None:
+            return 0.0
+        _, proceeds, _ = close_position(position, price, cost_model, quantity=request.quantity)
+        return -proceeds
 
     def _live_order_timed_out(self, tracked: TrackedOrder) -> bool:
         """Return whether a placement-attempted order exceeded its local timeout."""
