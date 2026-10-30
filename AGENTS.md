@@ -18,6 +18,11 @@ general industry practice and these docs disagree, these docs win.
 - **Scope creep**: don't add a feature because it seems useful or fits the
   task nearby. Check it against the product boundary in `architecture.md`;
   if it is unclear whether Librae should own it, ask.
+- **Inventing or over-building**: for a non-trivial design, start from the
+  field's mainstream practice (official docs, widely adopted libraries,
+  standard references) rather than a home-grown scheme, then trim it to the
+  product boundary in `architecture.md`. No abstractions or options for needs
+  that have not appeared.
 - **No AI attribution** in commits or squash messages: no `Co-Authored-By`,
   no "Generated with", no `Signed-off-by`.
 - **Commit identity**: if `git config user.email` is empty, ask instead of
