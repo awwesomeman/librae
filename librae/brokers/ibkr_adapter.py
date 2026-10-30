@@ -1104,12 +1104,18 @@ class IBKRAdapter:
         )
 
     def get_balance(self, currency: str) -> dict[str, float]:
-        """Return account cash balance for *currency* via IBKR's accountSummary.
+        """Return *currency*'s cash and the funds available for new positions.
+
+        ``total`` is ``accountSummary()``'s ``TotalCashValue``, compared with
+        the ledger for drift, and ``free`` is its ``AvailableFunds``, checked
+        before an entry; cash is not what a margin account can still commit.
+        Either tag missing in *currency* raises rather than falling back to
+        the other or to another currency, so the entry check fails closed.
 
         UNVERIFIED against a live TWS/IB Gateway session — ``ib_async`` isn't
         installed in this dev environment and no live/paper account was
         available to confirm ``accountSummary()``'s tag semantics match what's
-        assumed here (``TotalCashValue``, per-currency). Based on ib_async's
+        assumed here (both tags reported per currency). Based on ib_async's
         public docs only; confirm against a real session before relying on
         this for cash-drift alerting or the free-balance check before an
         entry, which both read it through ``LiveTrader``.
@@ -1117,21 +1123,24 @@ class IBKRAdapter:
         self._require_auth()
         self._require_connected()
         values = self._ib.accountSummary()
-        matches = [
-            value
-            for value in values
-            if value.tag == "TotalCashValue" and value.currency == currency
-        ]
+        total = self._account_summary_amount(values, "TotalCashValue", currency)
+        free = self._account_summary_amount(values, "AvailableFunds", currency)
+        return {"free": free, "used": 0.0, "total": total}
+
+    @staticmethod
+    def _account_summary_amount(values: list, tag: str, currency: str) -> float:
+        tagged = [value for value in values if value.tag == tag]
+        matches = [value for value in tagged if value.currency == currency]
         if not matches:
-            raise ValueError(f"IBKR returned no TotalCashValue for {currency}")
+            others = sorted({str(value.currency) for value in tagged})
+            reported = f" (reported in {', '.join(others)})" if others else ""
+            raise ValueError(f"IBKR returned no {tag} for {currency}{reported}")
         if len(matches) > 1:
-            raise ValueError(
-                f"IBKR returned ambiguous TotalCashValue values for {currency}: {len(matches)}"
-            )
-        total = float(matches[0].value)
-        if not isfinite(total):
-            raise ValueError(f"IBKR returned non-finite TotalCashValue for {currency}")
-        return {"free": total, "used": 0.0, "total": total}
+            raise ValueError(f"IBKR returned ambiguous {tag} values for {currency}: {len(matches)}")
+        amount = float(matches[0].value)
+        if not isfinite(amount):
+            raise ValueError(f"IBKR returned non-finite {tag} for {currency}")
+        return amount
 
     # ------------------------------------------------------------------
     # Lifecycle
