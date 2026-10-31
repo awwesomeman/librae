@@ -34,6 +34,7 @@ from librae.core.executor import (
     ExecutionResult,
     ExecutionSideUnavailableError,
     ExecutionUnavailableError,
+    PositionEvent,
     RuntimeEvent,
     apply_execution_fill,
     calc_equity,
@@ -856,6 +857,10 @@ class LiveTrader:
         self._halt_unpersisted = False
         # Whether a halt still owes the live cancellation it skipped or that failed.
         self._halt_cancels_pending = False
+        # What a failed checkpoint left unwritten, keyed by client order id, and
+        # the fills it left unpublished; the next checkpoint that lands carries both.
+        self._unpersisted_orders: dict[str, TrackedOrder] = {}
+        self._unpublished_results: list[ExecutionResult] = []
         self._pending_decision: StrategyDecision = []
         # Bar timestamp each pending intent first rested on, keyed by symbol.
         # A resting "day" limit expires against the session it first rested in.
@@ -912,6 +917,13 @@ class LiveTrader:
 
         self._on_bar = on_bar
         self._on_position_event = on_position_event
+        # Opt-in like OHLCV delivery below: only a sink that declares it is
+        # idempotent may be offered the same event again.
+        position_sink = getattr(on_position_event, "__self__", on_position_event)
+        self._durable_position_event_delivery = (
+            getattr(position_sink, "durable_position_event_delivery", False) is True
+        )
+        self._pending_position_events: list[tuple[PositionEvent, int]] = []
         self._on_ohlcv = on_ohlcv
         # A sink opts into at-least-once delivery by declaring it. Anything
         # else keeps the documented best-effort contract, because the engine
@@ -1181,9 +1193,37 @@ class LiveTrader:
             )
 
     def _persist_state(self, *orders: TrackedOrder) -> None:
-        """Critical checkpoint write; failures propagate and stop the cycle."""
+        """Critical checkpoint write; failures propagate and stop the cycle.
+
+        Order rows a failed write did not land ride along with the next one,
+        in the same transaction as the snapshot, because an order that went
+        terminal meanwhile is no longer in the snapshot to rewrite it.
+        """
         if self._state_store is not None:
-            self._state_store.save(self._snapshot_state(), orders)
+            for tracked in orders:
+                self._unpersisted_orders[tracked.request.client_order_id] = tracked
+            try:
+                self._state_store.save(
+                    self._snapshot_state(), tuple(self._unpersisted_orders.values())
+                )
+            except Exception as exc:
+                logger.error(
+                    "Checkpoint not written (%s); order rows pending: %s",
+                    exc,
+                    ", ".join(self._unpersisted_orders) or "none",
+                )
+                raise
+            self._unpersisted_orders.clear()
+
+    def _publish_checkpointed_results(self) -> None:
+        """Publish fills the last checkpoint holds, oldest first.
+
+        Called only where order work owns the outcome, never from inside a
+        checkpoint: a sink error raised there would read as the checkpoint
+        failing, and a halt would report itself unpersisted.
+        """
+        while self._unpublished_results:
+            self._publish_action_results(self._unpublished_results.pop(0))
 
     # WHY: 3 consecutive errors likely means a persistent issue (API down, DB
     # unreachable), not a transient blip — worth alerting the operator.
@@ -2387,6 +2427,12 @@ class LiveTrader:
         # An owed halt cancellation has already polled and cancelled every
         # tracked order once this cycle; advancing would repeat the head's.
         cancelled = self._run_requested_halt() or self._retry_halt()
+        # Order work that hit a store outage may have left ledger rows and
+        # fills behind, with no later order work to carry them.
+        if self._unpersisted_orders:
+            self._persist_state()
+        self._publish_checkpointed_results()
+        self._flush_pending_position_events()
         if not self._executor.simulation and self._active_orders and not cancelled:
             self._advance_live_orders()
         self._run_requested_flatten()
@@ -3043,7 +3089,10 @@ class LiveTrader:
             if event.event_type in ("close", "reduce"):
                 self._performance_dirty = True
             if self._on_position_event:
-                self._on_position_event(event, self._event_sequence)
+                if self._durable_position_event_delivery:
+                    self._pending_position_events.append((event, self._event_sequence))
+                else:
+                    self._on_position_event(event, self._event_sequence)
 
             if event.event_type in ("open", "add"):
                 label = (
@@ -3062,6 +3111,8 @@ class LiveTrader:
                         "notional": event.notional,
                     }
                 )
+
+        self._flush_pending_position_events()
 
         for trade in result.trades:
             logger.info("SIGNAL EXIT %s @ %.2f", trade.symbol, trade.exit_price)
@@ -3114,6 +3165,22 @@ class LiveTrader:
         if self._on_runtime_event:
             for runtime_event in result.runtime_events:
                 self._on_runtime_event(runtime_event)
+
+    def _flush_pending_position_events(self) -> None:
+        """Offer queued position events in sequence order, keeping any not accepted."""
+        while self._pending_position_events:
+            event, sequence = self._pending_position_events[0]
+            try:
+                self._on_position_event(event, sequence)
+            except Exception as exc:
+                logger.warning(
+                    "Position event %d delivery failed (%s); %d event(s) still pending",
+                    sequence,
+                    exc,
+                    len(self._pending_position_events),
+                )
+                return
+            self._pending_position_events.pop(0)
 
     def _commit_simulated_results(
         self,
@@ -4364,9 +4431,9 @@ class LiveTrader:
             self._active_orders.remove(tracked)
         if result is not None:
             self._trade_count += len(result.trades)
+            self._unpublished_results.append(result)
         self._persist_state(tracked)
-        if result is not None:
-            self._publish_action_results(result)
+        self._publish_checkpointed_results()
 
     def _cancel_tracked_order(self, tracked: TrackedOrder) -> None:
         """Reconcile and cancel one tracked order without resubmitting it."""

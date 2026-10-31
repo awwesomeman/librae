@@ -169,6 +169,7 @@ def make_live_trader(
     clock=None,
     on_ready=None,
     on_runtime_event=None,
+    on_position_event=None,
     cost_model: CostModel | None = None,
 ) -> LiveTrader:
     trader = LiveTrader(
@@ -179,7 +180,7 @@ def make_live_trader(
         cost_model=cost_model or _zero_cost_model(),
         order_adapter=adapter,
         on_bar=None,
-        on_position_event=None,
+        on_position_event=on_position_event,
         on_ohlcv=None,
         on_heartbeat=None,
         on_signal_outcome=None,
