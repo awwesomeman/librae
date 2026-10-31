@@ -231,9 +231,10 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
   reports ready ([readiness](optional-infrastructure.md#reference-vm-flow)).
   Retry once `trade.sh inspect` reports `phase=running`; stopping instead
   would leave resting orders working.
-- The next poll cycle applies it, so it can take up to the poll interval.
-  Confirm with the **Manual Halt** alert (reason `SIGUSR1 operator halt`) or
-  `docker logs`.
+- The engine wakes from its sleep between poll cycles and applies it at
+  once. A cycle already running finishes first, so the wait is that cycle's
+  broker and market-data calls, not the poll interval. Confirm with the
+  **Manual Halt** alert (reason `SIGUSR1 operator halt`) or `docker logs`.
 - Until that alert, the request lives only in the running process. If the
   container restarts first, the restarted runner never saw it and resumes
   trading: run `halt` again once `inspect` reports `phase=running`. An alert
@@ -266,10 +267,13 @@ A halt or Halt Persisted alert that says `cancelling tracked orders failed
 it did not reach keep working. Every later cycle retries the cancellation and
 does nothing else until it runs through, so a Poll Error alert follows if the
 error persists. **Halt Cancellation Completed** follows only once no order is
-tracked; until then cancel at the venue anything that must not fill. A failure
-while the run starts stops it instead; the next start cancels tracked orders
-again unless every one is a recovery exit, and those keep working. Find the
-cause before `reset_halt()`.
+tracked; until then cancel at the venue anything that must not fill. A repeat
+halt retries the cancellation: once a retry runs through with orders still
+tracked, it answers with a **Manual Halt** alert that says `cancellation owed,
+<N> tracked`; while the retry fails, `halt()` raises that error and a signalled
+halt shows as a poll-cycle error. A failure while the run starts stops it
+instead; the next start cancels tracked orders again unless every one is a
+recovery exit, and those keep working. Find the cause before `reset_halt()`.
 
 A process that exits before **Halt Persisted** restarts from the last written
 checkpoint, unhalted: nothing in the engine can recover a halt the store never

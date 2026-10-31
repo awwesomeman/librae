@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from inspect import getattr_static
 from math import isclose, isfinite
 from queue import Empty, SimpleQueue
-from threading import Event, Lock, RLock
+from threading import Lock, RLock
 from time import perf_counter
 from typing import TYPE_CHECKING, Literal
 
@@ -946,8 +946,11 @@ class LiveTrader:
         self._status_interval = status_interval_periods
 
         self._notify_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify")
-        self._stop_event = Event()
-        self._sleep = self._stop_event.wait  # instance attribute so tests can skip real delays
+        # Wakes the sleep between cycles. SimpleQueue.put is reentrant, so a
+        # signal handler may call it even while it interrupts a get or put on
+        # this thread; Event.set takes a lock the interrupted code may hold.
+        self._wake: SimpleQueue[None] = SimpleQueue()
+        self._sleep = self._wait_for_next_cycle  # instance attribute so tests can skip real delays
         # Held for each cycle: an operator call from another thread waits for
         # the cycle in progress and applies between cycles.
         self._cycle_lock = RLock()
@@ -1900,19 +1903,21 @@ class LiveTrader:
         self._halt_cancels_pending = False
         return None, ""
 
-    def _retry_halt(self) -> None:
+    def _retry_halt(self) -> bool:
         """Finish a halt's checkpoint, then its owed cancellation, before any other work.
 
         A failure of either propagates and stops the cycle, so no order work
         runs on a state the store never saw or ahead of the cancellation, and
-        the next cycle tries again.
+        the next cycle tries again. Returns whether it sent the cancellation
+        pass, which already polled and cancelled every tracked order.
         """
         if self._halt_unpersisted:
             self._persist_state()
             self._halt_unpersisted = False
             logger.warning("Halt checkpoint persisted")
             failure, note = None, ""
-            if self._halt_cancels_pending:
+            cancelled = self._halt_cancels_pending
+            if cancelled:
                 failure, note = self._cancel_for_halt()
             self._notify(
                 "send_alert",
@@ -1921,14 +1926,14 @@ class LiveTrader:
             )
             if failure is not None:
                 raise failure
-            return
+            return cancelled
         if self._halt_cancels_pending:
             # A recorded halt owes a cancellation only after one failed, and
             # an alert named that failure. It stays owed while any order is
             # tracked: a cancel the venue has not confirmed may still fill.
             self._cancel_active_orders()
             if self._active_orders:
-                return
+                return True
             self._halt_cancels_pending = False
             logger.warning("Halt cancellation completed after an earlier failure")
             self._notify(
@@ -1936,6 +1941,8 @@ class LiveTrader:
                 title=f"[{self._executor.strategy_name}] Halt Cancellation Completed",
                 message="The cancellation that failed earlier is done; no order is tracked.",
             )
+            return True
+        return False
 
     def _fail_group_or_halt(
         self,
@@ -2004,20 +2011,32 @@ class LiveTrader:
             _is_recovery_exit(tracked.request) for tracked in self._active_orders
         )
 
-    def _apply_manual_halt(self, reason: str) -> None:
+    def _apply_manual_halt(self, reason: str) -> bool:
         """Halt for an operator, leaving an already-halted account's exits working.
 
         A halted account's only live orders are recovery exits closing its
-        positions; cancelling them would leave the positions open.
+        positions; cancelling them would leave the positions open. Returns
+        whether it sent a halt's owed cancellation pass, as ``_retry_halt``.
         """
         if not self._halted:
             self._halt_live(title="Manual Halt", message=reason)
-            return
+            return False
         if self._halt_unpersisted or self._halt_cancels_pending:
-            # Answer with the finished halt or its error, never "already halted".
+            # Answer with the finished halt, its error, or what it still owes.
             logger.warning("Manual Halt: %s; already halted, not yet finished", reason)
-            self._retry_halt()
-            return
+            cancelled = self._retry_halt()
+            if self._halt_cancels_pending:
+                message = (
+                    f"{reason}; already halted; cancellation owed, "
+                    f"{len(self._active_orders)} tracked"
+                )
+                logger.warning("Manual Halt: %s", message)
+                self._notify(
+                    "send_alert",
+                    title=f"[{self._executor.strategy_name}] Manual Halt",
+                    message=message,
+                )
+            return cancelled
         exits = sum(1 for tracked in self._active_orders if _is_recovery_exit(tracked.request))
         message = f"{reason}; already halted; {exits} recovery exits keep working"
         logger.warning("Manual Halt: %s", message)
@@ -2026,6 +2045,7 @@ class LiveTrader:
             title=f"[{self._executor.strategy_name}] Manual Halt",
             message=message,
         )
+        return False
 
     def _initialize_run(self) -> None:
         """Acquire live ownership and reconcile broker facts before polling."""
@@ -2083,7 +2103,7 @@ class LiveTrader:
 
     def run(self, max_iterations: int | None = None) -> None:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
-        self._stop_event.clear()
+        self._drain_wake()
         self._running = True
         self._closed = False
         self._setup_signal_handlers()
@@ -2187,7 +2207,23 @@ class LiveTrader:
     def stop(self) -> None:
         """Signal the runner to stop after the current cycle."""
         self._running = False
-        self._stop_event.set()
+        self._wake.put(None)
+
+    def _wait_for_next_cycle(self, seconds: float) -> None:
+        """Sleep until the next cycle is due or a stop or halt request wakes it."""
+        try:
+            self._wake.get(timeout=seconds)
+        except Empty:
+            return
+        # The next cycle answers every request made so far.
+        self._drain_wake()
+
+    def _drain_wake(self) -> None:
+        while True:
+            try:
+                self._wake.get_nowait()
+            except Empty:
+                return
 
     @property
     def last_cycle_diagnostics(self) -> CycleDiagnostics | None:
@@ -2244,10 +2280,12 @@ class LiveTrader:
         """Ask the polling loop to halt as ``halt`` does, without waiting.
 
         Safe from any thread and from a signal handler: it only records the
-        request. The loop applies it first thing in its next cycle, before
-        any order work or a pending flatten. A restart drops a pending one.
+        request and wakes a sleeping loop. The loop applies it first thing in
+        its next cycle, before any order work or a pending flatten; a cycle
+        already running finishes first. A restart drops a pending one.
         """
         self._halt_requests.put(_validated_reason(reason, "halt"))
+        self._wake.put(None)
 
     def request_flatten(self, reason: str = "operator requested flatten") -> None:
         """Ask the polling loop to close every position and halt, as a drawdown breach does.
@@ -2346,9 +2384,10 @@ class LiveTrader:
 
     def _poll_cycle(self) -> None:
         """Process completed market-data events without live catch-up orders."""
-        self._run_requested_halt()
-        self._retry_halt()
-        if not self._executor.simulation and self._active_orders:
+        # An owed halt cancellation has already polled and cancelled every
+        # tracked order once this cycle; advancing would repeat the head's.
+        cancelled = self._run_requested_halt() or self._retry_halt()
+        if not self._executor.simulation and self._active_orders and not cancelled:
             self._advance_live_orders()
         self._run_requested_flatten()
         # Retry unacknowledged audit rows every cycle, not only when a new bar
@@ -5197,15 +5236,15 @@ class LiveTrader:
         if failure is not None:
             raise failure
 
-    def _run_requested_halt(self) -> None:
+    def _run_requested_halt(self) -> bool:
         """Apply pending ``request_halt`` calls from the polling thread.
 
         First in the cycle, so a planned order is never submitted, and a
         pending flatten is refused rather than having its exits cancelled.
+        Returns whether it sent a halt's owed cancellation pass.
         """
         reasons = self._drain_halt_requests()
-        if reasons:
-            self._apply_manual_halt("; ".join(reasons))
+        return bool(reasons) and self._apply_manual_halt("; ".join(reasons))
 
     def _drain_halt_requests(self) -> list[str]:
         reasons: list[str] = []

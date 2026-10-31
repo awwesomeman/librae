@@ -326,6 +326,52 @@ class TestHaltCancellationFailure:
         assert trader._active_orders == []
         assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
 
+    @staticmethod
+    def _cancellation_owed_with_aaa_working(calls: list[str]):
+        """Halt with its cancellation owed, then leave AAA working at a busy venue."""
+        adapter = _resting_adapter(calls)
+        trader, _, alerts = _trader(adapter)
+        _buy_two(trader)
+        answers = adapter.get_order.side_effect
+        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
+        with pytest.raises(ValueError, match="order id changed"):
+            trader.halt("desk asked to stop")
+        adapter.get_order.side_effect = answers
+
+        def busy(_order_id, _symbol):
+            calls.append("cancel_order")
+            raise RuntimeError("venue busy")
+
+        adapter.cancel_order.side_effect = busy
+        trader._poll_cycle()
+        assert [order.request.symbol for order in trader._active_orders] == ["AAA"]
+        return trader, alerts
+
+    @pytest.mark.parametrize("repeat_halt", [False, True])
+    def test_each_cycle_polls_and_cancels_a_tracked_order_once(self, repeat_halt):
+        calls: list[str] = []
+        trader, _ = self._cancellation_owed_with_aaa_working(calls)
+
+        for _ in range(2):
+            calls.clear()
+            if repeat_halt:
+                trader.request_halt("desk asked again")
+            trader._poll_cycle()
+            assert calls == ["get_order", "cancel_order"]
+
+    def test_a_repeat_halt_says_the_cancellation_is_still_owed(self):
+        trader, alerts = self._cancellation_owed_with_aaa_working([])
+
+        trader.halt("desk asked again")
+
+        [repeat] = [
+            alert
+            for alert in _titled(alerts, "Manual Halt")
+            if "desk asked again" in alert["message"]
+        ]
+        assert "already halted; cancellation owed, 1 tracked" in repeat["message"]
+        assert trader._halt_cancels_pending is True
+
     def test_a_reset_leaves_no_cancellation_owed(self):
         adapter = _resting_adapter()
         trader, _, alerts = _trader(adapter)

@@ -153,10 +153,17 @@ def _walk_forward[T](
 
 
 # Backward like ccxt 4.5.66 fetch_paginated_call_dynamic, which stops after
-# paginationCalls pages. Assumes the venue answers an end alone with the
-# newest rows at or before it, counted across gaps: unverified for Binance's
-# endTime. A venue that windows by the end instead ends the walk early on a
-# page with no bars, and fetch_ohlcv's short-history warning reports it.
+# paginationCalls pages. Relies on the venue answering an end alone with the
+# newest rows at or before it, counted across gaps. Observed live on Binance
+# on 2026-10-31: on spot BTCUSDT 1h, across its 2019-05-15 02:00-13:00 UTC
+# gap, an endTime inside the gap returned the newest rows before it, and a
+# limit=100 page spanning the gap returned 100 rows, not the 90 a fixed time
+# window would. Unverified for USDT-M perpetuals, where no gap was found to
+# test on (BTCUSDT 1h since its 2019-09 listing; no gap over two days in the
+# daily bars of 659 perpetuals); there an endTime before the first bar
+# returned no rows, which ends the walk. A venue that windows by the end
+# instead ends the walk early on a page with no bars, and fetch_ohlcv's
+# short-history warning reports it.
 def _walk_back(fetch_page: Callable[[int | None], list[list]], limit: int) -> list[list]:
     """Request candle pages back from the newest until ``limit`` rows or history ends.
 

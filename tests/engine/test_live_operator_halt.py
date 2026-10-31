@@ -3,22 +3,28 @@
 ``halt()``, ``reset_halt()`` and ``halt_reset_readiness()`` wait for the cycle
 in progress and apply between cycles, so an order the loop is submitting is
 either still tracked when the halt cancels it or not yet queued. ``request_halt``
-and SIGUSR1 only record the request; the loop applies it before anything else
-in its next cycle.
+and SIGUSR1 only record the request and wake the loop; the loop applies it
+before anything else in its next cycle.
 """
 
 from __future__ import annotations
 
+import os
 import signal
 import time
-from threading import Thread
+from threading import Thread, Timer
 
 import pytest
 from librae.core.strategy import OrderIntent, Strategy
 from librae.live.executor import OrderRequest
 from librae.live.state import TrackedOrder
 
-from tests.engine.live_factories import TEST_CLOCK_NOW, _HoldStrategy, make_live_trader
+from tests.engine.live_factories import (
+    TEST_CLOCK_NOW,
+    _HoldStrategy,
+    _test_cfg,
+    make_live_trader,
+)
 from tests.engine.test_live_flatten import (
     SYMBOLS,
     _adapter,
@@ -342,6 +348,80 @@ class TestHaltSignal:
         assert trader._halted is True
         [halt] = _titled(alerts, "Manual Halt")
         assert "SIGUSR1" in halt["message"]
+
+
+class _SignalsHaltMidCycle(Strategy):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.trader = None
+        self.halted_during_cycle: bool | None = None
+
+    def on_bar(self, ctx):
+        self.calls += 1
+        if self.calls == 1:
+            signal.raise_signal(signal.SIGUSR1)
+            self.halted_during_cycle = self.trader._halted
+        return []
+
+
+def _hourly_trader(strategy: Strategy):
+    return make_live_trader(
+        strategy,
+        _mock_order_adapter(),
+        config=_test_cfg(mode="live", poll_seconds=3600),
+    )
+
+
+def _run_with_signal_handlers(trader, iterations: int) -> float:
+    """Run on this (main) thread with the engine's handlers; return the seconds taken."""
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1)
+    }
+    # A loop that sleeps out poll_seconds is stopped, failing the test
+    # instead of hanging it for an hour.
+    watchdog = Timer(5.0, trader.stop)
+    watchdog.start()
+    started = time.monotonic()
+    try:
+        trader.run(max_iterations=iterations)
+    finally:
+        watchdog.cancel()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    return time.monotonic() - started
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGUSR1"), reason="SIGUSR1 is POSIX-only")
+class TestHaltSignalWakesTheLoop:
+    def test_sigusr1_wakes_a_sleeping_loop(self):
+        strategy = _CountingStrategy()
+        trader = _hourly_trader(strategy)
+        sleep = trader._sleep
+
+        def signal_while_sleeping(seconds):
+            Timer(0.1, os.kill, args=(os.getpid(), signal.SIGUSR1)).start()
+            sleep(seconds)
+
+        trader._sleep = signal_while_sleeping
+
+        elapsed = _run_with_signal_handlers(trader, iterations=2)
+
+        assert trader._halted is True
+        assert strategy.calls == 1
+        assert elapsed < 5.0
+
+    def test_sigusr1_mid_cycle_is_applied_after_the_cycle_without_waiting(self):
+        strategy = _SignalsHaltMidCycle()
+        trader = _hourly_trader(strategy)
+        strategy.trader = trader
+
+        elapsed = _run_with_signal_handlers(trader, iterations=2)
+
+        assert strategy.halted_during_cycle is False
+        assert strategy.calls == 1
+        assert trader._halted is True
+        assert elapsed < 5.0
 
 
 class TestHaltOnAHaltedAccount:
