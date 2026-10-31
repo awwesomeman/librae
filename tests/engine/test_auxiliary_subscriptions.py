@@ -121,7 +121,7 @@ class TestLiveExposesAuxiliaryHistory:
     def _run(self, auxiliary: list[AuxiliarySubscription]):
         from librae.core.strategy import Strategy
 
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         seen: list[tuple] = []
 
@@ -146,7 +146,7 @@ class TestLiveExposesAuxiliaryHistory:
                 return self._bars(6, "D", "2024-12-25T00:00Z")
             return self._bars(6, "h", "2025-01-01T00:00Z")
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=RecordSubscriptions(),
             fetcher=fetch,
             config=_test_cfg(
@@ -349,7 +349,7 @@ class TestAuxiliaryCannotBreakTheCycle:
     def _run(self, auxiliary_fetch, *, symbols=("BTCUSDT",), optional=()):
         from librae.core.strategy import Strategy
 
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         seen: list[tuple] = []
 
@@ -374,7 +374,7 @@ class TestAuxiliaryCannotBreakTheCycle:
                 return self._bars(0, "h", "2025-01-01T00:00Z")
             return self._bars(6, "h", "2025-01-01T00:00Z")
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=ReadAuxiliary(),
             fetcher=fetch,
             config=_test_cfg(
@@ -480,7 +480,7 @@ class TestStalledAuxiliaryIsReported:
         """Warm the auxiliary cache while healthy, then break the feed."""
         from librae.core.strategy import Strategy
 
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         clock = {"now": self.FRESH_CLOCK}
         warmed = {"done": False}
@@ -501,7 +501,7 @@ class TestStalledAuxiliaryIsReported:
             return self._bars_ending(6, "h", clock["now"])
 
         alerts: list[dict] = []
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=Hold(),
             fetcher=fetch,
             config=_test_cfg(
@@ -558,7 +558,7 @@ class TestStalledAuxiliaryIsReported:
         be late relative to, so it is logged rather than alerted."""
         from librae.core.strategy import Strategy
 
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         class Hold(Strategy):
             def on_bar(self, ctx):
@@ -571,7 +571,7 @@ class TestStalledAuxiliaryIsReported:
             return self._bars(6, "h", "2025-01-09T18:00Z")
 
         alerts: list[dict] = []
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=Hold(),
             fetcher=fetch,
             config=_test_cfg(
@@ -653,7 +653,7 @@ class TestAuxiliaryRestartParity:
         """
         from librae.core.strategy import Strategy
 
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         seen: list[tuple] = []
 
@@ -677,7 +677,7 @@ class TestAuxiliaryRestartParity:
                 return self._bars(6, "D", "2024-12-25T00:00Z")
             return self._bars(primary_bars, "h", "2025-01-01T00:00Z")
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=ReadAuxiliary(),
             fetcher=fetch,
             config=_test_cfg(

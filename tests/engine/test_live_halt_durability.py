@@ -16,6 +16,7 @@ from librae.core.strategy import OrderIntent
 from librae.live.executor import OrderRequest
 from librae.live.state import TrackedOrder
 
+from tests.engine.live_factories import TEST_CLOCK_NOW
 from tests.engine.test_live_flatten import (
     SYMBOLS,
     _adapter,
@@ -25,7 +26,6 @@ from tests.engine.test_live_flatten import (
     _trader,
 )
 from tests.engine.test_live_operator_halt import _resting
-from tests.engine.test_live_runner import TEST_CLOCK_NOW
 
 OUTAGE = "state store unavailable"
 

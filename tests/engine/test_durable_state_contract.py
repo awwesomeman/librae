@@ -47,13 +47,10 @@ class TestDurabilityDeclaration:
 class TestLiveRejectsNonDurableState:
     @staticmethod
     def _live(**kwargs):
-        from tests.engine.test_live_runner import (
-            TestLiveTrader,
-            _mock_order_adapter,
-            _test_cfg,
-        )
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+        from tests.engine.test_live_runner import _mock_order_adapter
 
-        return TestLiveTrader()._make_runner(
+        return make_live_runner(
             config=_test_cfg(mode="live"),
             order_adapter=_mock_order_adapter(),
             **kwargs,
@@ -87,9 +84,9 @@ class TestLiveRejectsNonDurableState:
     def test_simulation_still_accepts_a_memory_store(self) -> None:
         """Shadow simulation has no broker order to recover, so process-local
         state stays the right default there."""
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
-        trader = TestLiveTrader()._make_runner(
+        trader = make_live_runner(
             config=_test_cfg(mode="sim"),
             state_store=MemoryLiveStateStore(),
         )
@@ -110,10 +107,11 @@ def test_the_protocol_declares_the_capability() -> None:
 
 def test_live_trader_still_requires_a_store_at_all() -> None:
     """The durability check must not displace the existing presence check."""
-    from tests.engine.test_live_runner import TestLiveTrader, _mock_order_adapter, _test_cfg
+    from tests.engine.live_factories import _test_cfg, make_live_runner
+    from tests.engine.test_live_runner import _mock_order_adapter
 
     with pytest.raises(ValueError, match="state_store"):
-        TestLiveTrader()._make_runner(
+        make_live_runner(
             config=_test_cfg(mode="live"),
             order_adapter=_mock_order_adapter(),
             state_store=None,

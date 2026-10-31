@@ -301,9 +301,9 @@ class TestDataReadinessGate:
 
     @staticmethod
     def _runner(optional_symbols: tuple[str, ...]):
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             config=_test_cfg(
                 mode="sim",
                 symbols=["BTCUSDT", "ETHUSDT"],
@@ -352,7 +352,7 @@ class TestOptionalSymbolsReleaseTheWarmupGate:
         import pandas as pd
         from librae.core.strategy import Strategy
 
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         def frame(n: int) -> pd.DataFrame:
             return pd.DataFrame(
@@ -373,7 +373,7 @@ class TestOptionalSymbolsReleaseTheWarmupGate:
                 seen.append(ctx.available_symbols)
                 return []
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=RecordEvaluations(),
             fetcher={
                 "BTCUSDT": lambda *a, **k: frame(6),
@@ -415,7 +415,7 @@ class TestSimulationHoldsOnStaleRequiredData:
         import pandas as pd
         from librae.core.strategy import Strategy
 
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         def frame(end: datetime, n: int = 6) -> pd.DataFrame:
             return pd.DataFrame(
@@ -436,7 +436,7 @@ class TestSimulationHoldsOnStaleRequiredData:
                 seen.append(ctx.available_symbols)
                 return []
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=RecordEvaluations(),
             fetcher={
                 # One interval behind the clock: fresh.
@@ -492,7 +492,7 @@ class TestOptionalSymbolAcrossWarmupCycles:
     def test_optional_symbol_joins_only_once_it_is_warm(self) -> None:
         from librae.core.strategy import Strategy
 
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         # BTC starts short of warmup so the first cycle reports incomplete
         # warmup; the "warmup ready" summary on the next cycle must not raise
@@ -505,7 +505,7 @@ class TestOptionalSymbolAcrossWarmupCycles:
                 seen.append(ctx.available_symbols)
                 return []
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=RecordEvaluations(),
             fetcher={
                 "BTCUSDT": lambda *a, **k: self._bars(state["btc"]),
