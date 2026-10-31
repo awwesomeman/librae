@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import functools
 import logging
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
-from typing import Any
+from typing import Any, Concatenate
 
 import pandas as pd
 
@@ -114,16 +113,9 @@ _OHLCV_PAGE = 1000
 _FUNDING_PAGE = 1000
 
 
-def _is_ccxt_error(exc: BaseException, family: str = "BaseError") -> bool:
-    """Whether ``exc`` is an instance of ccxt's ``family`` error class.
-
-    Looks ccxt up in ``sys.modules`` instead of importing it: only a ccxt
-    exchange raises ccxt errors, and building one imports ccxt, so an error
-    seen while ccxt is not imported is not ccxt's, and no call path that
-    succeeds ever imports the SDK.
-    """
-    ccxt = sys.modules.get("ccxt")
-    return ccxt is not None and isinstance(exc, getattr(ccxt, family))
+# The ccxt classes the adapter tests by isinstance; finer checks match an
+# exact class name, as the refusal tables above do.
+_CLASSIFIED_FAMILIES = ("BaseError", "NetworkError", "InvalidNonce")
 
 
 # Not ccxt's params={"paginate": True}: in ccxt 4.5.66
@@ -158,11 +150,6 @@ def _walk_forward[T](
         rows.extend(page)
         cursor = ts(page[-1]) + 1
     return rows if limit is None else rows[:limit]
-
-
-def _is_account_refusal(exc: BaseException) -> bool:
-    """Whether ccxt raised ``exc`` as a refusal of the account, not the order."""
-    return _is_ccxt_error(exc) and type(exc).__name__ in _ACCOUNT_REFUSALS
 
 
 logger = logging.getLogger(__name__)
@@ -203,7 +190,9 @@ def _require_ccxt() -> object:
         ) from e
 
 
-def _network_errors_unavailable[**P, R](read: Callable[P, R]) -> Callable[P, R]:
+def _network_errors_unavailable[**P, R](
+    read: Callable[Concatenate[CryptoAdapter, P], R],
+) -> Callable[Concatenate[CryptoAdapter, P], R]:
     """Classify ccxt's NetworkError family on a reconciliation read.
 
     ccxt raises that family for timeouts, connection failures, rate limits
@@ -217,11 +206,12 @@ def _network_errors_unavailable[**P, R](read: Callable[P, R]) -> Callable[P, R]:
     """
 
     @functools.wraps(read)
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+    def wrapper(self: CryptoAdapter, /, *args: P.args, **kwargs: P.kwargs) -> R:
         try:
-            return read(*args, **kwargs)
+            return read(self, *args, **kwargs)
         except Exception as exc:
-            if not _is_ccxt_error(exc, "NetworkError") or _is_ccxt_error(exc, "InvalidNonce"):
+            network = self._is_ccxt_error(exc, "NetworkError")
+            if not network or self._is_ccxt_error(exc, "InvalidNonce"):
                 raise
             raise BrokerUnavailableError(str(exc)) from exc
 
@@ -346,6 +336,19 @@ class CryptoAdapter:
         self._account_fingerprint = account_fingerprint(exchange_id, api_key) if api_key else None
         self._tick_size_precision_mode = getattr(ccxt, "TICK_SIZE", None)
         self._decimal_places_precision_mode = getattr(ccxt, "DECIMAL_PLACES", None)
+        # Taken from the module the exchange was built from, so classification
+        # matches the classes that exchange raises and no call imports ccxt.
+        self._ccxt_errors: dict[str, type[BaseException]] = {
+            family: getattr(ccxt, family) for family in _CLASSIFIED_FAMILIES
+        }
+
+    def _is_ccxt_error(self, exc: BaseException, family: str = "BaseError") -> bool:
+        """Whether ``exc`` is an instance of this exchange's ccxt ``family`` class."""
+        return isinstance(exc, self._ccxt_errors[family])
+
+    def _is_account_refusal(self, exc: BaseException) -> bool:
+        """Whether ccxt raised ``exc`` as a refusal of the account, not the order."""
+        return self._is_ccxt_error(exc) and type(exc).__name__ in _ACCOUNT_REFUSALS
 
     def info(self) -> AdapterInfo:
         """Return adapter metadata (consistent with ABC adapters)."""
@@ -786,7 +789,7 @@ class CryptoAdapter:
             # WHY: ccxt's base Exchange.amount_to_precision raises exactly
             # InvalidOrder only when the amount truncates to zero, and no
             # exchange override raises at all; subclasses mean something else.
-            if not _is_ccxt_error(exc) or type(exc).__name__ != "InvalidOrder":
+            if not self._is_ccxt_error(exc) or type(exc).__name__ != "InvalidOrder":
                 raise
             raise OrderBelowVenueMinimumError(f"{symbol} quantity rounds to zero: {exc}") from exc
         quantity = float(rounded)
@@ -893,14 +896,14 @@ class CryptoAdapter:
         except Exception as exc:
             raise OrderRejectedError(
                 f"{signal.get('symbol')} not sent: {exc}",
-                account_fault=_is_account_refusal(exc),
+                account_fault=self._is_account_refusal(exc),
             ) from exc
         try:
             result = self._exchange.create_order(**order)
         except Exception as exc:
-            if not _is_ccxt_error(exc) or type(exc).__name__ not in _PLACEMENT_REFUSALS:
+            if not self._is_ccxt_error(exc) or type(exc).__name__ not in _PLACEMENT_REFUSALS:
                 raise
-            raise OrderRejectedError(str(exc), account_fault=_is_account_refusal(exc)) from exc
+            raise OrderRejectedError(str(exc), account_fault=self._is_account_refusal(exc)) from exc
         return self._backfill_fee(result, signal["symbol"])
 
     def _order_request(self, signal: dict) -> dict[str, Any]:

@@ -6,7 +6,7 @@ All tests use mocks — no real API calls.
 from __future__ import annotations
 
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -22,6 +22,7 @@ from librae.live.executor import (
     PositionRequest,
 )
 
+from tests.ccxt_standin import PRECISION_MODES, build_crypto_adapter, errors
 from tests.crypto_venue import PAGE, PagedVenue
 
 # ---------------------------------------------------------------------------
@@ -257,28 +258,14 @@ def mock_ccxt_exchange():
 @pytest.fixture
 def readonly_adapter(mock_ccxt_exchange):
     """CryptoAdapter in read-only mode (no API key) with mocked exchange."""
-    with patch("librae.brokers.crypto_adapter._require_ccxt") as mock_ccxt:
-        mock_exchange_cls = MagicMock(return_value=mock_ccxt_exchange)
-        mock_ccxt.return_value = MagicMock(**{"binance": mock_exchange_cls})
-        # Manually construct to bypass __init__ ccxt lookup
-        adapter = CryptoAdapter.__new__(CryptoAdapter)
-    adapter._exchange = mock_ccxt_exchange
-    adapter._read_only = True
-    adapter._exchange_id = "binance"
-    adapter._tick_size_precision_mode = 4
-    adapter._decimal_places_precision_mode = 2
-    mock_ccxt_exchange.precisionMode = 4
-    return adapter
+    mock_ccxt_exchange.precisionMode = PRECISION_MODES["TICK_SIZE"]
+    return build_crypto_adapter(mock_ccxt_exchange)
 
 
 @pytest.fixture
 def authed_adapter(mock_ccxt_exchange):
     """CryptoAdapter with API key (authenticated mode)."""
-    adapter = CryptoAdapter.__new__(CryptoAdapter)
-    adapter._exchange = mock_ccxt_exchange
-    adapter._read_only = False
-    adapter._exchange_id = "binance"
-    return adapter
+    return build_crypto_adapter(mock_ccxt_exchange, api_key="k", api_secret="s")
 
 
 # ---------------------------------------------------------------------------
@@ -359,11 +346,7 @@ def test_fetch_funding_rate_history_empty(readonly_adapter, mock_ccxt_exchange):
 
 
 def _paged_adapter(venue: PagedVenue, exchange_id: str = "binanceusdm") -> CryptoAdapter:
-    adapter = CryptoAdapter.__new__(CryptoAdapter)
-    adapter._exchange = venue
-    adapter._read_only = True
-    adapter._exchange_id = exchange_id
-    return adapter
+    return build_crypto_adapter(venue, exchange_id)
 
 
 def _ms(ts: pd.Series) -> list[int]:
@@ -1074,12 +1057,10 @@ def test_prepare_order_types_an_amount_rounding_to_zero(authed_adapter, mock_ccx
         authed_adapter.prepare_order(dict(_DUST_SIGNAL))
 
 
-@pytest.mark.sdk_contract
 def test_prepare_order_types_ccxts_zero_precision_refusal(authed_adapter, mock_ccxt_exchange):
     # ccxt's amount_to_precision raises exactly InvalidOrder when the amount
     # truncates to zero instead of returning "0".
-    ccxt = _require_ccxt()
-    mock_ccxt_exchange.amount_to_precision.side_effect = ccxt.InvalidOrder(
+    mock_ccxt_exchange.amount_to_precision.side_effect = errors.InvalidOrder(
         "binance amount of BTC/USDT must be greater than minimum amount precision of 0.001"
     )
 
@@ -1087,12 +1068,10 @@ def test_prepare_order_types_ccxts_zero_precision_refusal(authed_adapter, mock_c
         authed_adapter.prepare_order(dict(_DUST_SIGNAL))
 
 
-@pytest.mark.sdk_contract
 def test_prepare_order_keeps_other_precision_errors_untyped(authed_adapter, mock_ccxt_exchange):
-    ccxt = _require_ccxt()
-    mock_ccxt_exchange.amount_to_precision.side_effect = ccxt.ContractUnavailable("delisted")
+    mock_ccxt_exchange.amount_to_precision.side_effect = errors.ContractUnavailable("delisted")
 
-    with pytest.raises(ccxt.ContractUnavailable):
+    with pytest.raises(errors.ContractUnavailable):
         authed_adapter.prepare_order(dict(_DUST_SIGNAL))
 
 
@@ -1395,7 +1374,6 @@ _MARKET_BUY = {
 }
 
 
-@pytest.mark.sdk_contract
 @pytest.mark.parametrize(
     ("error_name", "account_fault"),
     [
@@ -1422,8 +1400,7 @@ _MARKET_BUY = {
 def test_place_order_classifies_definite_venue_refusals(
     authed_adapter, mock_ccxt_exchange, error_name, account_fault
 ):
-    ccxt = _require_ccxt()
-    original = getattr(ccxt, error_name)(
+    original = getattr(errors, error_name)(
         'binance {"code":-2022,"msg":"ReduceOnly Order is rejected."}'
     )
     mock_ccxt_exchange.create_order.side_effect = original
@@ -1436,7 +1413,6 @@ def test_place_order_classifies_definite_venue_refusals(
     assert raised.value.account_fault is account_fault
 
 
-@pytest.mark.sdk_contract
 @pytest.mark.parametrize(
     "error_name",
     [
@@ -1460,10 +1436,9 @@ def test_place_order_classifies_definite_venue_refusals(
 def test_place_order_leaves_unknown_outcomes_unclassified(
     authed_adapter, mock_ccxt_exchange, error_name
 ):
-    ccxt = _require_ccxt()
-    mock_ccxt_exchange.create_order.side_effect = getattr(ccxt, error_name)("?")
+    mock_ccxt_exchange.create_order.side_effect = getattr(errors, error_name)("?")
 
-    with pytest.raises(getattr(ccxt, error_name)) as raised:
+    with pytest.raises(getattr(errors, error_name)) as raised:
         authed_adapter.place_order(dict(_MARKET_BUY))
 
     assert not isinstance(raised.value, OrderRejectedError)
@@ -1479,9 +1454,9 @@ def _raise(error: Exception):
 @pytest.mark.parametrize(
     ("step", "account_fault"),
     [
-        pytest.param("load_markets:NetworkError", False, marks=pytest.mark.sdk_contract),
-        pytest.param("load_markets:AuthenticationError", True, marks=pytest.mark.sdk_contract),
-        pytest.param("market:BadSymbol", False, marks=pytest.mark.sdk_contract),
+        ("load_markets:NetworkError", False),
+        ("load_markets:AuthenticationError", True),
+        ("market:BadSymbol", False),
         ("signal", False),
         ("contract", False),
     ],
@@ -1496,7 +1471,7 @@ def test_place_order_refuses_every_failure_before_sending(
         signal["contract_month"] = "202612"
     else:
         method, error_name = step.split(":")
-        error = getattr(_require_ccxt(), error_name)("x")
+        error = getattr(errors, error_name)("x")
         getattr(mock_ccxt_exchange, method).side_effect = _raise(error)
 
     with pytest.raises(OrderRejectedError, match="BTC/USDT not sent") as raised:
@@ -1507,14 +1482,12 @@ def test_place_order_refuses_every_failure_before_sending(
     mock_ccxt_exchange.create_order.assert_not_called()
 
 
-@pytest.mark.sdk_contract
 def test_place_order_does_not_classify_a_failure_after_creation(authed_adapter, mock_ccxt_exchange):
-    ccxt = _require_ccxt()
     mock_ccxt_exchange.create_order.return_value = {"id": "ord_1", "status": "closed", "filled": 1}
     mock_ccxt_exchange.has = {"fetchMyTrades": True}
-    mock_ccxt_exchange.fetch_my_trades.side_effect = ccxt.BadRequest("bad fee lookup")
+    mock_ccxt_exchange.fetch_my_trades.side_effect = errors.BadRequest("bad fee lookup")
 
-    with pytest.raises(ccxt.BadRequest) as raised:
+    with pytest.raises(errors.BadRequest) as raised:
         authed_adapter.place_order(dict(_MARKET_BUY))
 
     assert not isinstance(raised.value, OrderRejectedError)
@@ -1540,7 +1513,6 @@ _RECONCILIATION_READS = {
 }
 
 
-@pytest.mark.sdk_contract
 @pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
 @pytest.mark.parametrize(
     "error_name",
@@ -1556,9 +1528,8 @@ _RECONCILIATION_READS = {
 def test_reconciliation_reads_classify_network_errors_as_unavailable(
     authed_adapter, mock_ccxt_exchange, read, error_name
 ):
-    ccxt = _require_ccxt()
     method, call = _RECONCILIATION_READS[read]
-    original = getattr(ccxt, error_name)("venue down")
+    original = getattr(errors, error_name)("venue down")
     getattr(mock_ccxt_exchange, method).side_effect = original
 
     with pytest.raises(BrokerUnavailableError) as raised:
@@ -1567,7 +1538,6 @@ def test_reconciliation_reads_classify_network_errors_as_unavailable(
     assert raised.value.__cause__ is original
 
 
-@pytest.mark.sdk_contract
 @pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
 @pytest.mark.parametrize(
     "error_name",
@@ -1584,23 +1554,20 @@ def test_reconciliation_reads_classify_network_errors_as_unavailable(
 def test_reconciliation_reads_leave_non_network_errors_unclassified(
     authed_adapter, mock_ccxt_exchange, read, error_name
 ):
-    ccxt = _require_ccxt()
     method, call = _RECONCILIATION_READS[read]
-    getattr(mock_ccxt_exchange, method).side_effect = getattr(ccxt, error_name)("refused")
+    getattr(mock_ccxt_exchange, method).side_effect = getattr(errors, error_name)("refused")
 
-    with pytest.raises(getattr(ccxt, error_name)) as raised:
+    with pytest.raises(getattr(errors, error_name)) as raised:
         call(authed_adapter)
 
     assert not isinstance(raised.value, BrokerUnavailableError)
 
 
-@pytest.mark.sdk_contract
 def test_order_lookup_network_errors_are_not_reclassified(authed_adapter, mock_ccxt_exchange):
-    ccxt = _require_ccxt()
     mock_ccxt_exchange.has = {"fetchOrder": True}
-    mock_ccxt_exchange.fetch_order.side_effect = ccxt.RequestTimeout("slow")
+    mock_ccxt_exchange.fetch_order.side_effect = errors.RequestTimeout("slow")
 
-    with pytest.raises(ccxt.RequestTimeout):
+    with pytest.raises(errors.RequestTimeout):
         authed_adapter.get_order("ord_1", "BTC/USDT")
 
 
@@ -1612,10 +1579,7 @@ _CLASSIFYING_CALLS = {
 
 
 @pytest.mark.parametrize("call", sorted(_CLASSIFYING_CALLS))
-def test_errors_pass_through_unchanged_without_ccxt(
-    authed_adapter, mock_ccxt_exchange, monkeypatch, call
-):
-    monkeypatch.setitem(sys.modules, "ccxt", None)
+def test_non_ccxt_errors_pass_through_unchanged(authed_adapter, mock_ccxt_exchange, call):
     method, invoke = _CLASSIFYING_CALLS[call]
     original = RuntimeError("boom")
     getattr(mock_ccxt_exchange, method).side_effect = original
@@ -1657,19 +1621,14 @@ def test_cancel_order_returns_refreshed_cumulative_state(authed_adapter, mock_cc
 
 
 # ---------------------------------------------------------------------------
-# Test 5: sandbox mode — CryptoAdapter.__init__ itself (not the bypassed
-# __new__ fixtures above), since that's the only place set_sandbox_mode /
-# the binance URL patch actually run.
+# Test 5: sandbox mode — set_sandbox_mode and the binance URL patch
 # ---------------------------------------------------------------------------
 
 
 def _build_adapter_via_init(exchange_id: str, mock_exchange: MagicMock, **kwargs) -> CryptoAdapter:
-    with patch("librae.brokers.crypto_adapter._require_ccxt") as mock_require_ccxt:
-        mock_exchange_cls = MagicMock(return_value=mock_exchange)
-        mock_require_ccxt.return_value = MagicMock(**{exchange_id: mock_exchange_cls})
-        return CryptoAdapter(
-            exchange_id=exchange_id, api_key="k", api_secret="s", sandbox=True, **kwargs
-        )
+    return build_crypto_adapter(
+        mock_exchange, exchange_id, api_key="k", api_secret="s", sandbox=True, **kwargs
+    )
 
 
 def test_sandbox_enables_ccxt_sandbox_mode():

@@ -26,6 +26,22 @@ def test_ccxt_contract() -> None:
     assert callable(exchange.cancel_order)
 
 
+def test_ccxt_standin_matches_ccxt() -> None:
+    from librae.brokers.crypto_adapter import _require_ccxt
+    from tests.ccxt_standin import PRECISION_MODES, errors
+
+    ccxt = _require_ccxt()
+
+    def lineage(cls: type) -> list[str]:
+        return [ancestor.__name__ for ancestor in cls.__mro__]
+
+    standins = vars(errors)
+    assert {name: lineage(cls) for name, cls in standins.items()} == {
+        name: lineage(getattr(ccxt, name)) for name in standins
+    }
+    assert {name: getattr(ccxt, name) for name in PRECISION_MODES} == PRECISION_MODES
+
+
 def test_shioaji_contract() -> None:
     from librae.brokers.shioaji_adapter import _require_shioaji
 
