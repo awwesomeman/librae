@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pandas as pd
+import pytest
 from librae.core.run_config import AccountConfig, ExecutionPolicy, RunConfig
 from librae.live.state import MemoryLiveStateStore
 
@@ -437,7 +438,7 @@ class TestWarmupFetcher:
             ("ETHUSDT", 12),
             ("ETHUSDT", 24),
             ("BTCUSDT", 2),
-            ("ETHUSDT", 2),
+            ("ETHUSDT", 3),
         ]
         assert not trader.warmup_ready
         feature.assert_not_called()
@@ -484,9 +485,11 @@ class TestWarmupFetcher:
 
         def fetcher(_symbol: str, _timeframe: str, limit: int, **_kwargs):
             requests.append(limit)
+            # Like the broker adapters, the forming bar counts toward the
+            # limit and is then dropped.
             completed = (now[0] - listed_at) // timedelta(hours=1)
-            timestamps = [listed_at + timedelta(hours=hour) for hour in range(completed)]
-            return _bars(timestamps).iloc[-limit:].reset_index(drop=True)
+            timestamps = [listed_at + timedelta(hours=hour) for hour in range(completed + 1)]
+            return _bars(timestamps).iloc[-limit:].iloc[:-1].reset_index(drop=True)
 
         strategy = MagicMock()
         strategy.on_bar.return_value = []
@@ -513,8 +516,8 @@ class TestWarmupFetcher:
             now[0] += timedelta(hours=1)
             requests.clear()
             trader._poll_cycle()
-            assert requests in ([2], [2, 804])
-            if requests == [2, 804]:
+            assert requests in ([3], [3, 804])
+            if requests == [3, 804]:
                 reprobe_polls.append(poll)
 
         assert reprobe_polls == [2, 6, 14, 30, 62, 94]
@@ -523,8 +526,71 @@ class TestWarmupFetcher:
         assert not trader.warmup_ready
         strategy.on_bar.assert_not_called()
 
+    @pytest.mark.parametrize("bridge_fails_once", [False, True])
+    def test_bars_missed_by_failed_polls_are_filled_before_warmup_turns_ready(
+        self, bridge_fails_once: bool
+    ):
+        from librae.live.engine import LiveTrader
+
+        listed_at = datetime(2025, 1, 1, tzinfo=UTC)
+        now = [listed_at + timedelta(hours=2)]
+        requests: list[int] = []
+        failing = [False]
+        poll_number = [0]
+        feature_windows: list[list[datetime]] = []
+
+        def fetcher(_symbol: str, _timeframe: str, limit: int, **_kwargs):
+            requests.append(limit)
+            if failing[0] or (bridge_fails_once and poll_number[0] == 37 and limit == 6):
+                raise RuntimeError("venue 5xx")
+            completed = (now[0] - listed_at) // timedelta(hours=1)
+            timestamps = [listed_at + timedelta(hours=hour) for hour in range(completed)]
+            return _bars(timestamps).iloc[-limit:].reset_index(drop=True)
+
+        def capture_window(frame: pd.DataFrame) -> pd.DataFrame:
+            feature_windows.append([value.to_pydatetime() for value in frame.index])
+            return frame
+
+        strategy = MagicMock()
+        strategy.on_bar.return_value = []
+        trader = LiveTrader(
+            strategy,
+            capture_window,
+            config=_test_cfg(
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    warmup_periods=40,
+                )
+            ),
+            adapter=fetcher,
+            clock=lambda: now[0],
+        )
+        trader._poll_cycle()
+
+        ready_poll = None
+        for poll in range(1, 41):
+            now[0] += timedelta(hours=1)
+            poll_number[0] = poll
+            failing[0] = poll in (34, 35, 36)
+            requests.clear()
+            trader._poll_cycle()
+            if poll == 37:
+                # Four bars closed since the last success: widen until the
+                # response reaches the cached head instead of walking. A
+                # failed wider request merges nothing, so the next poll
+                # bridges the same hole.
+                assert requests == [3, 6]
+            if trader.warmup_ready:
+                ready_poll = poll
+                break
+
+        assert ready_poll == 38
+        window = feature_windows[-1]
+        assert len(window) == 40
+        assert (pd.DatetimeIndex(window).to_series().diff().dropna() == timedelta(hours=1)).all()
+
     def test_reprobe_ignores_bars_newer_than_the_oldest_cached_bar(self):
-        """Missed or mid-walk bars are not older history and keep the backoff."""
+        """Missed bars are bridged without a walk; neither they nor mid-walk bars reset backoff."""
         from librae.live.engine import LiveTrader
 
         listed_at = datetime(2025, 1, 1, tzinfo=UTC)
@@ -563,6 +629,8 @@ class TestWarmupFetcher:
                 reprobe_polls.append(poll)
 
         assert reprobe_polls == [2, 6, 14, 30]
+        cached = trader._ohlcv_cache["BTCUSDT"]
+        assert (cached["ts"].diff().dropna() == timedelta(hours=1)).all()
 
     def test_failed_reprobe_still_backs_off(self):
         from librae.live.engine import LiveTrader
@@ -634,15 +702,15 @@ class TestWarmupFetcher:
         for _ in range(3):
             trader._fetch_with_cache("BTCUSDT")
 
-        assert requests == [6, 12, 24, 2, 2, 24, 2, 24]
+        assert requests == [6, 12, 24, 3, 3, 24, 3, 24]
         assert len(trader._ohlcv_cache["BTCUSDT"]) == 4
         assert trader._warmup_exhausted["BTCUSDT"] == (2, 2)
 
     def test_reprobe_merges_correction_without_resetting_backoff(self):
         from librae.live.engine import LiveTrader
 
-        timestamps = [datetime(2025, 1, 1, hour, tzinfo=UTC) for hour in range(3)]
-        original = _bars(timestamps, closes=[100.0, 101.0, 102.0])
+        timestamps = [datetime(2025, 1, 1, hour, tzinfo=UTC) for hour in range(4)]
+        original = _bars(timestamps, closes=[100.0, 101.0, 102.0, 103.0])
         original["available_at"] = pd.DatetimeIndex(
             [timestamp + timedelta(hours=1) for timestamp in timestamps]
         )
@@ -661,7 +729,7 @@ class TestWarmupFetcher:
             config=_test_cfg(
                 execution=ExecutionPolicy(
                     max_bar_volume_participation_rate=None,
-                    warmup_periods=4,
+                    warmup_periods=5,
                 )
             ),
             adapter=fetcher,
@@ -672,7 +740,7 @@ class TestWarmupFetcher:
 
         result = trader._fetch_with_cache("BTCUSDT")
 
-        assert requests == [2, 20]
+        assert requests == [3, 24]
         assert result is not None
         assert result.loc[0, "close"] == 99.0
         assert result.loc[0, "available_at"] == pd.Timestamp("2025-01-01T04:00:00Z")
@@ -747,7 +815,7 @@ class TestWarmupFetcher:
         assert "BTCUSDT" in trader._warmup_exhausted
         trader._fetch_with_cache("BTCUSDT")
 
-        assert requests == [6, 12, 24, 2, 2, 24]
+        assert requests == [6, 12, 24, 3, 3, 24]
         assert trader._warmup_gap("BTCUSDT", trader._ohlcv_cache["BTCUSDT"]) is None
         assert "BTCUSDT" not in trader._warmup_exhausted
 

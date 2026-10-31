@@ -585,8 +585,8 @@ retries the selected adapter or `warmup_fetcher` with bounded 1x/2x/4x history
 requests. It keeps strategy and feature evaluation disabled, leaves event
 watermarks unchanged, and emits an edge-triggered `warmup_incomplete` runtime
 diagnostic if the window is still short. Once the largest request stops
-returning new history, later polls fetch only the newest bars and repeat the
-largest request at doubling poll intervals, capped by
+returning new history, later polls fetch only bars newer than the cache and
+repeat the largest request at doubling poll intervals, capped by
 `LiveTrader.WARMUP_REPROBE_MAX_INTERVAL_POLLS`; a repeat that finds older
 history is retried on the next poll. After every symbol is ready, ordinary
 two-bar incremental polling resumes. A custom

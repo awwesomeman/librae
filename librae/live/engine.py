@@ -2571,11 +2571,31 @@ class LiveTrader:
                     # Newly closed bars are the ordinary increment, not history
                     # the largest request uncovered. Fetching them first keeps
                     # the cache fresh between re-probes and keeps them from
-                    # counting as re-probe progress.
-                    merged = merge_fetched(
-                        merged,
-                        self._fetchers[symbol](symbol, self._timeframe, 2, drop_incomplete=True),
-                    )
+                    # counting as re-probe progress. The request widens until
+                    # it reaches the cached head: warmup counts rows, so bars a
+                    # failed or late poll missed would otherwise let a window
+                    # with a hole turn ready.
+                    head = None if merged is None or merged.empty else merged["ts"].iloc[-1]
+                    # Adapters drop the forming bar from the requested count,
+                    # so three rows reach back to the head after one new bar.
+                    limit = 3
+                    while True:
+                        recent = self._eligible_runtime_rows(
+                            symbol,
+                            self._fetchers[symbol](
+                                symbol, self._timeframe, limit, drop_incomplete=True
+                            ),
+                        )
+                        reaches_head = head is None or recent.empty or recent["ts"].iloc[0] <= head
+                        if reaches_head or limit >= all_request_sizes[-1]:
+                            break
+                        limit = min(2 * limit, all_request_sizes[-1])
+                    # Merge only the widest response, and only if it bridges
+                    # the hole or fills the window alone: merging a narrower
+                    # one first would move the head past a hole that a failed
+                    # wider request then leaves behind.
+                    if reaches_head or len(recent) >= self._warmup_periods:
+                        merged = merge_fetched(merged, recent)
                     polls_left, interval = backoff
                     if self._warmup_gap(symbol, merged) is None:
                         self._warmup_exhausted.pop(symbol)
