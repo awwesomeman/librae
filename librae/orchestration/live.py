@@ -387,6 +387,10 @@ class _TimescaleCallbacks:
             strategy_name=self._config.strategy_name,
         )
 
+    # The engine queues each event until this returns and offers it again on
+    # a later cycle; write_trade_event ignores an event_id it already holds.
+    durable_position_event_delivery = True
+
     def on_position_event(self, event: PositionEvent, sequence: int) -> None:
         from librae.db.timescale_writer import write_trade_event
 
@@ -400,7 +404,7 @@ class _TimescaleCallbacks:
             account_id=self._config.account_id,
             currency=self._config.account.currency,
         )
-        self._write(write_trade_event, critical=True, **fields)
+        self._write(write_trade_event, critical=True, propagate=True, **fields)
 
     def on_financing_cash_flow(self, cash_flow: FinancingCashFlow) -> None:
         from librae.db.timescale_writer import write_financing_cash_flow

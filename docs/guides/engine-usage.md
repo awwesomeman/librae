@@ -1169,7 +1169,13 @@ shape; it is not a business/domain version.
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted and its UTC wall-clock timestamp are saved before network
 I/O, so an ambiguous placement outcome is looked up rather than blindly
-retried, and local order age survives restart. Analytics callbacks remain
+retried, and local order age survives restart. A row whose checkpoint write
+fails is carried by the next checkpoint that lands, even when the order went
+terminal meanwhile and left the snapshot. A row the store refuses while it
+still accepts the snapshot is dropped rather than failing every later
+checkpoint, a halt's included: it is recorded as an `order_row_rejected`
+runtime event, alerts once, and sets `LiveTrader.order_ledger_degraded` for
+the rest of the process. Analytics callbacks remain
 projections; they are not broker fill truth. `runtime_revision` deliberately
 does not form part of the checkpoint key; `architecture.md` is the canonical
 home for what that key contains.

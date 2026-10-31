@@ -34,6 +34,7 @@ from librae.core.executor import (
     ExecutionResult,
     ExecutionSideUnavailableError,
     ExecutionUnavailableError,
+    PositionEvent,
     RuntimeEvent,
     apply_execution_fill,
     calc_equity,
@@ -856,6 +857,11 @@ class LiveTrader:
         self._halt_unpersisted = False
         # Whether a halt still owes the live cancellation it skipped or that failed.
         self._halt_cancels_pending = False
+        # What a failed checkpoint left unwritten, keyed by client order id, and
+        # the fills it left unpublished; the next checkpoint that lands carries both.
+        self._unpersisted_orders: dict[str, TrackedOrder] = {}
+        self._unpublished_results: list[ExecutionResult] = []
+        self._order_ledger_degraded = False
         self._pending_decision: StrategyDecision = []
         # Bar timestamp each pending intent first rested on, keyed by symbol.
         # A resting "day" limit expires against the session it first rested in.
@@ -912,6 +918,19 @@ class LiveTrader:
 
         self._on_bar = on_bar
         self._on_position_event = on_position_event
+        # Opt-in like OHLCV delivery below: only a sink that declares it is
+        # idempotent may be offered the same event again.
+        position_sink = getattr(on_position_event, "__self__", on_position_event)
+        self._durable_position_event_delivery = (
+            getattr(position_sink, "durable_position_event_delivery", False) is True
+        )
+        self._pending_position_events: list[tuple[PositionEvent, int]] = []
+        self._position_event_delivery_degraded = False
+        # Poll cycles in which the head of the queue was refused in a row.
+        self._head_position_event_failures = 0
+        # Poll cycles in a row whose flush drained the queue with nothing refused.
+        self._clean_position_event_cycles = 0
+        self._dropped_position_event_sequences: list[int] = []
         self._on_ohlcv = on_ohlcv
         # A sink opts into at-least-once delivery by declaring it. Anything
         # else keeps the documented best-effort contract, because the engine
@@ -1181,9 +1200,126 @@ class LiveTrader:
             )
 
     def _persist_state(self, *orders: TrackedOrder) -> None:
-        """Critical checkpoint write; failures propagate and stop the cycle."""
-        if self._state_store is not None:
-            self._state_store.save(self._snapshot_state(), orders)
+        """Critical checkpoint write; failures propagate and stop the cycle.
+
+        Order rows a failed write did not land ride along with the next one,
+        in the same transaction as the snapshot, because an order that went
+        terminal meanwhile is no longer in the snapshot to rewrite it.
+
+        A failed write that carried rows is retried with the snapshot alone.
+        If that lands, the store is up and a row was refused, so each row is
+        written on its own and one the store still refuses is dropped loudly:
+        a carried row the store never accepts would otherwise fail every
+        later checkpoint, including a halt's, and its cancellation with it.
+        """
+        if self._state_store is None:
+            return
+        for tracked in orders:
+            self._unpersisted_orders[tracked.request.client_order_id] = tracked
+        snapshot = self._snapshot_state()
+        try:
+            self._state_store.save(snapshot, tuple(self._unpersisted_orders.values()))
+        except Exception as exc:
+            if not self._unpersisted_orders or not self._store_accepts(snapshot):
+                self._log_checkpoint_failure(exc)
+                raise
+            self._write_rows_one_by_one(snapshot)
+        self._unpersisted_orders.clear()
+
+    def _store_accepts(self, snapshot: LiveRuntimeState) -> bool:
+        """Write the snapshot with no rows; False means the store itself is failing."""
+        try:
+            self._state_store.save(snapshot, ())
+        except Exception:
+            return False
+        return True
+
+    def _write_rows_one_by_one(self, snapshot: LiveRuntimeState) -> None:
+        """Write each carried row alone, dropping only one the store refuses while up.
+
+        A row is tried twice, so a connection lost mid-write does not read as
+        a refusal, and its second failure is re-checked with the snapshot
+        alone, so a store that goes down partway keeps the rest carried and
+        raises, as an outage does.
+        """
+        for client_order_id, tracked in list(self._unpersisted_orders.items()):
+            try:
+                self._save_row(snapshot, tracked)
+            except Exception as exc:
+                if not self._store_accepts(snapshot):
+                    self._log_checkpoint_failure(exc)
+                    raise
+                del self._unpersisted_orders[client_order_id]
+                self._reject_order_row(tracked, exc)
+                continue
+            del self._unpersisted_orders[client_order_id]
+
+    def _save_row(self, snapshot: LiveRuntimeState, tracked: TrackedOrder) -> None:
+        try:
+            self._state_store.save(snapshot, (tracked,))
+        except Exception:
+            self._state_store.save(snapshot, (tracked,))
+
+    def _log_checkpoint_failure(self, exc: Exception) -> None:
+        logger.error(
+            "Checkpoint not written (%s); order rows pending: %s",
+            exc,
+            ", ".join(self._unpersisted_orders) or "none",
+        )
+
+    def _reject_order_row(self, tracked: TrackedOrder, exc: Exception) -> None:
+        """Drop one order row the store refuses, without stopping the book.
+
+        The broker still holds the order, but a terminal order has left the
+        checkpoint, so its ledger row keeps an older state and the runtime
+        event is the only record of the refused one. The flag and alert come
+        before that event, so a failing event sink cannot hide the gap.
+        """
+        request = tracked.request
+        logger.error(
+            "Order row %s (%s) refused by the state store (%s: %s); dropped",
+            request.client_order_id,
+            tracked.status,
+            type(exc).__name__,
+            exc,
+        )
+        if not self._order_ledger_degraded:
+            self._order_ledger_degraded = True
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Order Row Rejected",
+                message=(
+                    f"The state store refused the broker_orders row of "
+                    f"{request.client_order_id} ({tracked.status}; {type(exc).__name__}: "
+                    f"{exc}); it was dropped and each refused row is recorded as a runtime "
+                    "event. Trading continues; the ledger may show an older state for it "
+                    "until the row is restored."
+                ),
+            )
+        if self._on_runtime_event:
+            self._on_runtime_event(
+                RuntimeEvent(
+                    ts=self._utc_now(),
+                    event_type="decision_skipped",
+                    symbol=request.symbol,
+                    detail={
+                        "reason": "order_row_rejected",
+                        "client_order_id": request.client_order_id,
+                        "status": tracked.status,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+            )
+
+    def _publish_checkpointed_results(self) -> None:
+        """Publish fills the last checkpoint holds, oldest first.
+
+        Called only where order work owns the outcome, never from inside a
+        checkpoint: a sink error raised there would read as the checkpoint
+        failing, and a halt would report itself unpersisted.
+        """
+        while self._unpublished_results:
+            self._publish_action_results(self._unpublished_results.pop(0))
 
     # WHY: 3 consecutive errors likely means a persistent issue (API down, DB
     # unreachable), not a transient blip — worth alerting the operator.
@@ -1210,6 +1346,23 @@ class LiveTrader:
     # tolerated on top of that before alerting. Live skips stale frames rather
     # than submitting decisions from obsolete market snapshots.
     STALE_DATA_TOLERANCE_BARS = 2
+
+    # The retry queue is in memory, one event per fill, so this sits far above
+    # what a book trades through an outage. Reaching it means the sink keeps
+    # refusing something, and the oldest event is dropped so one it never
+    # accepts cannot hold back every later one.
+    MAX_PENDING_POSITION_EVENTS = 1_000
+
+    # Poll cycles the head event may be refused before it is dropped, so one
+    # event the sink never accepts cannot hold back the rest until the bound
+    # above. Counted once per cycle, so this spans an hour of 5-second polls
+    # and twelve hours of minute polls: long enough to ride out a database
+    # restart, while the first refusal already alerts.
+    MAX_POSITION_EVENT_ATTEMPTS = 720
+
+    # Clean poll cycles before a degraded episode ends and may alert again,
+    # so a sink that fails now and then alerts once rather than every cycle.
+    POSITION_EVENT_RECOVERY_CYCLES = 60
 
     # WHY: a portfolio-level decision (rebalance, multi-symbol entry) can fill
     # many symbols in one cycle — pushing one Telegram message per fill floods
@@ -2253,6 +2406,33 @@ class LiveTrader:
         return self._ohlcv_audit_degraded
 
     @property
+    def position_event_delivery_degraded(self) -> bool:
+        """Whether position event delivery is failing, set at the first refusal.
+
+        Clears after ``POSITION_EVENT_RECOVERY_CYCLES`` clean poll cycles. What
+        was dropped meanwhile is in ``dropped_position_event_sequences``.
+        """
+        return self._position_event_delivery_degraded
+
+    @property
+    def dropped_position_event_sequences(self) -> tuple[int, ...]:
+        """Every position event sequence this process dropped undelivered, oldest first.
+
+        The backfill list when the runtime-event sink shares the store that
+        refused the events and could not record the drops either.
+        """
+        return tuple(self._dropped_position_event_sequences)
+
+    @property
+    def order_ledger_degraded(self) -> bool:
+        """Whether the state store refused an order row, which was dropped.
+
+        Stays set for the process: the ledger has a gap until the row named in
+        its runtime event is restored.
+        """
+        return self._order_ledger_degraded
+
+    @property
     def run_id(self) -> str:
         """Stable id used by callbacks and persisted runtime facts."""
         return self._run_id
@@ -2387,6 +2567,12 @@ class LiveTrader:
         # An owed halt cancellation has already polled and cancelled every
         # tracked order once this cycle; advancing would repeat the head's.
         cancelled = self._run_requested_halt() or self._retry_halt()
+        # Order work that hit a store outage may have left ledger rows and
+        # fills behind, with no later order work to carry them.
+        if self._unpersisted_orders:
+            self._persist_state()
+        self._publish_checkpointed_results()
+        self._flush_pending_position_events(count_attempt=True)
         if not self._executor.simulation and self._active_orders and not cancelled:
             self._advance_live_orders()
         self._run_requested_flatten()
@@ -3043,7 +3229,10 @@ class LiveTrader:
             if event.event_type in ("close", "reduce"):
                 self._performance_dirty = True
             if self._on_position_event:
-                self._on_position_event(event, self._event_sequence)
+                if self._durable_position_event_delivery:
+                    self._queue_position_event(event, self._event_sequence)
+                else:
+                    self._on_position_event(event, self._event_sequence)
 
             if event.event_type in ("open", "add"):
                 label = (
@@ -3062,6 +3251,8 @@ class LiveTrader:
                         "notional": event.notional,
                     }
                 )
+
+        self._flush_pending_position_events()
 
         for trade in result.trades:
             logger.info("SIGNAL EXIT %s @ %.2f", trade.symbol, trade.exit_price)
@@ -3114,6 +3305,119 @@ class LiveTrader:
         if self._on_runtime_event:
             for runtime_event in result.runtime_events:
                 self._on_runtime_event(runtime_event)
+
+    def _queue_position_event(self, event: PositionEvent, sequence: int) -> None:
+        pending = self._pending_position_events
+        pending.append((event, sequence))
+        if len(pending) > self.MAX_PENDING_POSITION_EVENTS:
+            # A result with many fills fills the queue before its own flush,
+            # so offer it first and drop only what a refusing sink left.
+            self._flush_pending_position_events()
+        while len(pending) > self.MAX_PENDING_POSITION_EVENTS:
+            self._drop_position_event(*pending[0], reason="backlog_full")
+            self._pop_head_position_event()
+
+    def _drop_position_event(self, event: PositionEvent, sequence: int, *, reason: str) -> None:
+        """Drop one undelivered event loudly, without stopping the book or raising.
+
+        The checkpoint and the broker remain the fill's record, so this loses
+        an analytics row, not position truth. The sequence is kept in memory
+        and logged before the runtime event is tried, because that sink often
+        writes to the store that just refused the event; its failure is logged
+        and swallowed so it cannot interrupt queueing or order work.
+        """
+        self._dropped_position_event_sequences.append(sequence)
+        logger.error(
+            "Dropped undelivered position event %d (%s %s at %s): %s",
+            sequence,
+            event.symbol,
+            event.event_type,
+            event.ts.isoformat(),
+            reason,
+        )
+        self._mark_position_event_delivery_degraded(f"position event {sequence} dropped ({reason})")
+        if not self._on_runtime_event:
+            return
+        try:
+            self._on_runtime_event(
+                RuntimeEvent(
+                    ts=self._utc_now(),
+                    event_type="decision_skipped",
+                    symbol=event.symbol,
+                    detail={
+                        "reason": "position_event_delivery_failed",
+                        "drop_reason": reason,
+                        "sequence": sequence,
+                        "event_type": event.event_type,
+                        "ts": event.ts.isoformat(),
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.warning("Runtime event for dropped position event %d failed: %s", sequence, exc)
+
+    def _mark_position_event_delivery_degraded(self, cause: str) -> None:
+        """Flag and alert once per episode, at the first failure rather than the first drop.
+
+        Waiting for a drop would leave a sink that refuses one event silent
+        while fills pile up behind it, which on a slow book can take months.
+        """
+        self._clean_position_event_cycles = 0
+        if self._position_event_delivery_degraded:
+            return
+        self._position_event_delivery_degraded = True
+        logger.error("Position event delivery failing: %s", cause)
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Position Event Delivery Failing",
+            message=(
+                f"{cause}. Undelivered events are retried every cycle; one refused for "
+                f"{self.MAX_POSITION_EVENT_ATTEMPTS} cycles, or beyond "
+                f"{self.MAX_PENDING_POSITION_EVENTS} queued, is dropped and its sequence "
+                "logged. Trading continues — the checkpoint and broker still hold every fill."
+            ),
+        )
+
+    def _pop_head_position_event(self) -> None:
+        self._pending_position_events.pop(0)
+        self._head_position_event_failures = 0
+
+    def _flush_pending_position_events(self, *, count_attempt: bool = False) -> None:
+        """Offer queued position events in sequence order, keeping any not accepted.
+
+        Only the poll cycle's flush counts toward the head's attempt bound and
+        toward recovery, so a cycle with many fills cannot use either up.
+        """
+        while self._pending_position_events:
+            event, sequence = self._pending_position_events[0]
+            try:
+                self._on_position_event(event, sequence)
+            except Exception as exc:
+                logger.warning(
+                    "Position event %d delivery failed (%s); %d event(s) still pending",
+                    sequence,
+                    exc,
+                    len(self._pending_position_events),
+                )
+                self._mark_position_event_delivery_degraded(
+                    f"position event {sequence} refused ({type(exc).__name__}: {exc})"
+                )
+                if not count_attempt:
+                    return
+                self._head_position_event_failures += 1
+                if self._head_position_event_failures >= self.MAX_POSITION_EVENT_ATTEMPTS:
+                    self._drop_position_event(event, sequence, reason="attempts_exhausted")
+                    self._pop_head_position_event()
+                # The next event gets its first attempt in a later cycle, so an
+                # outage drops at most one event per bound's worth of cycles.
+                return
+            self._pop_head_position_event()
+        if not count_attempt or not self._position_event_delivery_degraded:
+            return
+        self._clean_position_event_cycles += 1
+        if self._clean_position_event_cycles >= self.POSITION_EVENT_RECOVERY_CYCLES:
+            self._position_event_delivery_degraded = False
+            logger.info("Position event delivery recovered")
 
     def _commit_simulated_results(
         self,
@@ -4364,9 +4668,9 @@ class LiveTrader:
             self._active_orders.remove(tracked)
         if result is not None:
             self._trade_count += len(result.trades)
+            self._unpublished_results.append(result)
         self._persist_state(tracked)
-        if result is not None:
-            self._publish_action_results(result)
+        self._publish_checkpointed_results()
 
     def _cancel_tracked_order(self, tracked: TrackedOrder) -> None:
         """Reconcile and cancel one tracked order without resubmitting it."""
