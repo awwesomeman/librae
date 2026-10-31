@@ -123,8 +123,12 @@ Refs #123
 - Open or reference an issue first for non-trivial changes. Branch as
   `<type>/<issue>-<slug>`, e.g. `fix/251-futures-selector-at-config-time`.
 - PR title is the commit subject plus the issue: `fix(config)!: ... (#251)`.
-- PR body: `Closes #N`, then a summary, anything deliberately not covered, and
-  the test plan actually run (with results).
+- PR body: `Closes #N`, then what a person needs to decide, readable in a
+  minute (about 15 lines, one sentence per point): what behaviour changes and
+  why; what needs judging, such as risks, departures from the issue and
+  omissions that affect the decision; and what was run, with results.
+  Per-behaviour specs, test lists and debugging history stay out: specs belong
+  in the docs and the commit body, tests in the diff.
 - PRs are squash-merged. The squash message must read as one commit under the
   rules above: rewrite it at merge, drop every auto-added `Co-authored-by`,
   and confirm the `!`/`BREAKING CHANGE:` decision.

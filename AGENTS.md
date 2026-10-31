@@ -34,6 +34,9 @@ general industry practice and these docs disagree, these docs win.
   writing, find the doc that already owns the concept and link to it; keep
   new text short and scannable. This includes rules: change the canonical
   doc above rather than restating a rule elsewhere.
+- **PR bodies written as a spec**: a person approves the PR from its body, so
+  it has to be readable in a minute. Follow
+  [CONTRIBUTING](CONTRIBUTING.md#branches-and-pull-requests).
 
 ## Rules shared across repos
 
