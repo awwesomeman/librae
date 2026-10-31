@@ -18,7 +18,7 @@ from librae.core.strategy import OrderIntent, Strategy
 from librae.live.executor import OrderRequest
 from librae.live.state import TrackedOrder
 
-from tests.engine import test_live_runner
+from tests.engine.live_factories import TEST_CLOCK_NOW, _HoldStrategy, make_live_trader
 from tests.engine.test_live_flatten import (
     SYMBOLS,
     _adapter,
@@ -27,7 +27,7 @@ from tests.engine.test_live_flatten import (
     _titled,
     _trader,
 )
-from tests.engine.test_live_runner import TEST_CLOCK_NOW, _HoldStrategy, _mock_order_adapter
+from tests.engine.test_live_runner import _mock_order_adapter
 
 PARK_SECONDS = 0.2
 
@@ -55,7 +55,7 @@ def _resting(order_id: str, status: str = "open") -> dict:
 
 
 def _single_symbol_trader(strategy: Strategy, adapter):
-    trader = test_live_runner.TestLiveExecutionLifecycle()._make_trader(strategy, adapter)
+    trader = make_live_trader(strategy, adapter)
     # run() may only install signal handlers on the main thread.
     trader._setup_signal_handlers = lambda: None
     return trader

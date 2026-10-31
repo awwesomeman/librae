@@ -49,7 +49,7 @@ def _bars(n: int = 6):
 
 def _halted_runner(*, positions=None, marks=None, last_bar_ts=None, clock=CLOCK):
     """A trader restored from a halted checkpoint, before any poll cycle."""
-    from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+    from tests.engine.live_factories import _test_cfg, make_live_runner
 
     config = _test_cfg(mode="sim", warmup_periods=1)
     store = MemoryLiveStateStore()
@@ -67,7 +67,7 @@ def _halted_runner(*, positions=None, marks=None, last_bar_ts=None, clock=CLOCK)
             halted=True,
         )
     )
-    runner = TestLiveTrader()._make_runner(
+    runner = make_live_runner(
         config=config,
         state_store=store,
         fetcher=lambda *a, **k: _bars(),

@@ -211,10 +211,10 @@ def _frame(n: int):
 def _runner(sink, *, store=None, bars=None):
     from librae.live.state import MemoryLiveStateStore
 
-    from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+    from tests.engine.live_factories import _test_cfg, make_live_runner
 
     state = bars if bars is not None else {"n": 6}
-    return TestLiveTrader()._make_runner(
+    return make_live_runner(
         config=_test_cfg(mode="sim", warmup_periods=1),
         state_store=store or MemoryLiveStateStore(),
         fetcher=lambda *a, **k: _frame(state["n"]),
@@ -296,9 +296,9 @@ class TestDurableSinkIsRetried:
         bars = {"n": 6}
         from librae.live.state import MemoryLiveStateStore
 
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=Count(),
             config=_test_cfg(mode="sim", warmup_periods=1),
             state_store=MemoryLiveStateStore(),
@@ -433,7 +433,7 @@ class TestTheReferencePathActuallyRetries:
         from librae.config.symbols import resolve_symbol
         from librae.orchestration.live import _TimescaleCallbacks
 
-        from tests.engine.test_live_runner import _test_cfg
+        from tests.engine.live_factories import _test_cfg
 
         config = _test_cfg(mode="sim", warmup_periods=1)
         callbacks = _TimescaleCallbacks(
@@ -477,7 +477,7 @@ class TestTheReferencePathActuallyRetries:
 
         from librae.live.state import MemoryLiveStateStore
 
-        from tests.engine.test_live_runner import TestLiveTrader
+        from tests.engine.live_factories import make_live_runner
 
         config, callbacks = self._callbacks()
         accepted: list = []
@@ -490,7 +490,7 @@ class TestTheReferencePathActuallyRetries:
             raise RuntimeError("timescale unavailable")
 
         bars = {"n": 6}
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             config=config,
             state_store=MemoryLiveStateStore(),
             fetcher=lambda *a, **k: _frame(bars["n"]),

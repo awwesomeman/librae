@@ -24,14 +24,14 @@ from librae.core.strategy import OrderIntent, PortfolioWeights, PositionState, S
 from librae.live.executor import OrderBelowVenueMinimumError, OrderRejectedError, OrderRequest
 from librae.live.state import LiveRebalance, TrackedOrder
 
-from tests.engine import test_live_runner
-from tests.engine.test_live_runner import (
+from tests.engine.live_factories import (
     TEST_CLOCK_NOW,
-    _broker_report,
     _HoldStrategy,
-    _mock_order_adapter,
     _test_cfg,
+    make_live_runner,
+    make_live_trader,
 )
+from tests.engine.test_live_runner import _broker_report, _mock_order_adapter
 
 SYMBOLS = ["AAA", "BBB", "DUST"]
 
@@ -69,8 +69,7 @@ def _adapter(below_minimum: str = "DUST"):
 def _trader(adapter, strategy: Strategy | None = None, **kwargs):
     events: list = []
     alerts: list[dict] = []
-    # Importing the class itself would make pytest collect its tests here too.
-    trader = test_live_runner.TestLiveExecutionLifecycle()._make_trader(
+    trader = make_live_trader(
         strategy or _HoldStrategy(),
         adapter,
         config=_test_cfg(mode="live", symbols=SYMBOLS),
@@ -594,7 +593,7 @@ class TestOperatorFlatten:
 
     def test_sim_exits_at_the_next_observed_open_and_halts(self):
         strategy = _CountingStrategy()
-        runner = test_live_runner.TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=strategy,
             config=_test_cfg(mode="sim"),
         )

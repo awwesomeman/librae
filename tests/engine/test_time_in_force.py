@@ -408,7 +408,7 @@ class TestSimulationMatchesBacktest:
         )
 
     def _run_sim(self, time_in_force: str | None):
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         visible = {"bars": 2}
 
@@ -433,7 +433,7 @@ class TestSimulationMatchesBacktest:
                     )
                 ]
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=SubmitOnce(),
             fetcher=fetcher,
             config=_test_cfg(mode="sim", warmup_periods=1),
@@ -644,7 +644,7 @@ def test_intraday_day_limit_without_a_calendar_fails_on_the_emitting_bar() -> No
 
 class TestSimulationMirrorsTheFixedBacktest:
     def _run_sim(self, strategy):
-        from tests.engine.test_live_runner import TestLiveTrader, _test_cfg
+        from tests.engine.live_factories import _test_cfg, make_live_runner
 
         visible = {"bars": 2}
         # The decision is emitted on the newest visible bar and first executable
@@ -664,7 +664,7 @@ class TestSimulationMirrorsTheFixedBacktest:
                 }
             )
 
-        runner = TestLiveTrader()._make_runner(
+        runner = make_live_runner(
             strategy=strategy,
             fetcher=fetcher,
             config=_test_cfg(mode="sim", warmup_periods=1),
