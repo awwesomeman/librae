@@ -966,9 +966,10 @@ adapter at submission.
   records the halt before it waits, so a cycle that starts first or hangs
   applies it at its start instead. Once `run()` has shut down, all three
   raise instead of acting on an account the run no longer owns.
-- `LiveTrader.request_halt(reason)` records a halt without waiting; `run()`
-  maps `SIGUSR1` to it on POSIX. The loop applies pending requests first in
-  its next cycle, before order work and before a pending `request_flatten`,
+- `LiveTrader.request_halt(reason)` records a halt without waiting and wakes
+  the loop from its sleep; `run()` maps `SIGUSR1` to it on POSIX. The loop
+  applies pending requests first in its next cycle, after any cycle in
+  progress, before order work and before a pending `request_flatten`,
   which the halted account then refuses. A restart drops a pending request.
 - `LiveTrader.request_flatten(reason)` is the operator flatten: the same
   close-everything-and-halt as a drawdown breach, with exits carrying reason
