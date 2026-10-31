@@ -892,7 +892,8 @@ class LiveTrader:
         self._last_cycle_diagnostics: CycleDiagnostics | None = None
         self._warmup_requested_periods: dict[str, int] = {}
         self._warmup_fetch_attempts: dict[str, int] = {}
-        self._warmup_exhausted_fingerprints: dict[str, frozenset[tuple[int, int]]] = {}
+        # Polls left until the next largest-request re-probe, and the interval.
+        self._warmup_exhausted: dict[str, tuple[int, int]] = {}
         self._replay_backlog_exhausted: dict[str, tuple[int, int]] = {}
         self._reported_warmup_reasons: dict[str, str] = {}
         self._lease_acquired = False
@@ -1219,6 +1220,11 @@ class LiveTrader:
     # keeping the startup request burst explicit and bounded.
     WARMUP_MAX_FETCH_ATTEMPTS = 3
     WARMUP_MAX_FETCH_MULTIPLIER = 2 ** (WARMUP_MAX_FETCH_ATTEMPTS - 1)
+    # Once the largest request stops returning new history, repeating it every
+    # poll re-walks the whole window (many pages on a paginated adapter) for
+    # history that rarely changes. Doubling keeps the first re-probes prompt;
+    # the cap bounds how long newly available older history goes unseen.
+    WARMUP_REPROBE_MAX_INTERVAL_POLLS = 32
 
     def _utc_now(self) -> datetime:
         now = self._clock()
@@ -2533,71 +2539,85 @@ class LiveTrader:
                 base_request * (2**attempt) for attempt in range(self.WARMUP_MAX_FETCH_ATTEMPTS)
             ]
             request_sizes = all_request_sizes
+
+            def merge_fetched(
+                base: pd.DataFrame | None,
+                fetched: pd.DataFrame,
+            ) -> pd.DataFrame | None:
+                fetched = self._eligible_runtime_rows(symbol, fetched)
+                if fetched.empty:
+                    return base
+                validate_ohlcv_values(fetched, context=f"{symbol} runtime data")
+                return self._merge_runtime_rows(
+                    symbol,
+                    base,
+                    fetched,
+                    audit_sink=audit_sink,
+                    restart_audit_watermark=restart_audit_watermark,
+                )
+
             try:
-                exhausted_fingerprint = self._warmup_exhausted_fingerprints.get(symbol)
+                backoff = self._warmup_exhausted.get(symbol)
                 if (
-                    exhausted_fingerprint is None
+                    backoff is None
                     and self._warmup_requested_periods.get(symbol) == all_request_sizes[-1]
                 ):
                     # A prior largest-rung response added history but did not
                     # close the gap. Re-probe that bound directly; exhaustion
                     # is only established when this rung itself plateaus.
                     request_sizes = [all_request_sizes[-1]]
-                if exhausted_fingerprint is not None:
-                    probe_periods = self._warmup_requested_periods.get(symbol, base_request)
-                    probe = self._fetch_history(symbol, probe_periods)
-                    probe = self._eligible_runtime_rows(symbol, probe)
-                    if not probe.empty:
-                        validate_ohlcv_values(probe, context=f"{symbol} runtime data")
-                        merged = self._merge_runtime_rows(
-                            symbol,
-                            merged,
-                            probe,
-                            audit_sink=audit_sink,
-                            restart_audit_watermark=restart_audit_watermark,
-                        )
-                    if self._history_fingerprint(merged) == exhausted_fingerprint:
-                        return cached
-                    self._warmup_exhausted_fingerprints.pop(symbol, None)
+                if backoff is not None:
+                    request_sizes = []
+                    # Newly closed bars are the ordinary increment, not history
+                    # the largest request uncovered. Fetching them first keeps
+                    # the cache fresh between re-probes and keeps them from
+                    # counting as re-probe progress.
+                    merged = merge_fetched(
+                        merged,
+                        self._fetchers[symbol](symbol, self._timeframe, 2, drop_incomplete=True),
+                    )
+                    polls_left, interval = backoff
                     if self._warmup_gap(symbol, merged) is None:
-                        request_sizes = []
+                        self._warmup_exhausted.pop(symbol)
+                    elif polls_left > 1:
+                        self._warmup_exhausted[symbol] = (polls_left - 1, interval)
                     else:
-                        request_sizes = [
-                            requested
-                            for requested in all_request_sizes
-                            if requested > probe_periods
-                        ]
+                        before = self._history_fingerprint(merged)
+                        # Back off before walking, so a walk that fails
+                        # (rate limit, a page error) is not retried every poll.
+                        interval = min(2 * interval, self.WARMUP_REPROBE_MAX_INTERVAL_POLLS)
+                        self._warmup_exhausted[symbol] = (interval, interval)
+                        merged = merge_fetched(
+                            merged,
+                            self._fetch_history(symbol, all_request_sizes[-1]),
+                        )
+                        if self._warmup_gap(symbol, merged) is None:
+                            self._warmup_exhausted.pop(symbol)
+                        elif self._found_older_history(before, merged):
+                            # A backfill may still be filling in: probe again
+                            # next poll.
+                            self._warmup_exhausted[symbol] = (1, 1)
 
                 for requested_periods in request_sizes:
                     attempt = all_request_sizes.index(requested_periods) + 1
                     self._warmup_requested_periods[symbol] = requested_periods
                     self._warmup_fetch_attempts[symbol] = attempt
                     before = self._history_fingerprint(merged)
-                    new_df = self._fetch_history(symbol, requested_periods)
-                    new_df = self._eligible_runtime_rows(symbol, new_df)
-                    if not new_df.empty:
-                        validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
-                        merged = self._merge_runtime_rows(
-                            symbol,
-                            merged,
-                            new_df,
-                            audit_sink=audit_sink,
-                            restart_audit_watermark=restart_audit_watermark,
-                        )
+                    merged = merge_fetched(merged, self._fetch_history(symbol, requested_periods))
                     if self._warmup_gap(symbol, merged) is None:
-                        self._warmup_exhausted_fingerprints.pop(symbol, None)
                         break
-                    if (
-                        requested_periods == all_request_sizes[-1]
-                        and self._history_fingerprint(merged) == before
+                    if requested_periods == all_request_sizes[-1] and not (
+                        self._found_older_history(before, merged)
                     ):
-                        self._warmup_exhausted_fingerprints[symbol] = before
+                        # Treat the plateau as an interval-1 re-probe, so the
+                        # next waits two polls.
+                        self._warmup_exhausted[symbol] = (2, 2)
                         break
             except Exception:
                 self._store_runtime_cache(symbol, merged)
                 raise
         else:
-            self._warmup_exhausted_fingerprints.pop(symbol, None)
+            self._warmup_exhausted.pop(symbol, None)
             new_df = self._fetchers[symbol](
                 symbol,
                 self._timeframe,
@@ -2660,6 +2680,22 @@ class LiveTrader:
             requested_periods,
             drop_incomplete=True,
         )
+
+    @classmethod
+    def _found_older_history(
+        cls,
+        before: frozenset[tuple[int, int]],
+        merged: pd.DataFrame | None,
+    ) -> bool:
+        """Whether ``merged`` reaches back past the oldest bar in ``before``.
+
+        Bars that closed during the walk or that an incremental fetch missed,
+        and corrections (sources may stamp ``available_at`` differently), are
+        merged but do not show a source filling in history.
+        """
+        oldest_before = min((ts for ts, _ in before), default=None)
+        oldest_after = min((ts for ts, _ in cls._history_fingerprint(merged)), default=None)
+        return oldest_after is not None and (oldest_before is None or oldest_after < oldest_before)
 
     @staticmethod
     def _history_fingerprint(
@@ -2802,7 +2838,7 @@ class LiveTrader:
             frame = self._ohlcv_cache.get(symbol)
             gap_reason = self._warmup_gap(symbol, frame)
             backlog = self._replay_backlog_exhausted.get(symbol)
-            exhausted = symbol in self._warmup_exhausted_fingerprints
+            exhausted = symbol in self._warmup_exhausted
             if backlog is not None:
                 reason = "warmup_replay_backlog_exhausted"
             elif gap_reason is not None and exhausted:
@@ -2815,15 +2851,6 @@ class LiveTrader:
             usable_periods = len(frame) if frame is not None else 0
             previous_reason = self._reported_warmup_reasons.get(symbol)
             if previous_reason == reason:
-                continue
-            if (
-                previous_reason == "warmup_backfill_exhausted"
-                and not exhausted
-                and gap_reason is not None
-            ):
-                # A successful re-probe is progress, not a new outward edge.
-                # Keep the existing incident open until readiness or another
-                # terminal plateau rather than alternating alert reasons.
                 continue
             self._reported_warmup_reasons[symbol] = reason
             requested_periods = self._warmup_requested_periods.get(symbol, 0)
@@ -2888,8 +2915,8 @@ class LiveTrader:
                 title=f"[{self._executor.strategy_name}] Live Warmup Incomplete",
                 message=(
                     ", ".join(changed)
-                    + "; strategy evaluation is disabled; exhausted sources resume escalation "
-                    "only after new history, while replay overflow requires "
+                    + "; strategy evaluation is disabled; exhausted sources are re-probed "
+                    "at growing intervals, while replay overflow requires "
                     "restart/resynchronization"
                 ),
             )
