@@ -92,6 +92,7 @@ Order placement alerts (rules in
 |---|---|---|
 | Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled. A failed flatten or drawdown exit alerts as Close Rejected or Close Cancelled instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted |
 | Ambiguous Order Placement | Placement failed with an error the adapter could not classify and the client-id lookup found nothing: the order may still exist at the venue; halted | Check the broker's order history for the client order id. `reset_halt()` refuses (`unresolved_broker_orders`) until the engine resolves the order |
+| Insufficient Free Balance, Free Balance Unavailable, Unpriced Entry | An entry, or a whole group with an entry leg, was not submitted: the broker's free balance was below its requirement, could not be read, or the requirement could not be priced (the alert names the amounts or the error). The other queued orders still went out, and a target rebalance stopped until the next decision; not halted. The alert repeats for a cause and symbol only after a check for that symbol passes or `reset_halt()`; every refusal is still a `decision_skipped` event | Restore the balance, or stop flat and start from the broker balance (see the `reset_halt()` step of [Kill-switch rehearsal](#kill-switch-rehearsal)); for an unreadable balance or price, fix what the error names. A rotation refused for want of cash its own exit would free must list that exit first |
 
 ## Kill-switch rehearsal
 
@@ -137,7 +138,9 @@ Procedure it exercises:
    The round gates on positions and open orders only. Cash moved while
    halted (a withdrawal, say) raises at most Cash Reconciliation Drift, once
    beyond its tolerance, and the local ledger is never overwritten from the broker, so sizing keeps using
-   the old cash. Restore the balance before `reset_halt()`, or stop flat and
+   the old cash. Entries are capped by the broker's free balance, though: an
+   entry it cannot fund is withheld whole and alerts Insufficient Free
+   Balance, while exits still go out. Restore the balance before `reset_halt()`, or stop flat and
    start a new checkpoint with `account.initial_cash` set to the broker
    balance (see
    [Development checkpoint compatibility](optional-infrastructure.md#development-checkpoint-compatibility)).

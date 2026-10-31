@@ -630,7 +630,8 @@ class TestDisconnectedReads:
         adapter._ib.positions.return_value = []
         adapter._ib.openTrades.return_value = []
         adapter._ib.accountSummary.return_value = [
-            SimpleNamespace(tag="TotalCashValue", currency="USD", value="100")
+            SimpleNamespace(tag="TotalCashValue", currency="USD", value="100"),
+            SimpleNamespace(tag="AvailableFunds", currency="USD", value="100"),
         ]
         return adapter
 
@@ -1441,25 +1442,25 @@ class TestGetPosition:
 
 
 class TestGetBalance:
-    def test_returns_total_cash_value_for_currency(self):
-        adapter = _make_adapter(trading_enabled=True)
-
-        def _account_value(tag, currency, value):
-            v = MagicMock()
-            v.tag = tag
-            v.currency = currency
-            v.value = value
-            return v
-
-        adapter._ib.accountSummary.return_value = [
-            _account_value("TotalCashValue", "USD", "12345.67"),
-            _account_value("TotalCashValue", "TWD", "999.0"),
-            _account_value("NetLiquidation", "USD", "50000.0"),
+    @staticmethod
+    def _summary(*rows: tuple[str, str, str]) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(tag=tag, currency=currency, value=value)
+            for tag, currency, value in rows
         ]
+
+    def test_free_is_available_funds_and_total_is_cash_value(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._ib.accountSummary.return_value = self._summary(
+            ("TotalCashValue", "USD", "12345.67"),
+            ("TotalCashValue", "TWD", "999.0"),
+            ("AvailableFunds", "USD", "8000.5"),
+            ("NetLiquidation", "USD", "50000.0"),
+        )
 
         result = adapter.get_balance("USD")
 
-        assert result == {"free": 12345.67, "used": 0.0, "total": 12345.67}
+        assert result == {"free": 8000.5, "used": 0.0, "total": 12345.67}
 
     def test_no_matching_currency_fails_explicitly(self):
         adapter = _make_adapter(trading_enabled=True)
@@ -1468,16 +1469,30 @@ class TestGetBalance:
         with pytest.raises(ValueError, match="no TotalCashValue"):
             adapter.get_balance("USD")
 
+    def test_missing_available_funds_fails_closed(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._ib.accountSummary.return_value = self._summary(("TotalCashValue", "USD", "100"))
+
+        with pytest.raises(ValueError, match="no AvailableFunds for USD"):
+            adapter.get_balance("USD")
+
+    def test_available_funds_in_another_currency_fails_closed(self):
+        adapter = _make_adapter(trading_enabled=True)
+        adapter._ib.accountSummary.return_value = self._summary(
+            ("TotalCashValue", "USD", "100"),
+            ("AvailableFunds", "EUR", "90"),
+        )
+
+        with pytest.raises(ValueError, match=r"no AvailableFunds for USD \(reported in EUR\)"):
+            adapter.get_balance("USD")
+
     def test_multiple_matching_cash_values_fail_as_ambiguous(self):
         adapter = _make_adapter(trading_enabled=True)
-
-        def account_value(value):
-            return SimpleNamespace(tag="TotalCashValue", currency="USD", value=value)
-
-        adapter._ib.accountSummary.return_value = [
-            account_value("100"),
-            account_value("200"),
-        ]
+        adapter._ib.accountSummary.return_value = self._summary(
+            ("TotalCashValue", "USD", "100"),
+            ("TotalCashValue", "USD", "200"),
+            ("AvailableFunds", "USD", "100"),
+        )
 
         with pytest.raises(ValueError, match="ambiguous TotalCashValue"):
             adapter.get_balance("USD")
