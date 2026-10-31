@@ -8,11 +8,11 @@ from typing import ClassVar
 
 import pandas as pd
 import pytest
-from librae.brokers.crypto_adapter import CryptoAdapter
 from librae.config.symbols import SymbolInfo
 from librae.core.run_config import ExecutionPolicy
 from librae.live.engine import LiveTrader, _bind_market_data_source
 
+from tests.ccxt_standin import build_crypto_adapter
 from tests.conftest import make_test_cfg
 from tests.crypto_venue import NOW, PAGE, PagedVenue
 
@@ -296,10 +296,7 @@ def test_a_failing_funding_endpoint_still_yields_bars(caplog):
 
 def test_long_perpetual_warmup_fills_and_carries_every_settlement(monkeypatch):
     venue = PagedVenue(monkeypatch, 40_000, funding_days=200)
-    adapter = CryptoAdapter.__new__(CryptoAdapter)
-    adapter._exchange = venue
-    adapter._read_only = True
-    adapter._exchange_id = "binanceusdm"
+    adapter = build_crypto_adapter(venue, "binanceusdm")
     config = make_test_cfg(
         symbols=["BTCUSDTPERP"],
         timeframe="M5",

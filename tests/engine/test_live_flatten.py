@@ -17,13 +17,13 @@ from threading import Lock, Thread, get_ident
 from unittest.mock import MagicMock
 
 import pytest
-from librae.brokers.crypto_adapter import CryptoAdapter, _require_ccxt
 from librae.core.executor import REASON_OPERATOR_FLATTEN
 from librae.core.run_config import RiskPolicy
 from librae.core.strategy import OrderIntent, PortfolioWeights, PositionState, Strategy
 from librae.live.executor import OrderBelowVenueMinimumError, OrderRejectedError, OrderRequest
 from librae.live.state import LiveRebalance, TrackedOrder
 
+from tests.ccxt_standin import build_crypto_adapter, errors
 from tests.engine.live_factories import (
     TEST_CLOCK_NOW,
     _HoldStrategy,
@@ -97,17 +97,14 @@ def _crypto_adapter(limits: dict | None = None, *, zero_amount: str = ""):
 
     def amount_to_precision(symbol, amount):
         if symbol == zero_amount:
-            raise _require_ccxt().InvalidOrder(
+            raise errors.InvalidOrder(
                 f"binance amount of {symbol} must be greater than minimum amount precision"
             )
         return str(amount)
 
     exchange.amount_to_precision.side_effect = amount_to_precision
     exchange.price_to_precision.side_effect = lambda _symbol, price: str(price)
-    crypto = CryptoAdapter.__new__(CryptoAdapter)
-    crypto._exchange = exchange
-    crypto._read_only = False
-    crypto._exchange_id = "binance"
+    crypto = build_crypto_adapter(exchange, api_key="k", api_secret="s")
     adapter = _adapter(below_minimum="")
     adapter.prepare_order.side_effect = crypto.prepare_order
     return adapter
@@ -160,7 +157,6 @@ class TestBelowMinimumClose:
         assert "flatten attempt failed" not in breach["message"]
         assert "DUST" in breach["message"]
 
-    @pytest.mark.sdk_contract
     def test_flatten_skips_a_remainder_ccxt_rounds_to_zero(self):
         adapter = _crypto_adapter(zero_amount="DUST")
         trader, events, _ = _trader(adapter)
