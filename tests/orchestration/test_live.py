@@ -1238,3 +1238,6 @@ def test_timescale_callbacks_on_position_event_marks_write_trade_event_critical(
 
     assert write.call_args.args[0].__name__ == "write_trade_event"
     assert write.call_args.kwargs["critical"] is True
+    # The engine retries only a sink that declares it and raises on failure.
+    assert write.call_args.kwargs["propagate"] is True
+    assert _TimescaleCallbacks.durable_position_event_delivery is True
