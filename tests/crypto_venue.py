@@ -25,10 +25,13 @@ class _FrozenDatetime(datetime):
 class PagedVenue:
     """Binance-like paging: ``since`` walks forward, ``None`` returns the newest rows.
 
-    Candle ``limit`` is clamped to a page like ccxt's binance ``fetch_ohlcv``,
-    and an ``inverse`` market also ends each request at ``since + limit`` bars
-    as it does. A funding ``limit`` above a page is refused like the live
-    endpoint. Settlements land 3 ms past the 8h grid.
+    A candle ``params["until"]`` without ``since`` returns the newest rows at
+    or before it, counted across gaps: what the adapter's walk back assumes
+    of Binance's ``endTime``, unverified there. Candle ``limit`` is clamped
+    to a page like ccxt's binance ``fetch_ohlcv``, and an ``inverse`` market
+    also ends each request at ``since + limit`` bars as it does. A funding
+    ``limit`` above a page is refused like the live endpoint. Settlements
+    land 3 ms past the 8h grid.
 
     Building one pins the clocks the adapter and ``drop_incomplete`` read to
     ``NOW``, so a bar boundary passing mid-test changes nothing.
@@ -46,20 +49,24 @@ class PagedVenue:
         first_settlement = (NOW_MS - funding_days * 86_400_000) // FUNDING_MS * FUNDING_MS
         self.funding_ts = [ts + 3 for ts in range(first_settlement, NOW_MS - 3, FUNDING_MS)]
         self.inverse = inverse
-        self.ohlcv_calls: list[tuple[int | None, int | None]] = []
+        self.ohlcv_calls: list[tuple[int | None, int | None, int | None]] = []
         self.funding_calls: list[tuple[int | None, int | None]] = []
 
     @staticmethod
-    def _page(series: list[int], since: int | None, limit: int) -> list[int]:
+    def _page(
+        series: list[int], since: int | None, limit: int, until: int | None = None
+    ) -> list[int]:
         if since is None:
-            return series[-limit:]
+            stop = len(series) if until is None else bisect.bisect_right(series, until)
+            return series[max(stop - limit, 0) : stop]
         start = bisect.bisect_left(series, since)
         return series[start : start + limit]
 
     def fetch_ohlcv(self, symbol, timeframe="1m", since=None, limit=None, params=None):
-        self.ohlcv_calls.append((since, limit))
+        until = (params or {}).get("until")
+        self.ohlcv_calls.append((since, until, limit))
         limit = min(limit or 500, PAGE)
-        rows = self._page(self.bar_ts, since, limit)
+        rows = self._page(self.bar_ts, since, limit, until)
         if self.inverse and since is not None:
             rows = [ts for ts in rows if ts < since + limit * BAR_MS]
         return [[ts, 1.0, 1.0, 1.0, 1.0, 1.0] for ts in rows]

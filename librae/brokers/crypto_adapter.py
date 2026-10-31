@@ -152,6 +152,32 @@ def _walk_forward[T](
     return rows if limit is None else rows[:limit]
 
 
+# Backward like ccxt 4.5.66 fetch_paginated_call_dynamic, which stops after
+# paginationCalls pages. Assumes the venue answers an end alone with the
+# newest rows at or before it, counted across gaps: unverified for Binance's
+# endTime. A venue that windows by the end instead ends the walk early on a
+# page with no bars, and fetch_ohlcv's short-history warning reports it.
+def _walk_back(fetch_page: Callable[[int | None], list[list]], limit: int) -> list[list]:
+    """Request candle pages back from the newest until ``limit`` rows or history ends.
+
+    Each request after the first ends just before the oldest row held. Rows
+    not older than that are dropped, so an empty page, or a venue that
+    ignores the end or repeats a page, ends the walk.
+    """
+    rows: list[list] = []
+    end: int | None = None
+    while len(rows) < limit:
+        page = sorted(
+            (row for row in fetch_page(end) if end is None or row[0] <= end),
+            key=lambda row: row[0],
+        )
+        if not page:
+            break
+        rows[:0] = page
+        end = page[0][0] - 1
+    return rows[-limit:]
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -518,8 +544,8 @@ class CryptoAdapter:
         """Fetch OHLCV candles and return a standardised DataFrame.
 
         A ``limit`` above one venue page is fetched page by page: forward
-        from ``since``, or without it from far enough back to end on the
-        newest ``limit`` bars.
+        from ``since``, or without it back from the newest bar until
+        ``limit`` bars are collected or the venue's history ends.
 
         Args:
             symbol: Trading pair (e.g. "BTC/USDT").
@@ -554,16 +580,20 @@ class CryptoAdapter:
                     symbol, timeframe=timeframe, limit=page_limit, since=cursor
                 )
 
+            def page_before(end: int | None) -> list[list]:
+                # ccxt 4.5.66 binance.fetch_ohlcv sends params["until"] as endTime.
+                params = {} if end is None else {"until": end}
+                return self._exchange.fetch_ohlcv(
+                    symbol, timeframe=timeframe, limit=page_limit, since=None, params=params
+                )
+
             interval_ms = interval_to_timedelta(timeframe) // pd.Timedelta(milliseconds=1)
             # ccxt 4.5.66 binance.fetch_ohlcv ends an inverse-market request at
             # since + limit x interval (it cites ccxt#8454), so an empty page
             # there may precede listing or sit inside an outage: step past it.
             empty_span = page_limit * interval_ms if page_limit else None
             if since is None:
-                # 1% extra reaches past short venue outages inside the window.
-                start = int(time.time() * 1000) - (limit + limit // 100) * interval_ms
-                raw = _walk_forward(page, start, lambda row: row[0], None, empty_span)
-                raw = raw[-limit:]
+                raw = _walk_back(page_before, limit)
             else:
                 raw = _walk_forward(page, since, lambda row: row[0], limit, empty_span)
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
