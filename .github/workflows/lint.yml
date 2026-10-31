@@ -11,14 +11,9 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/lint.yml"
+  # No path filter on pull requests: main requires these checks, and a workflow
+  # skipped by a filter never reports one, which leaves the PR unmergeable.
   pull_request:
-    paths:
-      - "librae/**"
-      - "scripts/**"
-      - "tests/**"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".github/workflows/lint.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
