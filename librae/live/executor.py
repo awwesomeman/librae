@@ -121,7 +121,6 @@ class BrokerOrderReport(TypedDict, total=False):
     average: float
     average_price: float
     commission: float
-    slippage: float
     tax: float
     executed_at: datetime
 
@@ -164,6 +163,10 @@ class OrderRequest:
     contract_month: str | None = None
     group_id: str | None = None
     time_in_force: TimeInForce | None = None
+    # The completed-bar price the decision was sized against. Stored with the
+    # order so the fill's implementation shortfall stays measurable across
+    # restarts; set by ``LiveExecutor.prepare_order``.
+    reference_price: float | None = None
 
     def __post_init__(self) -> None:
         if not self.client_order_id or not self.symbol:
@@ -194,6 +197,10 @@ class OrderRequest:
                 raise ValueError("limit orders require a positive finite limit_price")
         elif self.limit_price is not None:
             raise ValueError("market orders cannot have a limit_price")
+        if self.reference_price is not None and (
+            not isfinite(self.reference_price) or self.reference_price <= 0
+        ):
+            raise ValueError("reference_price must be positive and finite when supplied")
         if self.time_in_force is None:
             # A resting market order is nonsensical everywhere; a limit order
             # rests for the placing bar's duration by default, matching
@@ -281,9 +288,11 @@ class ExecutionReport:
     """Canonical broker order/execution state.
 
     Costs are denominated in the portfolio cash currency; commission may be
-    negative for a broker rebate. A report with ``status="filled"`` or
-    ``"partial"`` must carry broker-confirmed quantity, average price, and
-    execution timestamp. ``rejection_reason`` and ``account_fault`` carry an
+    negative for a broker rebate. There is no slippage cost: the average
+    price already embeds it, and charging it again would count it twice. A
+    report with ``status="filled"`` or ``"partial"`` must carry
+    broker-confirmed quantity, average price, and execution timestamp.
+    ``rejection_reason`` and ``account_fault`` carry an
     ``OrderRejectedError`` raised at placement.
     """
 
@@ -296,7 +305,6 @@ class ExecutionReport:
     filled_quantity: float
     average_price: float | None
     commission: float
-    slippage: float
     tax: float
     executed_at: datetime | None
     rejection_reason: str = ""
@@ -624,6 +632,7 @@ class LiveExecutor:
             request,
             quantity=quantity,
             limit_price=limit_price,
+            reference_price=reference_price,
         )
 
     def submit_order(self, request: OrderRequest) -> ExecutionReport | None:
@@ -664,7 +673,6 @@ class LiveExecutor:
                 filled_quantity=0.0,
                 average_price=None,
                 commission=0.0,
-                slippage=0.0,
                 tax=0.0,
                 executed_at=None,
                 rejection_reason=str(exc),
@@ -809,7 +817,6 @@ class LiveExecutor:
             average_price=average_price,
         )
         commission = float(commission_raw or 0.0)
-        slippage = float(raw.get("slippage") or 0.0)
         tax = float(raw.get("tax") or 0.0)
         executed_at = cls._parse_timestamp(
             raw.get("executed_at")
@@ -819,11 +826,10 @@ class LiveExecutor:
 
         if filled_quantity > requested_quantity + EPSILON:
             raise ValueError("broker filled quantity exceeds requested quantity")
-        if min(requested_quantity, filled_quantity, slippage, tax) < 0:
-            raise ValueError("broker report quantities, slippage, and tax must be non-negative")
+        if min(requested_quantity, filled_quantity, tax) < 0:
+            raise ValueError("broker report quantities and tax must be non-negative")
         if not all(
-            isfinite(value)
-            for value in (requested_quantity, filled_quantity, commission, slippage, tax)
+            isfinite(value) for value in (requested_quantity, filled_quantity, commission, tax)
         ):
             raise ValueError("broker report quantities and costs must be finite")
         if abs(requested_quantity - request.quantity) > EPSILON:
@@ -859,7 +865,6 @@ class LiveExecutor:
             filled_quantity=filled_quantity,
             average_price=average_price,
             commission=commission,
-            slippage=slippage,
             tax=tax,
             executed_at=executed_at,
         )

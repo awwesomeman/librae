@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
 from librae.db.timescale_state import TimescaleLiveStateStore
 from librae.live.execution_identity import ExecutionIdentity
 from librae.live.executor import OrderRequest
@@ -39,6 +41,7 @@ def test_save_checkpoints_state_and_order_in_one_connection(mock_get_conn, mock_
             quantity=1.0,
             order_type="market",
             submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            reference_price=100.0,
         ),
         placement_attempted=True,
         placement_attempted_at=datetime(2025, 1, 1, tzinfo=UTC),
@@ -54,6 +57,37 @@ def test_save_checkpoints_state_and_order_in_one_connection(mock_get_conn, mock_
     assert rows[0][1] == "client-1"
     assert rows[0][7] is True
     assert rows[0][8] == datetime(2025, 1, 1, tzinfo=UTC)
+
+
+@patch("librae.db.timescale_state.psycopg2.extras.execute_values")
+@patch("librae.db.timescale_state.get_conn")
+def test_order_row_carries_reference_price_and_signed_shortfall(mock_get_conn, mock_execute_values):
+    mock_get_conn.return_value.__enter__.return_value = MagicMock()
+    tracked = TrackedOrder(
+        request=OrderRequest(
+            client_order_id="client-1",
+            symbol="BTC/USDT",
+            side="sell",
+            quantity=2.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            reference_price=100.0,
+        ),
+        placement_attempted=True,
+        placement_attempted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        order_id="broker-1",
+        status="filled",
+        filled_quantity=2.0,
+        filled_notional=198.0,
+    )
+
+    TimescaleLiveStateStore().save(_state(), [tracked])
+
+    row = mock_execute_values.call_args.args[2][0]
+    columns = mock_execute_values.call_args.args[1].split("VALUES")[0]
+    names = [name.strip() for name in columns.split("(", 1)[1].rsplit(")", 1)[0].split(",")]
+    assert row[names.index("slippage")] == pytest.approx(0.01)
+    assert json.loads(row[names.index("request")])["reference_price"] == 100.0
 
 
 @patch("librae.db.timescale_state.require_current_schema")

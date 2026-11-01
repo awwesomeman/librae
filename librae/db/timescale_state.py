@@ -124,7 +124,10 @@ class TimescaleLiveStateStore:
                             tracked.filled_quantity,
                             tracked.filled_notional,
                             tracked.commission,
-                            tracked.slippage,
+                            # The column holds the signed implementation
+                            # shortfall; NOT NULL, so an unfilled order
+                            # (filled_quantity 0) writes 0.
+                            tracked.implementation_shortfall or 0.0,
                             tracked.tax,
                             request.submitted_at,
                             tracked.executed_at,
