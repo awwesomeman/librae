@@ -364,7 +364,7 @@ elif [[ "$1" == "run" && "$2" == "--rm" ]]; then
         exit 1
     fi
 elif [[ "$1" == "exec" ]]; then
-    if [[ "$*" == *SIGUSR1* ]]; then
+    if [[ "$*" == *SIGUSR* ]]; then
         # The in-container check: signal only while the marker is unchanged.
         [[ "${@: -1}" == "${FAKE_MARKER_AT_SIGNAL}" ]]
         exit $?
@@ -582,44 +582,67 @@ def test_trade_script_reports_a_restarted_runner_failed_until_it_marks_ready(
     assert "phase=running" in ready.stdout.splitlines()
 
 
-def _halt(tmp_path: Path, **kwargs) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+# Subcommands that signal a ready runner, each with the signal it sends.
+SIGNAL_COMMANDS = [("halt", "SIGUSR1"), ("reset", "SIGUSR2")]
+SIGNAL_COMMAND_NAMES = [command for command, _ in SIGNAL_COMMANDS]
+
+
+def _signal_runner(
+    tmp_path: Path, command: str = "halt", **kwargs
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     return _run_trade_script(
         tmp_path,
         image_reference=f"registry.example/librae-trade@sha256:{'e' * 64}",
         deployment_id="smoke-main",
-        arguments=["halt", "smoke-main"],
+        arguments=[command, "smoke-main"],
         **kwargs,
     )
 
 
 def _signalled(docker_calls: list[str]) -> bool:
     return any(
-        call.startswith("kill") or (call.startswith("exec") and "SIGUSR1" in call)
+        call.startswith("kill") or (call.startswith("exec") and "SIGUSR" in call)
         for call in docker_calls
     )
 
 
-def test_trade_script_halt_signals_a_ready_deployment(tmp_path: Path) -> None:
-    result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main")
+@pytest.mark.parametrize(("command", "signal_name"), SIGNAL_COMMANDS)
+def test_trade_script_signals_a_ready_deployment(
+    tmp_path: Path, command: str, signal_name: str
+) -> None:
+    result, docker_calls = _signal_runner(tmp_path, command, all_containers="quant_smoke-main")
 
     assert result.returncode == 0, result.stderr
     # `docker kill` would mark the container manually stopped, so the restart
     # policy would no longer restart a halted runner that later crashes.
     assert not any(call.startswith(("kill", "stop", "rm", "run", "start")) for call in docker_calls)
     signal_call = next(call for call in docker_calls if _signalled([call]))
-    # The in-container check receives the marker halt validated.
+    # The in-container check receives the signal and the marker just validated.
     assert signal_call.startswith("exec quant_smoke-main python -c ")
-    assert signal_call.endswith(f" /run/librae/ready attempt-token:fixture-run:{'a' * 32}")
-    assert "run halt again" in result.stdout
+    assert signal_call.endswith(
+        f" {signal_name} /run/librae/ready attempt-token:fixture-run:{'a' * 32}"
+    )
+    assert f"run {command} again" in result.stdout
     assert "restart-safe readiness" not in result.stderr
 
 
-def test_trade_script_halt_reports_a_runner_that_restarted_after_the_check(
-    tmp_path: Path,
+def test_trade_script_reset_names_both_outcome_alerts(tmp_path: Path) -> None:
+    result, _ = _signal_runner(tmp_path, "reset", all_containers="quant_smoke-main")
+
+    assert result.returncode == 0, result.stderr
+    assert "Halt Reset alert" in result.stdout
+    assert "Halt Reset Refused" in result.stdout
+
+
+@pytest.mark.parametrize("command", SIGNAL_COMMAND_NAMES)
+def test_trade_script_signal_reports_a_runner_that_restarted_after_the_check(
+    tmp_path: Path, command: str
 ) -> None:
     # The runner crashed between the readiness check and the signal: the
     # restarted container's tmpfs no longer holds the validated marker.
-    result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main", marker_at_signal="")
+    result, docker_calls = _signal_runner(
+        tmp_path, command, all_containers="quant_smoke-main", marker_at_signal=""
+    )
 
     assert result.returncode != 0
     assert _signalled(docker_calls)
@@ -627,7 +650,7 @@ def test_trade_script_halt_reports_a_runner_that_restarted_after_the_check(
         "quant_smoke-main is not ready; nothing was signalled. "
         "Retry once inspect reports phase=running."
     )
-    assert "Halt requested" not in result.stdout
+    assert "requested" not in result.stdout
 
 
 def test_trade_script_warns_about_a_deployment_created_before_restart_safe_readiness(
@@ -640,7 +663,7 @@ def test_trade_script_warns_about_a_deployment_created_before_restart_safe_readi
         arguments=["inspect", "smoke-main"],
         **legacy,
     )
-    halted, docker_calls = _halt(tmp_path / "halt", **legacy)
+    halted, docker_calls = _signal_runner(tmp_path / "halt", **legacy)
 
     warning = (
         "smoke-main was created before restart-safe readiness; run trade.sh start to adopt it."
@@ -653,19 +676,25 @@ def test_trade_script_warns_about_a_deployment_created_before_restart_safe_readi
     assert _signalled(docker_calls)
 
 
-def test_trade_script_halt_refuses_a_deployment_that_is_not_ready(tmp_path: Path) -> None:
-    result, docker_calls = _halt(tmp_path, all_containers="quant_smoke-main", ready_marker="")
+@pytest.mark.parametrize("command", SIGNAL_COMMAND_NAMES)
+def test_trade_script_signal_refuses_a_deployment_that_is_not_ready(
+    tmp_path: Path, command: str
+) -> None:
+    result, docker_calls = _signal_runner(
+        tmp_path, command, all_containers="quant_smoke-main", ready_marker=""
+    )
 
     assert result.returncode != 0
     assert "not ready" in result.stderr
     assert not _signalled(docker_calls)
 
 
-def test_trade_script_halt_refuses_a_restarted_runner_before_it_marks_ready(
-    tmp_path: Path,
+@pytest.mark.parametrize("command", SIGNAL_COMMAND_NAMES)
+def test_trade_script_signal_refuses_a_restarted_runner_before_it_marks_ready(
+    tmp_path: Path, command: str
 ) -> None:
-    result, docker_calls = _halt(
-        tmp_path, all_containers="quant_smoke-main", restart_count="1", ready_marker=""
+    result, docker_calls = _signal_runner(
+        tmp_path, command, all_containers="quant_smoke-main", restart_count="1", ready_marker=""
     )
 
     assert result.returncode != 0
@@ -673,9 +702,10 @@ def test_trade_script_halt_refuses_a_restarted_runner_before_it_marks_ready(
     assert not _signalled(docker_calls)
 
 
-def test_trade_script_halt_refuses_an_unmanaged_container(tmp_path: Path) -> None:
-    result, docker_calls = _halt(
-        tmp_path, all_containers="quant_smoke-main", existing_managed="false"
+@pytest.mark.parametrize("command", SIGNAL_COMMAND_NAMES)
+def test_trade_script_signal_refuses_an_unmanaged_container(tmp_path: Path, command: str) -> None:
+    result, docker_calls = _signal_runner(
+        tmp_path, command, all_containers="quant_smoke-main", existing_managed="false"
     )
 
     assert result.returncode != 0
@@ -684,8 +714,9 @@ def test_trade_script_halt_refuses_an_unmanaged_container(tmp_path: Path) -> Non
     assert not _signalled(docker_calls)
 
 
-def test_trade_script_halt_refuses_an_unknown_deployment(tmp_path: Path) -> None:
-    result, docker_calls = _halt(tmp_path)
+@pytest.mark.parametrize("command", SIGNAL_COMMAND_NAMES)
+def test_trade_script_signal_refuses_an_unknown_deployment(tmp_path: Path, command: str) -> None:
+    result, docker_calls = _signal_runner(tmp_path, command)
 
     assert result.returncode != 0
     assert "quant_smoke-main not found" in result.stderr

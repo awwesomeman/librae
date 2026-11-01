@@ -129,3 +129,7 @@ class DockerSupervisor:
     def halt(self, deployment_id: str) -> DeploymentStatus:
         self._invoke("halt", deployment_id)
         return self._status(deployment_id)
+
+    def reset_halt(self, deployment_id: str) -> DeploymentStatus:
+        self._invoke("reset", deployment_id)
+        return self._status(deployment_id)

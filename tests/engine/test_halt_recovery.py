@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 import pytest
 from librae.core.strategy import PositionState
+from librae.live.halt_recovery import HaltResetRefusedError
 from librae.live.state import LiveRuntimeState, MemoryLiveStateStore
 
 CLOCK = datetime(2025, 1, 1, 6, tzinfo=UTC)
@@ -140,7 +141,8 @@ class TestResetIsBlockedActionably:
     def test_a_missing_mark_no_longer_raises_from_inside_valuation(self) -> None:
         runner = _halted_runner()
 
-        with pytest.raises(RuntimeError, match="missing_valuation_mark"):
+        # A RuntimeError subclass, so a refusal stays catchable apart from other errors.
+        with pytest.raises(HaltResetRefusedError, match="missing_valuation_mark"):
             runner.reset_halt()
 
     def test_the_error_names_the_required_action(self) -> None:

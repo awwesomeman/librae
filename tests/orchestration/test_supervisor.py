@@ -81,6 +81,9 @@ class _FakeSupervisor:
     def halt(self, deployment_id: str) -> DeploymentStatus:
         return self.inspect(deployment_id)
 
+    def reset_halt(self, deployment_id: str) -> DeploymentStatus:
+        return self.inspect(deployment_id)
+
 
 def _start(supervisor: Supervisor, spec: DeploymentSpec) -> DeploymentStatus:
     return supervisor.start(spec)
@@ -270,9 +273,12 @@ def test_docker_supervisor_rejects_non_reference_entrypoint(tmp_path: Path) -> N
         DockerSupervisor(tmp_path / "trade.sh").start(invalid)
 
 
-def test_docker_supervisor_halts_without_stopping(
+@pytest.mark.parametrize(("method", "subcommand"), [("halt", "halt"), ("reset_halt", "reset")])
+def test_docker_supervisor_signals_the_run_without_stopping(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    method: str,
+    subcommand: str,
 ) -> None:
     calls: list[list[str]] = []
     status = "\n".join(
@@ -297,7 +303,7 @@ def test_docker_supervisor_halts_without_stopping(
     monkeypatch.setattr(subprocess, "run", run)
     supervisor = DockerSupervisor(tmp_path / "trade.sh")
 
-    halted = supervisor.halt("momentum-1")
+    status = getattr(supervisor, method)("momentum-1")
 
-    assert halted.phase == "running"
-    assert [call[2:] for call in calls] == [["halt", "momentum-1"], ["inspect", "momentum-1"]]
+    assert status.phase == "running"
+    assert [call[2:] for call in calls] == [[subcommand, "momentum-1"], ["inspect", "momentum-1"]]
