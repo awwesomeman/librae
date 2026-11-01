@@ -780,6 +780,10 @@ class LiveTrader:
                 )
             self._execution_identity = observed_execution_identity
             logger.info("Live execution identity: %s", self._execution_identity.summary)
+            # Optional: an adapter that cannot read these venue facts starts unchecked.
+            verify_venue_setup = getattr(shared_order_adapter, "verify_venue_setup", None)
+            if callable(verify_venue_setup):
+                verify_venue_setup(self._instruments)
         else:
             if execution_identity is not None:
                 raise ValueError("execution_identity is only valid in live mode")
