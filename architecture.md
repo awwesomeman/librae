@@ -759,6 +759,7 @@ flowchart TD
         get_factor -- "DB has a gap" --> factorfill["backfill via fetcher → write back to DB"]
         factorfill --> r_factors[("external_factors")]
         factorfill --> r_factor_cov[("external_factor_coverage_ranges")]
+        factorfill --> r_factor_hist[("external_factors_history")]
 
         sync_symbols["write_symbols()"] --> r_symbols[("symbols")]
     end
@@ -813,8 +814,11 @@ flowchart TD
 | `available_at` | earliest safe observation time of the current OHLCV row version; late corrections may be non-monotonic across `ts` | `ohlcv` and normalized market-data artifacts |
 | `range_started_at` | start of a cache coverage range | `ohlcv_coverage_ranges` |
 | `range_ended_at` | end of a cache coverage range | `ohlcv_coverage_ranges` |
+| `recorded_at` | when this system stored a factor value | `external_factors`, `external_factors_history` |
+| `vintage_at` | the version or publication time the source states for a factor value | `external_factors`, `external_factors_history` |
+| `superseded_at` | when a factor version stopped being current | `external_factors_history` |
 
-### Current 15 tables
+### Current tables
 
 | Table | Purpose | PK / FK | Hypertable |
 |---|---|---|---|
@@ -827,7 +831,8 @@ flowchart TD
 | `ohlcv` | shared market data, keyed by the six-field immutable subscription identity and carrying `available_at` | no FK; unique `(ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type)` | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
 | `ohlcv_coverage_ranges` | tracks `get_ohlcv()`'s cache coverage ranges (one row per range) | no FK | no |
-| `external_factors` | third-party factor data (funding rate, open interest, ...) — a long table with a uniform schema, so new data sources need no migration; `get_factor()` writes to it automatically | no FK (unique index: ts+symbol+factor_name+timeframe+data_source+instrument_type) | yes (`ts`) |
+| `external_factors` | third-party factor data (funding rate, open interest, ...) — a long table with a uniform schema, so new data sources need no migration; `get_factor()` writes to it automatically; one current version per key | no FK (unique index: ts+symbol+factor_name+timeframe+data_source+instrument_type) | yes (`ts`) |
+| `external_factors_history` | factor versions a later write replaced, for as-of reads | no FK (index: symbol+factor_name+timeframe+data_source+instrument_type+ts) | no |
 | `external_factor_coverage_ranges` | tracks `get_factor()`'s cache coverage ranges, same mechanism as `ohlcv_coverage_ranges` | no FK | no |
 | `factor_registry` | one row per `factor_name` — the frequency + data source it is registered at, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
 | `symbols` | instrument master: what a fact table's bare `symbol` string means (market, multiplier, tick size, venue symbol, calendar, ...) | PK `(symbol, data_source, instrument_type)`; deliberately no FK from the fact tables | no |
@@ -895,8 +900,21 @@ cache reuse is disabled and does not serialize otherwise equal configurations.
 `write_ohlcv()` accepts one complete `MarketDataSubscription` and validates
 `available_at` against the provable completion floor. On identity conflict,
 only a strictly later `available_at` replaces the stored OHLCV values and
-version time; equal or older versions are no-ops. `write_external_factor()`
-keeps the earliest value on a primary-key conflict.
+version time; equal or older versions are no-ops.
+
+`write_external_factor()` keeps every factor value it replaces, so
+`load_external_factor(as_of=...)` can return what was known at a time; a source
+that revises silently otherwise leaks later knowledge into a backtest. It
+compares before it writes: a value identical to the version it would follow
+writes nothing, with no tolerance, and a changed one moves the replaced row to
+`external_factors_history` in the same transaction. The two clocks stay
+separate and neither is inferred from the other: `recorded_at` is this
+system's, `vintage_at` the source's. A version takes effect at
+`COALESCE(vintage_at, recorded_at)`, which also orders a source's vintages
+loaded in one call or out of order. Rows with both clocks NULL predate version
+tracking and are not point-in-time; an as-of read returns them as stored and
+warns when `as_of` precedes every recorded time of the factor. Publication
+lag stays the caller's, applied to the returned clocks.
 
 ## Maintenance rules
 

@@ -23,12 +23,12 @@ CREATE TABLE IF NOT EXISTS librae_schema_revision (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO librae_schema_revision (singleton, revision)
-VALUES (TRUE, 4)
+VALUES (TRUE, 5)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
-    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 4 THEN
-        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 4';
+    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 5 THEN
+        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 5';
     END IF;
 END
 $$;
@@ -525,11 +525,39 @@ CREATE TABLE IF NOT EXISTS external_factors (
     -- extra dimensions (strike, expiry, tenor) would still have nowhere to
     -- live. Storing them as several factor_names is the same mistake in a
     -- different place.
-    value           DOUBLE PRECISION NOT NULL
+    value           DOUBLE PRECISION NOT NULL,
+    -- Two clocks, never derived from each other. recorded_at is when this
+    -- system stored the value; vintage_at is the version or publication time
+    -- the source states (ALFRED's realtime_start). A row with both NULL
+    -- predates version tracking and is not point-in-time.
+    recorded_at     TIMESTAMPTZ,
+    vintage_at      TIMESTAMPTZ
 );
 SELECT create_hypertable('external_factors', 'ts', if_not_exists => TRUE);
 CREATE INDEX IF NOT EXISTS idx_external_factors_lookup ON external_factors(symbol, factor_name, timeframe, data_source, ts DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_external_factors_unique ON external_factors (ts, symbol, factor_name, timeframe, data_source, instrument_type);
+
+-- ============================================================
+-- external_factors_history -- superseded external_factors versions.
+-- write_external_factor() moves a row here before changing its value, so
+-- load_external_factor(as_of=...) can answer what was known at a time.
+-- superseded_at is when the version stopped being current. A plain table:
+-- revisions are rare next to the facts, and every read is by factor key.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS external_factors_history (
+    ts              TIMESTAMPTZ NOT NULL,
+    symbol          TEXT NOT NULL,
+    factor_name     TEXT NOT NULL,
+    timeframe       TEXT NOT NULL,
+    data_source     TEXT NOT NULL,
+    instrument_type instrument_type_t NOT NULL,
+    value           DOUBLE PRECISION NOT NULL,
+    recorded_at     TIMESTAMPTZ,
+    vintage_at      TIMESTAMPTZ,
+    superseded_at   TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_external_factors_history_key
+    ON external_factors_history(symbol, factor_name, timeframe, data_source, instrument_type, ts);
 
 -- ============================================================
 -- external_factor_coverage_ranges — get_factor() cache 覆蓋區間追蹤
@@ -618,6 +646,7 @@ BEGIN
        OR to_regclass('public.broker_orders') IS NULL
        OR to_regclass('public.position_events') IS NULL
        OR to_regclass('public.runtime_events') IS NULL
+       OR to_regclass('public.external_factors_history') IS NULL
        OR NOT EXISTS (
            SELECT 1
            FROM information_schema.columns
@@ -625,7 +654,7 @@ BEGIN
              AND table_name = 'backtest_runs'
              AND column_name = 'execution_identity'
        ) THEN
-        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 4';
+        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 5';
     END IF;
 END
 $$;
