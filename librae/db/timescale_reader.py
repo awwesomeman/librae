@@ -10,8 +10,9 @@ Naming convention:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import fields
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -23,6 +24,8 @@ from librae.db import get_conn
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_primary_subscriptions(value: object) -> tuple[MarketDataSubscription, ...]:
@@ -417,6 +420,51 @@ def get_external_factor_coverage_ranges(
     return [(r[0], r[1]) for r in rows]
 
 
+# Every stored version of one factor key: the current row and the ones it replaced.
+_FACTOR_VERSIONS_SQL = """
+    SELECT ts, value, recorded_at, vintage_at, TRUE AS is_current,
+           NULL::timestamptz AS superseded_at
+    FROM external_factors
+    WHERE symbol = %(symbol)s AND factor_name = %(factor_name)s AND timeframe = %(timeframe)s
+          AND data_source = %(data_source)s AND instrument_type = %(instrument_type)s
+          {range}
+    UNION ALL
+    SELECT ts, value, recorded_at, vintage_at, FALSE, superseded_at
+    FROM external_factors_history
+    WHERE symbol = %(symbol)s AND factor_name = %(factor_name)s AND timeframe = %(timeframe)s
+          AND data_source = %(data_source)s AND instrument_type = %(instrument_type)s
+          {range}
+"""
+
+# Per ts: the latest version effective by as_of; at an equal time the later
+# recorded one, as write_external_factor plans. With none effective yet, a ts
+# that has any source vintage was not published then and is dropped; one with
+# only system times returns its value from before tracking if it has one,
+# else its current row, since a backfill has no earlier version to give.
+_FACTOR_AS_OF_SQL = """
+    WITH versions AS (
+        SELECT *, COALESCE(vintage_at, recorded_at) AS effective_at FROM ({versions}) v
+    ), flagged AS (
+        SELECT *,
+               COALESCE(bool_or(effective_at <= %(as_of)s) OVER (PARTITION BY ts), FALSE)
+                   AS known,
+               bool_or(vintage_at IS NOT NULL) OVER (PARTITION BY ts) AS has_vintage
+        FROM versions
+    )
+    SELECT DISTINCT ON (ts) ts AS timestamp, value, recorded_at, vintage_at
+    FROM flagged
+    WHERE (known AND effective_at <= %(as_of)s)
+       OR (NOT known AND NOT has_vintage AND (effective_at IS NULL OR is_current))
+    ORDER BY ts, effective_at DESC NULLS FIRST, is_current DESC,
+             recorded_at DESC NULLS LAST, superseded_at DESC
+"""
+
+_FACTOR_EARLIEST_TIME_SQL = """
+    SELECT min(LEAST(recorded_at, vintage_at)), count(*) FILTER (WHERE vintage_at IS NULL)
+    FROM ({versions}) v
+"""
+
+
 def load_external_factor(
     symbol: str,
     factor_name: str,
@@ -426,6 +474,7 @@ def load_external_factor(
     instrument_type: str = "spot",
     started_at: str | None = None,
     ended_at: str | None = None,
+    as_of: str | datetime | None = None,
     dsn: str | None = None,
 ) -> pd.DataFrame:
     """Load cached factor values for (symbol, factor_name, timeframe,
@@ -433,7 +482,29 @@ def load_external_factor(
 
     Returns DataFrame with columns [timestamp, value], tz-aware UTC, sorted
     ascending — same shape get_factor()'s fetchers must return.
+
+    With ``as_of``, each timestamp takes the version in effect then, by
+    ``COALESCE(vintage_at, recorded_at)``, and the frame adds ``recorded_at``
+    and ``vintage_at`` so the caller can apply its own publication lag. A
+    timestamp whose versions are all later is dropped when any carries
+    ``vintage_at`` (the source had not published it); otherwise it returns its
+    value from before version tracking, or its current value when a backfill
+    left no earlier version.
     """
+    if as_of is not None:
+        return _load_external_factor_as_of(
+            {
+                "symbol": symbol,
+                "factor_name": factor_name,
+                "timeframe": timeframe,
+                "data_source": data_source,
+                "instrument_type": instrument_type,
+            },
+            as_of=_query_timestamp(as_of, field_name="as_of"),
+            started_at=started_at,
+            ended_at=ended_at,
+            dsn=dsn,
+        )
     sql = """
         SELECT ts AS timestamp, value FROM external_factors
         WHERE symbol = %s AND factor_name = %s AND timeframe = %s
@@ -451,6 +522,45 @@ def load_external_factor(
         df = pd.read_sql(sql, conn, params=params)
     if not df.empty:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    return df
+
+
+def _load_external_factor_as_of(
+    key: dict[str, str],
+    *,
+    as_of: datetime,
+    started_at: str | None,
+    ended_at: str | None,
+    dsn: str | None,
+) -> pd.DataFrame:
+    bounds = []
+    if started_at:
+        bounds.append("AND ts >= %(started_at)s")
+    if ended_at:
+        bounds.append("AND ts <= %(ended_at)s")
+    sql = _FACTOR_AS_OF_SQL.format(versions=_FACTOR_VERSIONS_SQL.format(range=" ".join(bounds)))
+    params = {**key, "as_of": as_of, "started_at": started_at, "ended_at": ended_at}
+    with get_conn(dsn) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            _FACTOR_EARLIEST_TIME_SQL.format(versions=_FACTOR_VERSIONS_SQL.format(range="")), key
+        )
+        earliest, without_vintage = cur.fetchone()
+        cur.close()
+        df = pd.read_sql(sql, conn, params=params)
+    # Only rows without a source vintage can come back unchanged.
+    if without_vintage and (earliest is None or as_of < earliest):
+        logger.warning(
+            "load_external_factor(as_of=%s) for %s/%s precedes every recorded_at and "
+            "vintage_at of the factor (earliest %s): rows without vintage_at come back "
+            "as stored, not as known then",
+            as_of.isoformat(),
+            key["symbol"],
+            key["factor_name"],
+            earliest.astimezone(UTC).isoformat() if earliest is not None else "none recorded",
+        )
+    for column in ("timestamp", "recorded_at", "vintage_at"):
+        df[column] = pd.to_datetime(df[column], utc=True)
     return df
 
 

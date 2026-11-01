@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-CURRENT_SCHEMA_REVISION = 4
+CURRENT_SCHEMA_REVISION = 5
 
 
 class _Cursor(Protocol):

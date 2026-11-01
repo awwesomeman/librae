@@ -215,7 +215,10 @@ does not replay a confirmed fill or reuse that bar's liquidity.
 
 For backtests, perform the same point-in-time join before constructing
 `Backtest`. The optional `external_factors` table is a persistence primitive,
-not an automatic third-party ingestion service.
+not an automatic third-party ingestion service. Its
+`load_external_factor(as_of=...)` returns each value as known at `as_of`,
+under the version rules in
+[architecture](../../architecture.md#python-database-helper-conventions).
 
 ## Database boundary
 

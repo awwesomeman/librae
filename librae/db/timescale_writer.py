@@ -15,12 +15,13 @@ Naming convention:
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import psycopg2
 import psycopg2.extras
@@ -832,6 +833,173 @@ def merge_ohlcv_coverage_ranges(
         cur.close()
 
 
+class ExternalFactorWrite(NamedTuple):
+    """Outcome of one write_external_factor() call.
+
+    ``inserted`` counts observations (``ts``) the key did not have before;
+    ``revised`` counts versions written to ``external_factors_history``.
+    """
+
+    inserted: int
+    revised: int
+
+
+def _factor_times(values: pd.Series, column: str) -> pd.Series:
+    """UTC timestamps for one factor column; naive input is ambiguous."""
+    times = pd.to_datetime(values)
+    if times.isna().all():
+        return pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    if times.dt.tz is None:
+        raise ValueError(
+            f"Factor {column} is timezone-naive — "
+            "fetcher must provide tz-aware datetimes "
+            "(e.g. pd.to_datetime(..., utc=True))"
+        )
+    # timestamptz holds microseconds; truncate the way to_pydatetime() does.
+    # Naive UTC is what COPY reads under the writer's UTC session time zone,
+    # and formats twice as fast as tz-aware values.
+    return times.dt.tz_convert("UTC").dt.floor("us").dt.tz_localize(None)
+
+
+def _factor_stage_csv(df: pd.DataFrame) -> io.StringIO:
+    """Validated (ts, value, vintage_at) rows as COPY CSV in naive UTC, empty
+    vintage meaning NULL."""
+    ts = _factor_times(df["timestamp"], "timestamp")
+    if "vintage_at" in df.columns:
+        vintage_at = _factor_times(df["vintage_at"], "vintage_at")
+    else:
+        vintage_at = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    value = df["value"].astype(float)
+    if value.isna().any():
+        # The CSV writer spells NaN as an empty field, which COPY reads as NULL.
+        value = value.astype(object).where(value.notna(), "NaN")
+    stage = pd.DataFrame({"ts": ts, "value": value, "vintage_at": vintage_at}).reset_index(
+        drop=True
+    )
+    if stage["ts"].isna().any():
+        raise ValueError("Factor timestamp must not be missing")
+
+    # One observation may arrive as several source versions, which the
+    # vintages order. Without a vintage there is no order to apply them in.
+    repeated = stage["ts"].duplicated(keep=False)
+    if (repeated & stage["vintage_at"].isna()).any():
+        raise ValueError(
+            "A factor timestamp appears more than once without vintage_at on every row"
+        )
+    if stage.duplicated(["ts", "vintage_at"]).any():
+        raise ValueError("A factor timestamp repeats the same vintage_at")
+
+    buffer = io.StringIO()
+    stage.to_csv(buffer, header=False, index=False)
+    buffer.seek(0)
+    return buffer
+
+
+# Plans one call's versions against the stored ones. A version whose value
+# equals the version in effect just before it writes nothing, so a re-run is a
+# no-op; the rest are planned in two lanes. now() is the transaction's start,
+# so recorded_at and superseded_at agree across the call.
+# - A row without vintage_at, or one whose vintage is not older than the
+#   current row's COALESCE(vintage_at, recorded_at), is newer: the last
+#   survivor becomes current and earlier survivors go to history. A current
+#   row from before tracking always yields to a vintage, equal or not.
+# - An older vintage goes straight to history, compared against the stored
+#   history around it; the current row stays current.
+_PLAN_FACTOR_VERSIONS_SQL = """
+CREATE TEMP TABLE ef_plan ON COMMIT DROP AS
+WITH joined AS (
+    SELECT s.ts, s.value, s.vintage_at,
+           m.ts IS NOT NULL AS has_current,
+           m.value AS current_value,
+           m.recorded_at IS NULL AND m.vintage_at IS NULL AS current_untracked,
+           s.vintage_at IS NULL
+               OR m.ts IS NULL
+               OR COALESCE(m.vintage_at, m.recorded_at) IS NULL
+               OR s.vintage_at >= COALESCE(m.vintage_at, m.recorded_at) AS newer
+    FROM ef_stage s
+    LEFT JOIN external_factors m
+      ON m.ts = s.ts AND m.symbol = %(symbol)s AND m.factor_name = %(factor_name)s
+     AND m.timeframe = %(timeframe)s AND m.data_source = %(data_source)s
+     AND m.instrument_type = %(instrument_type)s
+),
+newer AS (
+    SELECT ts, value, vintage_at, has_current,
+           CASE WHEN ROW_NUMBER() OVER w = 1 THEN NOT has_current
+                    OR value IS DISTINCT FROM current_value
+                    -- A row from before tracking has no time to be in effect
+                    -- from; an equal vintage still supplies one.
+                    OR (current_untracked AND vintage_at IS NOT NULL)
+                ELSE value IS DISTINCT FROM LAG(value) OVER w END AS changed
+    FROM joined
+    WHERE newer
+    WINDOW w AS (PARTITION BY ts ORDER BY vintage_at)
+),
+older AS (
+    SELECT ts, value, vintage_at AS effective_at, TRUE AS incoming, now() AS recorded_at
+    FROM joined WHERE NOT newer
+    UNION ALL
+    -- Stored versions sort first at an equal time, so an exact re-run collapses;
+    -- among them the later recorded one is in effect, as load_external_factor reads.
+    SELECT h.ts, h.value, COALESCE(h.vintage_at, h.recorded_at), FALSE, h.recorded_at
+    FROM external_factors_history h
+    WHERE h.symbol = %(symbol)s AND h.factor_name = %(factor_name)s
+      AND h.timeframe = %(timeframe)s AND h.data_source = %(data_source)s
+      AND h.instrument_type = %(instrument_type)s
+      AND h.ts IN (SELECT ts FROM joined WHERE NOT newer)
+      AND COALESCE(h.vintage_at, h.recorded_at) IS NOT NULL
+),
+older_changed AS (
+    SELECT ts, value, effective_at, incoming,
+           value IS DISTINCT FROM LAG(value) OVER (
+               PARTITION BY ts ORDER BY effective_at, incoming, recorded_at
+           ) AS changed
+    FROM older
+)
+SELECT ts, value, vintage_at, has_current,
+       ROW_NUMBER() OVER (PARTITION BY ts ORDER BY vintage_at DESC NULLS FIRST) = 1
+           AS becomes_current
+FROM newer
+WHERE changed
+UNION ALL
+SELECT ts, value, effective_at, TRUE, FALSE
+FROM older_changed
+WHERE incoming AND changed
+"""
+
+_ARCHIVE_SUPERSEDED_FACTORS_SQL = """
+INSERT INTO external_factors_history
+    (ts, symbol, factor_name, timeframe, data_source, instrument_type,
+     value, recorded_at, vintage_at, superseded_at)
+SELECT m.ts, m.symbol, m.factor_name, m.timeframe, m.data_source, m.instrument_type,
+       m.value, m.recorded_at, m.vintage_at, now()
+FROM ef_plan p
+JOIN external_factors m
+  ON m.ts = p.ts AND m.symbol = %(symbol)s AND m.factor_name = %(factor_name)s
+ AND m.timeframe = %(timeframe)s AND m.data_source = %(data_source)s
+ AND m.instrument_type = %(instrument_type)s
+WHERE p.becomes_current AND p.has_current
+UNION ALL
+SELECT ts, %(symbol)s, %(factor_name)s, %(timeframe)s, %(data_source)s, %(instrument_type)s,
+       value, now(), vintage_at, now()
+FROM ef_plan
+WHERE NOT becomes_current
+"""
+
+_UPSERT_CURRENT_FACTORS_SQL = """
+INSERT INTO external_factors
+    (ts, symbol, factor_name, timeframe, data_source, instrument_type,
+     value, recorded_at, vintage_at)
+SELECT ts, %(symbol)s, %(factor_name)s, %(timeframe)s, %(data_source)s, %(instrument_type)s,
+       value, now(), vintage_at
+FROM ef_plan
+WHERE becomes_current
+ON CONFLICT (ts, symbol, factor_name, timeframe, data_source, instrument_type)
+    DO UPDATE SET value = EXCLUDED.value,
+                  recorded_at = EXCLUDED.recorded_at,
+                  vintage_at = EXCLUDED.vintage_at
+"""
+
+
 def write_external_factor(
     df: pd.DataFrame,
     symbol: str,
@@ -840,53 +1008,59 @@ def write_external_factor(
     data_source: str,
     instrument_type: str = "spot",
     dsn: str | None = None,
-) -> int:
-    """Write a factor DataFrame to TimescaleDB external_factors table.
+) -> ExternalFactorWrite:
+    """Write factor values, keeping every value a write replaces.
 
-    Expects df with columns: timestamp (tz-aware UTC), value.
-    Returns number of rows written. Mirrors write_ohlcv()'s shape/tz handling.
+    ``df`` has ``timestamp`` and ``value`` and may have ``vintage_at``, the
+    source's version or publication time; all timestamps are tz-aware. A
+    timestamp may repeat once per distinct ``vintage_at``, so a source's
+    revision history loads in one call. A value identical to the version it
+    would follow writes nothing, with no tolerance; a changed one moves the
+    replaced row to ``external_factors_history`` in the same transaction.
+    ``recorded_at`` is the transaction time. Reads by ``as_of`` are
+    ``load_external_factor``'s.
     """
     if df is None or df.empty:
-        return 0
+        return ExternalFactorWrite(inserted=0, revised=0)
 
     validate_instrument_type(instrument_type)
-    ts_series = pd.to_datetime(df["timestamp"])
-    if ts_series.dt.tz is None:
-        raise ValueError(
-            "Factor timestamps are timezone-naive — "
-            "fetcher must provide tz-aware datetimes "
-            "(e.g. pd.to_datetime(..., utc=True))"
-        )
-    ts_utc = ts_series.dt.tz_convert("UTC")
-
-    rows = list(
-        zip(
-            ts_utc.apply(_to_dt),
-            [symbol] * len(df),
-            [factor_name] * len(df),
-            [timeframe] * len(df),
-            [data_source] * len(df),
-            [instrument_type] * len(df),
-            df["value"].astype(float),
-            strict=True,
-        )
-    )
+    stage = _factor_stage_csv(df)
+    key = {
+        "symbol": symbol,
+        "factor_name": factor_name,
+        "timeframe": timeframe,
+        "data_source": data_source,
+        "instrument_type": instrument_type,
+    }
 
     with get_conn(dsn) as conn:
         cur = conn.cursor()
-        psycopg2.extras.execute_values(
-            cur,
-            """INSERT INTO external_factors
-                   (ts, symbol, factor_name, timeframe, data_source, instrument_type, value)
-               VALUES %s
-               ON CONFLICT (ts, symbol, factor_name, timeframe, data_source, instrument_type)
-                   DO NOTHING""",
-            rows,
-            page_size=2000,
+        # Two writers of one key would both archive the same current row.
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            ("external_factors\x1f" + "\x1f".join(key.values()),),
         )
+        cur.execute("SET LOCAL TIME ZONE 'UTC'")
+        cur.execute(
+            """CREATE TEMP TABLE ef_stage (
+                   ts TIMESTAMPTZ NOT NULL,
+                   value DOUBLE PRECISION NOT NULL,
+                   vintage_at TIMESTAMPTZ
+               ) ON COMMIT DROP"""
+        )
+        cur.copy_expert("COPY ef_stage (ts, value, vintage_at) FROM STDIN WITH (FORMAT csv)", stage)
+        cur.execute("ANALYZE ef_stage")
+        cur.execute(_PLAN_FACTOR_VERSIONS_SQL, key)
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE becomes_current AND NOT has_current) FROM ef_plan"
+        )
+        inserted = cur.fetchone()[0]
+        cur.execute(_ARCHIVE_SUPERSEDED_FACTORS_SQL, key)
+        revised = cur.rowcount
+        cur.execute(_UPSERT_CURRENT_FACTORS_SQL, key)
         cur.close()
 
-    return len(rows)
+    return ExternalFactorWrite(inserted=inserted, revised=revised)
 
 
 def write_symbols(symbols: Iterable[SymbolInfo], dsn: str | None = None) -> int:
