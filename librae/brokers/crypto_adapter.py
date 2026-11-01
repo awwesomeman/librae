@@ -16,7 +16,7 @@ from __future__ import annotations
 import functools
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any, Concatenate
@@ -28,6 +28,7 @@ from librae.config.symbols import (
     AssetClass,
     AvailableSymbol,
     InstrumentKind,
+    SymbolInfo,
     canonicalize_price_to_increment,
 )
 from librae.core.utils import interval_to_timedelta, validate_contract_month
@@ -401,6 +402,62 @@ class CryptoAdapter:
             endpoint=self._exchange_id,
             account_fingerprint=self._account_fingerprint,
         )
+
+    def verify_venue_setup(self, instruments: Mapping[str, SymbolInfo]) -> None:
+        """Refuse a live start whose venue contradicts what the engine assumes.
+
+        Decision preflight takes spot versus contract from the declared
+        ``instrument_type`` (``SymbolInfo.can_short``), while ``prepare_order``
+        takes it from the CCXT market, so a mismatch applies two rules to one
+        symbol. The engine holds one net position per instrument and never
+        sends ``positionSide``, so a hedge-mode derivatives account is refused
+        here rather than at its first ``reduceOnly`` exit.
+        """
+        self._exchange.load_markets()
+        contract_symbols: list[str] = []
+        for symbol, instrument in instruments.items():
+            venue_symbol = instrument.venue_symbol
+            try:
+                market = self._exchange.market(venue_symbol)
+            except Exception as exc:
+                exc.add_note(f"{symbol}: venue symbol {venue_symbol} not verified at startup")
+                raise
+            listed_contract = _is_contract(market)
+            if listed_contract != (instrument.instrument_type != "spot"):
+                listed = "contract" if listed_contract else "spot"
+                raise ValueError(
+                    f"{symbol} is declared {instrument.instrument_type!r} but "
+                    f"{self._exchange_id} lists {venue_symbol} as a {listed} market; "
+                    "trading did not start"
+                )
+            if listed_contract:
+                contract_symbols.append(venue_symbol)
+        if not contract_symbols:
+            return
+        if not self._exchange.has.get("fetchPositionMode"):
+            logger.warning(
+                "%s does not report its position mode through ccxt; the account "
+                "must be in one-way mode, which was not verified",
+                self._exchange_id,
+            )
+            return
+        for venue_symbol in contract_symbols:
+            try:
+                hedged = self._exchange.fetch_position_mode(venue_symbol).get("hedged")
+            except Exception as exc:
+                exc.add_note(f"{venue_symbol}: position mode not verified at startup")
+                raise
+            if hedged is None:
+                raise ValueError(
+                    f"{self._exchange_id} did not report the position mode for "
+                    f"{venue_symbol}; trading did not start"
+                )
+            if hedged:
+                raise ValueError(
+                    f"{self._exchange_id} account is in hedge position mode for "
+                    f"{venue_symbol}; Librae supports only one-way (net) mode. "
+                    "Switch the account to one-way mode; trading did not start"
+                )
 
     def available_symbols(
         self,

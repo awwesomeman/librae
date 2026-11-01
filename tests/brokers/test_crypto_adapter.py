@@ -1745,3 +1745,96 @@ class TestCredentialPairing:
 
         with pytest.raises(ValueError, match="api_key and api_secret"):
             CryptoCredentials.from_env("BINANCE")
+
+
+SPOT_MARKET = {"symbol": "BTC/USDT", "type": "spot", "spot": True}
+PERP_MARKET = {"symbol": "BTC/USDT:USDT", "type": "swap", "swap": True, "contract": True}
+
+
+class TestVerifyVenueSetup:
+    """A live start is refused when the venue contradicts what the engine assumes."""
+
+    @staticmethod
+    def _instrument(instrument_type: str, venue_symbol: str) -> SymbolInfo:
+        return SymbolInfo(
+            symbol="BTC",
+            market="crypto",
+            data_source="binance",
+            instrument_type=instrument_type,
+            multiplier=1.0,
+            data_adapter="crypto",
+            venue_symbol=venue_symbol,
+            currency="USDT",
+        )
+
+    def _adapter(self, market: dict, *, hedged: object = False, reports_mode: bool = True):
+        exchange = MagicMock()
+        exchange.market.return_value = market
+        exchange.has = {"fetchPositionMode": reports_mode}
+        exchange.fetch_position_mode.return_value = {"info": {}, "hedged": hedged}
+        return build_crypto_adapter(exchange, api_key="k", api_secret="s"), exchange
+
+    def test_declared_spot_listed_as_contract_is_refused(self):
+        adapter, _ = self._adapter(PERP_MARKET)
+
+        with pytest.raises(ValueError, match=r"BTC is declared 'spot'.*contract market"):
+            adapter.verify_venue_setup({"BTC": self._instrument("spot", "BTC/USDT:USDT")})
+
+    def test_declared_contract_listed_as_spot_is_refused(self):
+        adapter, _ = self._adapter(SPOT_MARKET)
+
+        with pytest.raises(ValueError, match=r"BTC is declared 'contract_perpetual'.*spot market"):
+            adapter.verify_venue_setup({"BTC": self._instrument("contract_perpetual", "BTC/USDT")})
+
+    def test_hedge_mode_account_is_refused(self):
+        adapter, exchange = self._adapter(PERP_MARKET, hedged=True)
+
+        with pytest.raises(ValueError, match=r"hedge.*BTC/USDT:USDT.*one-way"):
+            adapter.verify_venue_setup(
+                {"BTC": self._instrument("contract_perpetual", "BTC/USDT:USDT")}
+            )
+        exchange.fetch_position_mode.assert_called_once_with("BTC/USDT:USDT")
+
+    def test_unreported_position_mode_is_refused(self):
+        adapter, _ = self._adapter(PERP_MARKET, hedged=None)
+
+        with pytest.raises(ValueError, match="did not report"):
+            adapter.verify_venue_setup(
+                {"BTC": self._instrument("contract_perpetual", "BTC/USDT:USDT")}
+            )
+
+    def test_one_way_contract_account_passes(self):
+        adapter, exchange = self._adapter(PERP_MARKET, hedged=False)
+
+        adapter.verify_venue_setup({"BTC": self._instrument("contract_perpetual", "BTC/USDT:USDT")})
+
+        exchange.fetch_position_mode.assert_called_once_with("BTC/USDT:USDT")
+
+    def test_spot_run_does_not_read_position_mode(self):
+        adapter, exchange = self._adapter(SPOT_MARKET)
+
+        adapter.verify_venue_setup({"BTC": self._instrument("spot", "BTC/USDT")})
+
+        exchange.fetch_position_mode.assert_not_called()
+
+    def test_venue_without_position_mode_starts_as_before_and_warns(self, caplog):
+        adapter, exchange = self._adapter(PERP_MARKET, reports_mode=False)
+
+        with caplog.at_level("WARNING"):
+            adapter.verify_venue_setup(
+                {"BTC": self._instrument("contract_perpetual", "BTC/USDT:USDT")}
+            )
+
+        exchange.fetch_position_mode.assert_not_called()
+        assert "position mode" in caplog.text
+
+    def test_a_failed_position_mode_read_names_the_symbol(self):
+        adapter, exchange = self._adapter(PERP_MARKET)
+        exchange.fetch_position_mode.side_effect = errors.RequestTimeout("timed out")
+
+        with pytest.raises(errors.RequestTimeout) as raised:
+            adapter.verify_venue_setup(
+                {"BTC": self._instrument("contract_perpetual", "BTC/USDT:USDT")}
+            )
+
+        assert "BTC/USDT:USDT" in raised.value.__notes__[0]
