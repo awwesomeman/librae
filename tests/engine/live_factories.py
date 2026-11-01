@@ -159,6 +159,17 @@ def make_live_runner(
     return runner
 
 
+def with_run_leases(trader: LiveTrader) -> LiveTrader:
+    """Mark the leases ``run()`` takes as held, for a test that drives the trader directly.
+
+    A live trader refuses operator calls without them. The store's leases stay
+    free, so a later ``run()`` or a restart on the same store still takes them.
+    """
+    trader._account_lease_acquired = True
+    trader._lease_acquired = True
+    return trader
+
+
 def make_live_trader(
     strategy: Strategy,
     adapter: MagicMock,

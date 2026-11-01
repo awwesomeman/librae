@@ -57,6 +57,7 @@ from tests.engine.live_factories import (
     _zero_cost_model,
     make_live_runner,
     make_live_trader,
+    with_run_leases,
 )
 
 # ---------------------------------------------------------------------------
@@ -5370,7 +5371,9 @@ class TestLiveExecutionLifecycle:
         adapter = _mock_order_adapter()
         adapter.place_order.side_effect = self._filled
         runtime_events = []
-        runner = make_live_trader(_HoldStrategy(), adapter, on_runtime_event=runtime_events.append)
+        runner = with_run_leases(
+            make_live_trader(_HoldStrategy(), adapter, on_runtime_event=runtime_events.append)
+        )
         alerts = self._send_alerts(runner)
         runner._last_prices = {"BTCUSDT": 100.0}
 
@@ -5690,7 +5693,7 @@ class TestLiveExecutionLifecycle:
             'binanceusdm {"code":-2022,"msg":"ReduceOnly Order is rejected."}'
         )
         store = MemoryLiveStateStore(restart_durable_for_tests=True)
-        runner = make_live_trader(_HoldStrategy(), adapter, state_store=store)
+        runner = with_run_leases(make_live_trader(_HoldStrategy(), adapter, state_store=store))
         alerts = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))
         runner._last_prices = {"BTCUSDT": 100.0}
@@ -5830,11 +5833,13 @@ class TestLiveExecutionLifecycle:
     def _periodic_reconciliation_runner(self, adapter: MagicMock):
         """Runner whose clock advances one full interval per round."""
         clock = [TEST_CLOCK_NOW]
-        runner = make_live_trader(
-            _HoldStrategy(),
-            adapter,
-            config=_test_cfg(mode="live", reconciliation_interval_seconds=1),
-            clock=lambda: clock[0],
+        runner = with_run_leases(
+            make_live_trader(
+                _HoldStrategy(),
+                adapter,
+                config=_test_cfg(mode="live", reconciliation_interval_seconds=1),
+                clock=lambda: clock[0],
+            )
         )
         runner._last_reconciliation_at = TEST_CLOCK_NOW - timedelta(seconds=1)
         alerts: list[str] = []
@@ -6194,15 +6199,18 @@ class TestLiveExecutionLifecycle:
 
         assert runner._resume_unverified is False
 
-    def test_startup_reconciliation_verifies_a_reset_made_before_run(self):
+    def test_startup_reconciliation_verifies_a_reset_an_earlier_run_left_unverified(self):
         adapter = _mock_order_adapter()
         strategy = MagicMock(spec=Strategy)
         strategy.on_bar.return_value = []
         runner = make_live_trader(
             strategy, adapter, config=_test_cfg(mode="live", reconciliation_interval_seconds=3600)
         )
+        runner._initialize_run()
         runner.halt("operator check")
         runner.reset_halt()
+        runner._close()
+        adapter.reset_mock()
 
         runner.run(max_iterations=1)
 
@@ -7233,7 +7241,7 @@ class TestLiveExecutionLifecycle:
         first = make_live_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
         first.run(max_iterations=1)
 
-        second = make_live_trader(_AlwaysBuyStrategy(), adapter, state_store=store)
+        second = with_run_leases(make_live_trader(_AlwaysBuyStrategy(), adapter, state_store=store))
         assert second._halted is True
 
         second.reset_halt()
@@ -7245,10 +7253,12 @@ class TestLiveExecutionLifecycle:
 
     def test_halt_reset_starts_new_risk_epoch(self):
         store = MemoryLiveStateStore(restart_durable_for_tests=True)
-        runner = make_live_trader(
-            _HoldStrategy(),
-            _mock_order_adapter(),
-            state_store=store,
+        runner = with_run_leases(
+            make_live_trader(
+                _HoldStrategy(),
+                _mock_order_adapter(),
+                state_store=store,
+            )
         )
         runner._halted = True
         runner._equity_peak = 120_000.0

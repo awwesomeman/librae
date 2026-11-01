@@ -971,8 +971,13 @@ adapter at submission.
   cycles, so it never interleaves with an order submission. Errors stay
   synchronous: a refused `reset_halt()` raises to its caller. `halt()`
   records the halt before it waits, so a cycle that starts first or hangs
-  applies it at its start instead. Once `run()` has shut down, all three
-  raise instead of acting on an account the run no longer owns.
+  applies it at its start instead. All three, and the pause calls below,
+  raise unless `run()` holds the account: in live mode until it has taken its
+  leases (a call made while it takes them waits), and once it has shut down.
+  Otherwise a second process of the same deployment could write the shared
+  checkpoint, cancel orders and alert while the one trading carried on
+  unchanged. A `halt()` refused before the leases stays queued, and the first
+  cycle of `run()` applies it, as it does `request_halt()`.
 - `LiveTrader.request_halt(reason)` records a halt without waiting and wakes
   the loop from its sleep; `run()` maps `SIGUSR1` to it on POSIX. The loop
   applies pending requests first in its next cycle, after any cycle in

@@ -147,7 +147,9 @@ Procedure it exercises:
 
 `trader.halt_reset_readiness()` answers the same question without raising, so
 an operator or a health check can see what is blocking before attempting a
-reset. It reports one of `halt_not_persisted` (see
+reset. It does raise while `run()` does not hold the account: in live mode
+until it has taken its leases, and after it stops. It reports one of
+`halt_not_persisted` (see
 [Halt not persisted](#halt-not-persisted)), `unresolved_broker_orders`,
 `missing_valuation_mark` or `stale_valuation_mark`, the symbols responsible,
 and what to do next. A refused reset is also recorded as a `decision_skipped`
@@ -303,6 +305,11 @@ in-process calls in live mode: like `reset_halt()`, the reference runner and
 `trade.sh` do not expose them, so the strategy's runner provides the entry
 point. They are safe from any thread but not from a signal handler, since they
 wait for the poll cycle in progress; `request_halt()` is the signal-safe call.
+Like `halt()`, they raise unless `run()` holds the account
+([engine behavior](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)).
+To start paused, pause before stopping; after a crash or on a first start,
+pause from the runner's `on_ready` callback, which runs once `run()` holds
+the account and before the first cycle.
 
 Which brake to use:
 
@@ -322,8 +329,13 @@ While paused, each order is judged when it is about to be submitted:
   the held position or exceeds it, which happens when it was sized against an
   entry dropped ahead of it.
 - Every other reduce or close goes out, recovery exits included. A flip's
-  close goes out and its open is dropped; a target rebalance stops at its first
-  entry leg, after its reductions.
+  close goes out and its open is dropped. A target rebalance sends only its
+  reductions and never waits on its entries. A reduction the volume limit
+  caps carries over to later bars within `max_rebalance_delay_bars`, as
+  unpaused, so at the default of 0 it halts the account. Once no reduction
+  remains, the rebalance ends for good, recording one `entries_paused` event
+  whose `symbols` lists what it would still open or add; resumed before then,
+  it carries on in full.
 - A group is judged before its first leg goes out: one holding an entry is
   dropped whole, exits included. A close belongs to its position's group, not
   the intent's. A group that has sent a leg finishes, across a restart too.

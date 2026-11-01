@@ -30,6 +30,7 @@ from tests.engine.live_factories import (
     _test_cfg,
     make_live_runner,
     make_live_trader,
+    with_run_leases,
 )
 from tests.engine.test_live_runner import _broker_report, _mock_order_adapter
 
@@ -69,12 +70,14 @@ def _adapter(below_minimum: str = "DUST"):
 def _trader(adapter, strategy: Strategy | None = None, **kwargs):
     events: list = []
     alerts: list[dict] = []
-    trader = make_live_trader(
-        strategy or _HoldStrategy(),
-        adapter,
-        config=_test_cfg(mode="live", symbols=SYMBOLS),
-        on_runtime_event=events.append,
-        **kwargs,
+    trader = with_run_leases(
+        make_live_trader(
+            strategy or _HoldStrategy(),
+            adapter,
+            config=_test_cfg(mode="live", symbols=SYMBOLS),
+            on_runtime_event=events.append,
+            **kwargs,
+        )
     )
     trader._notify = lambda method, **kw: alerts.append(kw) if method == "send_alert" else None
     trader._positions = {symbol: _position(symbol) for symbol in SYMBOLS}

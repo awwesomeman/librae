@@ -12,12 +12,12 @@ from __future__ import annotations
 import os
 import signal
 import time
-from threading import Thread, Timer
+from threading import Event, Thread, Timer
 
 import pytest
 from librae.core.strategy import OrderIntent, Strategy
 from librae.live.executor import OrderRequest
-from librae.live.state import TrackedOrder
+from librae.live.state import MemoryLiveStateStore, TrackedOrder
 
 from tests.engine.live_factories import (
     TEST_CLOCK_NOW,
@@ -148,24 +148,33 @@ class TestSynchronousOperatorCalls:
     def test_a_cycle_waits_for_a_reset_in_progress(self):
         trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())
         trader._halted = True
-        loop = Thread(target=trader.run, kwargs={"max_iterations": 1}, daemon=True)
-        observed: list[bool] = []
-        snapshot = trader._calc_account_snapshot
+        cycles: list[bool] = []
+        poll = trader._poll_cycle
 
-        def start_cycle_then_snapshot():
-            if not observed:
-                loop.start()
-                loop.join(PARK_SECONDS)
-                observed.append(loop.is_alive())
-            return snapshot()
+        def recording_poll():
+            cycles.append(trader._halted)
+            poll()
 
-        trader._calc_account_snapshot = start_cycle_then_snapshot
+        trader._poll_cycle = recording_poll
+        observed: list[int] = []
+        readiness = trader.halt_reset_readiness
+
+        def ready_then_park():
+            answer = readiness()
+            # Past the loop's sleep, so its next cycle is due while the reset holds the lock.
+            time.sleep(2 * PARK_SECONDS)
+            observed.append(len(cycles))
+            return answer
+
+        loop = _run_in_background(trader, iterations=2)
+        _wait_until(lambda: cycles)
+        trader.halt_reset_readiness = ready_then_park
         trader.reset_halt()
         loop.join(5)
 
-        assert observed == [True], "a cycle must not start between the readiness check and reset"
+        assert observed == [1], "a cycle must not start between the readiness check and reset"
         assert not loop.is_alive()
-        assert trader._halted is False
+        assert cycles == [True, False]
 
     def test_a_blocked_halt_is_recorded_and_the_next_cycle_applies_it(self):
         trader, _, alerts = _trader(_adapter(below_minimum=""))
@@ -476,6 +485,92 @@ class TestHaltOnAHaltedAccount:
             and event.detail.get("reason") == "close_rejected"
         ]
         assert skip.symbol == refused.request.symbol
+
+
+class TestBeforeRun:
+    def test_a_halt_while_run_takes_its_leases_waits_and_applies(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        acquire = store.acquire_lease
+        acquiring, release = Event(), Event()
+
+        def slow_acquire(key):
+            if not acquiring.is_set():
+                acquiring.set()
+                release.wait(5)
+            return acquire(key)
+
+        store.acquire_lease = slow_acquire
+        trader = make_live_trader(_HoldStrategy(), _mock_order_adapter(), state_store=store)
+        trader._setup_signal_handlers = lambda: None
+        errors: list[Exception] = []
+
+        def operator_halt():
+            try:
+                trader.halt("desk asked to stop")
+            except Exception as exc:
+                errors.append(exc)
+
+        loop = _run_in_background(trader, iterations=2)
+        assert acquiring.wait(5)
+        operator = Thread(target=operator_halt, daemon=True)
+        operator.start()
+        operator.join(PARK_SECONDS)
+        assert operator.is_alive(), "halt() must wait for run() to take its leases"
+        release.set()
+        operator.join(5)
+        loop.join(5)
+
+        assert not loop.is_alive() and not operator.is_alive()
+        assert errors == []
+        assert trader._halted is True
+
+    @pytest.mark.parametrize("call", ["halt", "reset_halt", "halt_reset_readiness"])
+    def test_a_second_process_cannot_act_for_the_running_one(self, call):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        running = make_live_trader(_HoldStrategy(), _mock_order_adapter(), state_store=store)
+        running._initialize_run()
+        running._halted = call != "halt"
+        running._persist_state()
+        adapter = _mock_order_adapter()
+        adapter.get_order.side_effect = lambda order_id, _symbol: _resting(order_id)
+        second = make_live_trader(_HoldStrategy(), adapter, state_store=store)
+        # As restored from the checkpoint: an order the running process works at the venue.
+        resting = _planned_order("BTCUSDT")
+        resting.placement_attempted, resting.order_id = True, "venue-1"
+        second._active_orders = [resting]
+        alerts: list = []
+        second._notify = lambda _method, **kwargs: alerts.append(kwargs)
+        stored = store.load(second._state_key)
+
+        try:
+            with pytest.raises(RuntimeError, match="not running"):
+                getattr(second, call)()
+        finally:
+            running._release_lease()
+
+        assert second._halted is (call != "halt")
+        assert store.load(second._state_key) == stored
+        adapter.cancel_order.assert_not_called()
+        assert alerts == []
+        # Only a run of this trader, once it holds the leases, would apply it.
+        assert second._halt_requests.qsize() == (1 if call == "halt" else 0)
+
+    def test_a_halt_refused_before_run_keeps_a_requested_one_and_both_apply(self):
+        trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())
+        alerts: list = []
+        trader._notify = lambda method, **kw: alerts.append(kw) if method == "send_alert" else None
+        trader.request_halt("signalled before the start")
+
+        with pytest.raises(RuntimeError, match="stays queued"):
+            trader.halt("desk asked to stop")
+        assert trader._halted is False
+
+        trader.run(max_iterations=1)
+
+        assert trader._halted is True
+        [halt] = _titled(alerts, "Manual Halt")
+        assert "signalled before the start" in halt["message"]
+        assert "desk asked to stop" in halt["message"]
 
 
 class TestAfterShutdown:
