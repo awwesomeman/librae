@@ -535,13 +535,14 @@ Use the lifecycle commands without relying on shell process memory:
 ./deploy/trade.sh inspect momentum-main
 ./deploy/trade.sh restart momentum-main
 ./deploy/trade.sh halt momentum-main
+./deploy/trade.sh reset momentum-main
 ./deploy/trade.sh stop momentum-main
 ./deploy/trade.sh stop momentum-main --force
 ```
 
 `halt` sends SIGUSR1 to a ready deployment, whose engine halts trading
-without the process stopping; see
-[Halting a deployed run](operational-runbook.md#halting-a-deployed-run).
+without the process stopping; `reset` sends SIGUSR2, asking it to reset that
+halt. See [Halting a deployed run](operational-runbook.md#halting-a-deployed-run).
 
 Normal stop sends SIGTERM, waits up to `TRADE_STOP_TIMEOUT_SECONDS`, and
 preserves the stopped container for inspection or restart. `--force` is the

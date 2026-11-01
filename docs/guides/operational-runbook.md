@@ -231,7 +231,7 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
 ([engine behavior](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)).
 
 - It refuses a deployment that is not ready or not managed, and signals
-  nothing: the engine installs its handler before it reports ready, and a
+  nothing: the engine installs its handlers before it reports ready, and a
   container that restarted on its own stays not ready until its new process
   reports ready ([readiness](optional-infrastructure.md#reference-vm-flow)).
   Retry once `trade.sh inspect` reports `phase=running`; stopping instead
@@ -252,10 +252,25 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
   nothing: the flatten's exits keep working, and the alert says how many.
 - `trade.sh stop` is not a halt: the process exits without cancelling resting
   orders, and the checkpoint keeps tracking them for the next start.
-- The halt persists across `trade.sh restart`. Resuming takes `reset_halt()`
-  inside the running process, after the review in
-  [Kill-switch rehearsal](#kill-switch-rehearsal); the reference runner does
-  not expose it, so the strategy's runner has to provide that entry point.
+- The halt persists across `trade.sh restart`; resume as below.
+
+To resume after the review in [Kill-switch rehearsal](#kill-switch-rehearsal),
+run `./deploy/trade.sh reset <deployment_id>`. It sends SIGUSR2, which the
+engine records as a request to `reset_halt()`
+([engine behavior](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)),
+and refuses a deployment that is not ready or not managed as `halt` does. A
+signal carries no answer back, so the outcome arrives as an alert:
+
+| Alert | Meaning | Action |
+|---|---|---|
+| Halt Reset | Reset; the next cycle reconciles with the broker before any new decision, as in the `reset_halt()` step of [Kill-switch rehearsal](#kill-switch-rehearsal). A pause stays in place ([Pausing entries](#pausing-entries)) | Watch for reconciliation alerts. If it says `checkpoint not written`, the reset holds only in this process and a restart resumes halted: restore the state store |
+| Halt Reset Refused | Nothing changed; the message names why ([causes](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)). A readiness reason comes with its required action | Act on the cause, then run `reset` again |
+
+Until one of them arrives, the request lives only in the running process, as
+for `halt`. If the container restarts first, the new runner never saw it and
+starts from its checkpoint, which holds the halt only once it was persisted
+([Halt not persisted](#halt-not-persisted)). If it restarts halted, run
+`reset` again once `inspect` reports `phase=running`.
 
 ## Halt not persisted
 
@@ -304,11 +319,11 @@ behavior is in
 
 `trader.pause_entries(reason)` stops new exposure while the strategy keeps
 running and managing its exits; `trader.resume_entries()` lifts it. Both are
-in-process calls in live mode: like `reset_halt()`, the reference runner and
-`trade.sh` do not expose them, so the strategy's runner provides the entry
-point. They are safe from any thread but not from a signal handler, since they
-wait for the poll cycle in progress; `request_halt()` is the signal-safe call.
-Like `halt()`, they raise unless `run()` holds the account
+in-process calls in live mode: the reference runner and `trade.sh` do not
+expose them, so the strategy's runner provides the entry point. They are safe
+from any thread but not from a signal handler, since they wait for the poll
+cycle in progress; `request_halt()` and `request_halt_reset()` are the
+signal-safe calls. Like `halt()`, they raise unless `run()` holds the account
 ([engine behavior](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)).
 To start paused, pause before stopping; after a crash or on a first start,
 pause from the runner's `on_ready` callback, which runs once `run()` holds
@@ -347,13 +362,13 @@ While paused, each order is judged when it is about to be submitted:
   not evaluated while it works. If that is unacceptable, halt: cancelling an
   ungrouped order at the venue halts the account anyway, as Order Cancelled.
 
-The pause survives a restart and is independent of a halt: `reset_halt()`
-leaves it in place, so pausing before the reset resumes a reviewed account
-with exits only. A call whose checkpoint write fails raises: a pause still
-applies in the process and repeating it retries the write; a failed resume
-leaves the process paused. If only an order row failed after the snapshot
-landed, though, the store records the resume until the next checkpoint, so a
-restart in that window resumes entries.
+The pause survives a restart and is independent of a halt: `reset_halt()`,
+and so `trade.sh reset`, leaves it in place, so pausing before the reset
+resumes a reviewed account with exits only. A call whose checkpoint write
+fails raises: a pause still applies in the process and repeating it retries
+the write; a failed resume leaves the process paused. If only an order row
+failed after the snapshot landed, though, the store records the resume until
+the next checkpoint, so a restart in that window resumes entries.
 
 ## Unclosable remainders
 

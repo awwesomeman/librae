@@ -4,7 +4,9 @@
 in progress and apply between cycles, so an order the loop is submitting is
 either still tracked when the halt cancels it or not yet queued. ``request_halt``
 and SIGUSR1 only record the request and wake the loop; the loop applies it
-before anything else in its next cycle.
+before anything else in its next cycle. ``request_halt_reset`` and SIGUSR2 do
+the same for a reset, which the loop applies after the halts requested before
+it and answers with an alert, since no caller waits for its outcome.
 """
 
 from __future__ import annotations
@@ -13,10 +15,11 @@ import os
 import signal
 import time
 from threading import Event, Thread, Timer
+from unittest.mock import MagicMock
 
 import pytest
 from librae.core.strategy import OrderIntent, Strategy
-from librae.live.executor import OrderRequest
+from librae.live.executor import BrokerUnavailableError, OrderRejectedError, OrderRequest
 from librae.live.state import MemoryLiveStateStore, TrackedOrder
 
 from tests.engine.live_factories import (
@@ -386,7 +389,7 @@ def _run_with_signal_handlers(trader, iterations: int) -> float:
     """Run on this (main) thread with the engine's handlers; return the seconds taken."""
     previous = {
         signum: signal.getsignal(signum)
-        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1)
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1, signal.SIGUSR2)
     }
     # A loop that sleeps out poll_seconds is stopped, failing the test
     # instead of hanging it for an hour.
@@ -573,7 +576,383 @@ class TestBeforeRun:
         assert "desk asked to stop" in halt["message"]
 
 
+def _halted_flat_trader(strategy: Strategy | None = None):
+    """A started live trader halted with nothing open, so a reset is allowed."""
+    adapter = _mock_order_adapter()
+    events: list = []
+    alerts: list[dict] = []
+    trader = make_live_trader(
+        strategy or _HoldStrategy(),
+        adapter,
+        config=_test_cfg(mode="live", reconciliation_interval_seconds=3600),
+        on_runtime_event=events.append,
+    )
+    trader._notify = lambda method, **kw: alerts.append(kw) if method == "send_alert" else None
+    trader._initialize_run()
+    trader.halt("operator check")
+    events.clear()
+    alerts.clear()
+    adapter.reset_mock()
+    return trader, adapter, events, alerts
+
+
+def _titles(alerts) -> list[str]:
+    return [alert["title"].split("] ", 1)[-1] for alert in alerts]
+
+
+def _reset_refusals(events) -> list:
+    return [
+        event
+        for event in events
+        if event.event_type == "decision_skipped"
+        and event.detail.get("reason") == "halt_reset_blocked"
+    ]
+
+
+class TestHaltResetRequest:
+    def test_request_from_another_thread_only_records_it(self):
+        trader, _, events, alerts = _halted_flat_trader()
+        persisted: list = []
+        trader._persist_state = lambda *orders: persisted.append(orders)
+
+        caller = Thread(target=trader.request_halt_reset)
+        caller.start()
+        caller.join()
+
+        assert trader._halted is True
+        assert persisted == []
+        assert events == []
+        assert alerts == []
+
+    def test_next_cycle_resets_and_reconciles_before_any_decision(self):
+        strategy = MagicMock(spec=Strategy)
+        trader, adapter, _, alerts = _halted_flat_trader(strategy)
+        steps: list[str] = []
+        flat = adapter.get_position.return_value
+        adapter.get_position.side_effect = lambda request: steps.append("reconcile") or flat
+        strategy.on_bar.side_effect = lambda ctx: steps.append("decide") or []
+
+        trader.request_halt_reset()
+        trader._poll_cycle()
+
+        assert trader._halted is False
+        assert steps == ["reconcile", "decide"]
+        assert _titles(alerts) == ["Halt Reset"]
+        assert "reconciles with the broker before any new decision" in alerts[0]["message"]
+
+    def test_an_accepted_reset_holds_decisions_until_the_broker_answers(self):
+        strategy = MagicMock(spec=Strategy)
+        strategy.on_bar.return_value = []
+        trader, adapter, _, _ = _halted_flat_trader(strategy)
+        adapter.get_position.side_effect = BrokerUnavailableError("timeout")
+
+        trader.request_halt_reset()
+        trader._poll_cycle()
+
+        assert trader._halted is False
+        assert trader._resume_unverified is True
+        strategy.on_bar.assert_not_called()
+
+    def test_a_refused_reset_alerts_its_reason_and_the_loop_stays_halted(self):
+        # Open positions with no bar behind their marks: not resettable.
+        trader, events, alerts = _trader(_adapter(below_minimum=""))
+        trader.halt("operator check")
+        events.clear()
+        alerts.clear()
+
+        trader.request_halt_reset()
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert _titles(alerts) == ["Halt Reset Refused"]
+        assert "missing_valuation_mark" in alerts[0]["message"]
+        assert "nothing was reset" in alerts[0]["message"]
+        [refusal] = _reset_refusals(events)
+        assert refusal.detail["cause"] == "missing_valuation_mark"
+        assert refusal.detail["blocking_symbols"] == sorted(SYMBOLS)
+
+    def test_an_accepted_reset_leaves_an_entries_pause_in_place(self):
+        trader, _, _, alerts = _halted_flat_trader()
+        trader.pause_entries("desk wants exits only")
+        alerts.clear()
+
+        trader.request_halt_reset()
+        trader._poll_cycle()
+
+        assert trader._halted is False
+        assert trader._entries_paused is True
+        assert _titles(alerts) == ["Halt Reset"]
+
+    def test_a_reset_of_a_running_account_changes_nothing(self):
+        trader, _, events, alerts = _halted_flat_trader()
+        trader.reset_halt()
+        trader._poll_cycle()
+        assert trader._halted is False
+        # A reset would re-base the drawdown peak of a running account.
+        trader.reset_halt = MagicMock()
+
+        trader.request_halt_reset()
+        trader._poll_cycle()
+
+        trader.reset_halt.assert_not_called()
+        assert trader._halted is False
+        assert _titles(alerts) == ["Halt Reset Refused"]
+        assert "not halted" in alerts[0]["message"]
+        assert _reset_refusals(events) == []
+
+    def test_a_reset_whose_checkpoint_fails_still_reports_the_resume(self):
+        trader, _, _, alerts = _halted_flat_trader()
+
+        def failing_persist(*_orders):
+            raise OSError("checkpoint store unavailable")
+
+        trader._persist_state = failing_persist
+        trader.request_halt_reset()
+
+        with pytest.raises(OSError, match="checkpoint store"):
+            trader._poll_cycle()
+
+        assert trader._halted is False
+        assert _titles(alerts) == ["Halt Reset"]
+        assert "a restart now would resume halted" in alerts[0]["message"]
+
+    # RuntimeError included: only the readiness refusal's own subclass is swallowed.
+    @pytest.mark.parametrize("error", [OSError, RuntimeError])
+    def test_an_unexpected_reset_error_alerts_and_propagates_after_the_halt_retry(self, error):
+        trader, _, alerts = _trader(_adapter(below_minimum=""))
+        trader.halt("operator check")
+        alerts.clear()
+        trader._active_orders = [_planned_order()]
+        trader._halt_cancels_pending = True
+
+        def failing_sink(_event):
+            raise error("event sink unavailable")
+
+        # Fails while recording the refusal, which is not the refusal itself.
+        trader._on_runtime_event = failing_sink
+        trader.request_halt_reset()
+
+        with pytest.raises(error, match="event sink"):
+            trader._poll_cycle()
+
+        assert trader._halted is True
+        assert trader._halt_reset_requests.empty()
+        # The owed cancellation still ran this cycle.
+        assert _titles(alerts) == ["Halt Cancellation Completed", "Halt Reset Refused"]
+        assert f"{error.__name__}: event sink unavailable" in alerts[1]["message"]
+
+    def test_a_reset_during_a_store_outage_is_refused_not_held(self):
+        trader, _, _, alerts = _halted_flat_trader()
+        persist = trader._persist_state
+
+        def failing_persist(*_orders):
+            raise OSError("checkpoint store unavailable")
+
+        trader._persist_state = failing_persist
+        trader._halt_unpersisted = True
+        trader.request_halt_reset()
+
+        with pytest.raises(OSError, match="checkpoint store"):
+            trader._poll_cycle()
+
+        assert _titles(alerts) == ["Halt Reset Refused"]
+        assert "halt_not_persisted" in alerts[0]["message"]
+
+        trader._persist_state = persist
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert _titles(alerts) == ["Halt Reset Refused", "Halt Persisted"]
+
+
+class TestHaltResetOrdering:
+    """A reset must never undo a halt requested after it."""
+
+    def test_a_halt_request_in_the_same_cycle_drops_the_reset(self):
+        trader, _, _, alerts = _halted_flat_trader()
+        trader.reset_halt()
+
+        # Without the drop, the reset would apply right after the halt.
+        trader.request_halt_reset()
+        trader.request_halt("desk asked to stop")
+        trader._poll_cycle()
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert _titles(alerts) == ["Halt Reset Refused", "Manual Halt"]
+        assert "a halt was applied while the reset was pending" in alerts[0]["message"]
+
+    def test_a_synchronous_halt_drops_a_pending_reset(self):
+        trader, _, _, alerts = _halted_flat_trader()
+
+        trader.request_halt_reset()
+        trader.halt("desk asked again")
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert _titles(alerts) == ["Halt Reset Refused", "Manual Halt"]
+
+    def test_a_halt_requested_as_the_reset_applies_wins_in_the_same_cycle(self):
+        strategy = MagicMock(spec=Strategy)
+        trader, adapter, _, alerts = _halted_flat_trader(strategy)
+        persist = trader._persist_state
+        arrived: list[bool] = []
+
+        def persist_then_request_halt(*orders):
+            persist(*orders)
+            if not arrived and not trader._halted:
+                arrived.append(True)
+                trader.request_halt("desk changed its mind")
+
+        trader._persist_state = persist_then_request_halt
+        trader.request_halt_reset()
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert _titles(alerts) == ["Halt Reset", "Manual Halt"]
+        strategy.on_bar.assert_not_called()
+        adapter.get_position.assert_not_called()
+
+    def test_a_reset_pending_when_an_order_rejection_halts_is_dropped(self):
+        trader, adapter, _, alerts = _halted_flat_trader(_BuyOnce())
+        trader.reset_halt()
+
+        def request_reset_then_reject(_order):
+            # Lands mid-cycle, after this cycle's reset step.
+            trader.request_halt_reset()
+            raise OrderRejectedError("venue: insufficient margin")
+
+        adapter.place_order.side_effect = request_reset_then_reject
+        trader._poll_cycle()
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert _titles(alerts) == ["Halt Reset Refused", "Order Rejected"]
+        assert "a halt was applied while the reset was pending" in alerts[0]["message"]
+
+    def test_a_reset_pending_when_a_flatten_halts_is_dropped(self):
+        adapter = _adapter(below_minimum="")
+        trader, _, alerts = _trader(adapter)
+        report = adapter.place_order.side_effect
+
+        def request_reset_then_fill(order):
+            # Lands mid-cycle; the filled exits leave the account resettable.
+            trader.request_halt_reset()
+            return report(order)
+
+        adapter.place_order.side_effect = request_reset_then_fill
+        trader.request_flatten("close everything")
+        trader._poll_cycle()
+        assert trader._positions == {}
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert _titles(alerts) == ["Halt Reset Refused", "Operator Flatten"]
+
+    def test_a_reset_requested_after_an_applied_halt_resumes(self):
+        trader, _, _, alerts = _halted_flat_trader()
+        trader.request_halt("desk asked again")
+        trader._poll_cycle()
+
+        trader.request_halt_reset()
+        trader._poll_cycle()
+
+        assert trader._halted is False
+        assert _titles(alerts) == ["Manual Halt", "Halt Reset"]
+
+
+def _without_cycle_lock():
+    class Untakeable:
+        def __enter__(self):
+            raise AssertionError("took the cycle lock")
+
+        def __exit__(self, *_exc):
+            return False
+
+    return Untakeable()
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGUSR2"), reason="SIGUSR2 is POSIX-only")
+class TestHaltResetSignal:
+    def test_sigusr2_records_a_reset_request_without_taking_the_cycle_lock(self):
+        trader, _, events, alerts = _halted_flat_trader()
+        previous = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1, signal.SIGUSR2)
+        }
+        unhandled: list[int] = []
+        cycle_lock = trader._cycle_lock
+        try:
+            signal.signal(signal.SIGUSR2, lambda signum, _frame: unhandled.append(signum))
+            trader._setup_signal_handlers()
+            # A handler taking the lock could deadlock the loop thread it interrupts.
+            trader._cycle_lock = _without_cycle_lock()
+            signal.raise_signal(signal.SIGUSR2)
+        finally:
+            trader._cycle_lock = cycle_lock
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+
+        assert unhandled == []
+        assert trader._halted is True
+        assert events == []
+        assert alerts == []
+
+        trader._poll_cycle()
+
+        assert trader._halted is False
+        assert _titles(alerts) == ["Halt Reset"]
+
+    def test_sigusr2_wakes_a_sleeping_loop(self):
+        strategy = _CountingStrategy()
+        trader = _hourly_trader(strategy)
+        trader._halted = True
+        sleep = trader._sleep
+
+        def signal_while_sleeping(seconds):
+            Timer(0.1, os.kill, args=(os.getpid(), signal.SIGUSR2)).start()
+            sleep(seconds)
+
+        trader._sleep = signal_while_sleeping
+
+        elapsed = _run_with_signal_handlers(trader, iterations=2)
+
+        assert trader._halted is False
+        assert strategy.calls == 1
+        assert elapsed < 5.0
+
+
 class TestAfterShutdown:
+    def test_a_reset_requested_as_the_run_shuts_down_is_dropped(self):
+        trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())
+        trader._halted = True
+        trader.reset_halt = MagicMock()
+        pool_shutdown = trader._notify_pool.shutdown
+
+        def request_then_shut_down(*args, **kwargs):
+            trader.request_halt_reset()
+            return pool_shutdown(*args, **kwargs)
+
+        trader._notify_pool.shutdown = request_then_shut_down
+        loop = _run_in_background(trader)
+        loop.join(5)
+
+        assert not loop.is_alive()
+        assert trader._halt_reset_requests.empty()
+        trader.reset_halt.assert_not_called()
+
+    def test_a_reset_requested_on_a_closed_trader_does_not_apply_on_a_later_run(self):
+        trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())
+        trader._halted = True
+        _run_in_background(trader).join(5)
+
+        trader.request_halt_reset()
+        loop = _run_in_background(trader)
+        loop.join(5)
+
+        assert not loop.is_alive()
+        assert trader._halted is True
+
     @pytest.mark.parametrize("call", ["halt", "reset_halt", "halt_reset_readiness"])
     def test_operator_call_after_run_returns_raises_without_mutating(self, call):
         trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())

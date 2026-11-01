@@ -986,9 +986,11 @@ class LiveTrader:
         # mutating a run that no longer owns the account.
         self._closed = False
         # Requests another thread or a signal records; the loop acts on them.
-        # Halt requests stay lock-free so a signal handler, which interrupts
-        # the loop thread mid-cycle, can never block on a lock that thread holds.
+        # Halt and halt reset requests stay lock-free so a signal handler,
+        # which interrupts the loop thread mid-cycle, can never block on a
+        # lock that thread holds.
         self._halt_requests: SimpleQueue[str] = SimpleQueue()
+        self._halt_reset_requests: SimpleQueue[None] = SimpleQueue()
         self._flatten_request_lock = Lock()
         self._flatten_request: tuple[int, str] | None = None
         self._flatten_request_sequence = 0
@@ -2027,10 +2029,7 @@ class LiveTrader:
         itself. A failure of either still alerts, naming it, before it
         propagates.
         """
-        self._halted = True
-        self._pending_decision = []
-        self._pending_resting_since = {}
-        self._live_rebalance = None
+        self._enter_halt()
         failure, note = self._persist_halt(cancel_on_retry=True)
         if failure is None and not self._executor.simulation:
             failure, note = self._cancel_for_halt()
@@ -2070,6 +2069,14 @@ class LiveTrader:
             )
         except Exception:
             logger.exception("Runtime event %s not recorded", event_type)
+
+    def _enter_halt(self) -> None:
+        """Mark the account halted, dropping work and any reset that must not outlive it."""
+        self._halted = True
+        self._pending_decision = []
+        self._pending_resting_since = {}
+        self._live_rebalance = None
+        self._drop_pending_halt_reset()
 
     def _persist_halt(self, *, cancel_on_retry: bool) -> tuple[Exception | None, str]:
         """Checkpoint a halt, or keep it for retry and return a note naming the failure.
@@ -2311,6 +2318,9 @@ class LiveTrader:
     def run(self, max_iterations: int | None = None) -> None:
         """Start the polling loop. Blocks until stopped or max_iterations reached."""
         self._drain_wake()
+        # Made while no run owned the account, so not after a review of this one.
+        if self._drain_halt_reset_requests():
+            logger.warning("Dropped a halt reset request made before run()")
         self._running = True
         self._closed = False
         self._setup_signal_handlers()
@@ -2405,6 +2415,8 @@ class LiveTrader:
         dropped = self._drain_halt_requests()
         if dropped:
             logger.warning("Dropped halt requests at shutdown: %s", "; ".join(dropped))
+        if self._drain_halt_reset_requests():
+            logger.warning("Dropped a halt reset request at shutdown")
         self._release_lease()
 
     def _require_running(self) -> None:
@@ -2537,6 +2549,20 @@ class LiveTrader:
         already running finishes first. A restart drops a pending one.
         """
         self._halt_requests.put(_validated_reason(reason, "halt"))
+        self._wake.put(None)
+
+    def request_halt_reset(self) -> None:
+        """Ask the polling loop to ``reset_halt``, without waiting.
+
+        Safe from any thread and from a signal handler: it only records the
+        request and wakes a sleeping loop. The loop applies it early in its
+        next cycle, before any order work, and alerts the outcome, since no
+        caller waits for an error. Any halt applied while it is pending drops
+        it, and a halt requested as it applies lands right after it, so a
+        reset never undoes a later halt. An account that is not halted is left
+        alone. A restart drops a pending one.
+        """
+        self._halt_reset_requests.put(None)
         self._wake.put(None)
 
     def request_flatten(self, reason: str = "operator requested flatten") -> None:
@@ -2675,26 +2701,41 @@ class LiveTrader:
             )
 
     def _setup_signal_handlers(self) -> None:
-        """Handle SIGTERM/SIGINT as graceful shutdown and SIGUSR1 as a halt request."""
+        """Map SIGTERM/SIGINT to shutdown, SIGUSR1 to a halt request, SIGUSR2 to a reset request."""
 
         def _handler(signum: int, frame: types.FrameType | None) -> None:
             logger.info("Received signal %d, shutting down gracefully", signum)
             self.stop()
 
+        # Both run on the loop thread, possibly mid-cycle: record, never apply.
         def _halt_handler(signum: int, frame: types.FrameType | None) -> None:
-            # Runs on the loop thread, possibly mid-cycle: record, never apply.
             self.request_halt("SIGUSR1 operator halt")
+
+        def _halt_reset_handler(signum: int, frame: types.FrameType | None) -> None:
+            self.request_halt_reset()
 
         signal.signal(signal.SIGTERM, _handler)
         signal.signal(signal.SIGINT, _handler)
-        if hasattr(signal, "SIGUSR1"):
+        if hasattr(signal, "SIGUSR1"):  # POSIX only, like SIGUSR2
             signal.signal(signal.SIGUSR1, _halt_handler)
+            signal.signal(signal.SIGUSR2, _halt_reset_handler)
 
     def _poll_cycle(self) -> None:
         """Process completed market-data events without live catch-up orders."""
-        # An owed halt cancellation has already polled and cancelled every
-        # tracked order once this cycle; advancing would repeat the head's.
-        cancelled = self._run_requested_halt() or self._retry_halt()
+        cancelled = self._run_requested_halt()
+        try:
+            # An owed halt cancellation has already polled and cancelled every
+            # tracked order once this cycle; advancing would repeat the head's.
+            cancelled = cancelled or self._retry_halt()
+        finally:
+            # After the retry, so a failing reset cannot skip a halt's owed
+            # work; even after a failed one, so a reset is answered in the
+            # first cycle after it arrives and never held: refused while the
+            # halt's checkpoint is still unwritten, applied once this retry
+            # has written it.
+            if self._run_requested_halt_reset():
+                # A halt requested while the reset applied still wins this cycle.
+                cancelled = self._run_requested_halt() or cancelled
         # Order work that hit a store outage may have left ledger rows and
         # fills behind, with no later order work to carry them.
         if self._unpersisted_orders:
@@ -5760,10 +5801,7 @@ class LiveTrader:
                 flattened = False
             finally:
                 self._flatten_at = None
-        self._halted = True
-        self._pending_decision = []
-        self._pending_resting_since = {}
-        self._live_rebalance = None
+        self._enter_halt()
         failure, note = self._persist_halt(cancel_on_retry=False)
         if submit_failure is not None:
             outcome = f"exit submission failed ({type(submit_failure).__name__}: {submit_failure})"
@@ -5806,7 +5844,11 @@ class LiveTrader:
         Returns whether it sent a halt's owed cancellation pass.
         """
         reasons = self._drain_halt_requests()
-        return bool(reasons) and self._apply_manual_halt("; ".join(reasons))
+        if not reasons:
+            return False
+        # A manual halt of a halted account skips _enter_halt, yet drops a reset too.
+        self._drop_pending_halt_reset()
+        return self._apply_manual_halt("; ".join(reasons))
 
     def _drain_halt_requests(self) -> list[str]:
         reasons: list[str] = []
@@ -5815,6 +5857,65 @@ class LiveTrader:
                 reasons.append(self._halt_requests.get_nowait())
             except Empty:
                 return reasons
+
+    def _run_requested_halt_reset(self) -> bool:
+        """Apply a pending ``request_halt_reset`` through ``reset_halt``, alerting the outcome.
+
+        Returns whether the account was reset.
+        """
+        if not self._drain_halt_reset_requests():
+            return False
+        if not self._halted:
+            # A reset would re-base a running account's drawdown peak unasked.
+            self._refuse_requested_reset("the account is not halted")
+            return False
+        title = f"[{self._executor.strategy_name}] Halt Reset"
+        resumed = "halt reset; live mode reconciles with the broker before any new decision"
+        try:
+            self.reset_halt()
+        except halt_recovery.HaltResetRefusedError as exc:
+            # reset_halt recorded the readiness reason as a runtime event.
+            self._refuse_requested_reset(str(exc))
+            return False
+        except Exception as exc:
+            if self._halted:
+                self._refuse_requested_reset(f"{type(exc).__name__}: {exc}")
+            else:
+                # Applied in memory; only its checkpoint failed.
+                self._notify(
+                    "send_alert",
+                    title=title,
+                    message=(
+                        f"{resumed}; checkpoint not written ({type(exc).__name__}: {exc}), "
+                        "so a restart now would resume halted."
+                    ),
+                )
+            raise
+        logger.warning("Halt reset by request")
+        self._notify("send_alert", title=title, message=f"{resumed}.")
+        return True
+
+    def _drop_pending_halt_reset(self) -> None:
+        # The order of the two is unknown, and a reset must never undo a later halt.
+        if self._drain_halt_reset_requests():
+            self._refuse_requested_reset("a halt was applied while the reset was pending")
+
+    def _refuse_requested_reset(self, cause: str) -> None:
+        logger.error("Halt reset request refused: %s", cause)
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] Halt Reset Refused",
+            message=f"{cause}; nothing was reset.",
+        )
+
+    def _drain_halt_reset_requests(self) -> bool:
+        requested = False
+        while True:
+            try:
+                self._halt_reset_requests.get_nowait()
+            except Empty:
+                return requested
+            requested = True
 
     def _run_requested_flatten(self) -> None:
         """Act on a pending ``request_flatten`` from the polling thread."""

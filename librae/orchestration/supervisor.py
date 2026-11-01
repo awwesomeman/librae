@@ -108,6 +108,10 @@ class Supervisor(Protocol):
         """Ask the running process to halt trading without stopping it."""
         ...
 
+    def reset_halt(self, deployment_id: str) -> DeploymentStatus:
+        """Ask the running process to reset its halt; the process reports the outcome."""
+        ...
+
 
 def validate_deployments(deployments: Iterable[DeploymentSpec]) -> tuple[DeploymentSpec, ...]:
     """Reject ambiguous deployment or live-account ownership."""

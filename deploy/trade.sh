@@ -7,6 +7,7 @@
 #   ./deploy/trade.sh inspect <deployment_id>
 #   ./deploy/trade.sh restart <deployment_id>
 #   ./deploy/trade.sh halt <deployment_id>
+#   ./deploy/trade.sh reset <deployment_id>     (reset the halt; outcome by alert)
 #   ./deploy/trade.sh stop <deployment_id> [--force]
 #   ./deploy/trade.sh stop --all [--force]
 #   mode: sim (default, no real orders) | live (places real orders)
@@ -19,6 +20,7 @@
 #   ./deploy/trade.sh inspect momentum-live
 #   ./deploy/trade.sh restart momentum-live
 #   ./deploy/trade.sh halt momentum-live
+#   ./deploy/trade.sh reset momentum-live
 #   ./deploy/trade.sh stop momentum-live
 #
 # Strategy code comes from the selected immutable image. Without
@@ -742,8 +744,9 @@ cmd_restart() {
     cmd_inspect "${deployment_id}"
 }
 
-cmd_halt() {
-    local deployment_id="${1:?Usage: trade.sh halt <deployment_id>}"
+# Send the runner of a ready, managed deployment the named signal, or refuse.
+signal_ready_runner() {
+    local deployment_id="$1" signal_name="$2"
     validate_deployment_id "${deployment_id}"
     local container status ready_file ready_token marker refused
     container="$(container_name "${deployment_id}")"
@@ -753,14 +756,14 @@ cmd_halt() {
     fi
     refused="${container} is not ready; nothing was signalled. Retry once inspect reports phase=running."
     # Not validate_existing_binding: its advice to stop would leave resting
-    # orders working, the opposite of what a halt is for.
+    # orders working, which neither a halt nor its reset wants.
     if [[ "$(docker inspect --format '{{ index .Config.Labels "io.librae.managed" }}' \
         "${container}")" != "true" ]]; then
         echo "${deployment_id} is not a managed deployment; nothing was signalled." >&2
         return 1
     fi
-    # The runner publishes readiness only after installing its SIGUSR1
-    # handler. Before that, the container's PID 1 would drop the signal.
+    # The runner publishes readiness only after installing its signal
+    # handlers. Before that, the container's PID 1 would drop the signal.
     status="$(cmd_inspect "${deployment_id}")"
     ready_file="$(container_ready_file "${container}")"
     ready_token="$(container_ready_token "${container}")"
@@ -780,12 +783,23 @@ cmd_halt() {
     # check takes this exec'd process with it: the kernel kills every process
     # in a PID namespace whose init exits (pid_namespaces(7)).
     if ! docker exec "${container}" python -c \
-        'import os, signal, sys; from pathlib import Path; ready = Path(sys.argv[1]).read_text(encoding="utf-8").strip() == sys.argv[2]; os.kill(1, signal.SIGUSR1) if ready else sys.exit(1)' \
-        "${ready_file}" "${marker}" >/dev/null 2>&1; then
+        'import os, signal, sys; from pathlib import Path; ready = Path(sys.argv[2]).read_text(encoding="utf-8").strip() == sys.argv[3]; os.kill(1, signal.Signals[sys.argv[1]]) if ready else sys.exit(1)' \
+        "${signal_name}" "${ready_file}" "${marker}" >/dev/null 2>&1; then
         echo "${refused}" >&2
         return 1
     fi
-    echo "Halt requested for ${container}; it is in effect once the Manual Halt alert arrives. If the container restarts before that, run halt again."
+}
+
+cmd_halt() {
+    local deployment_id="${1:?Usage: trade.sh halt <deployment_id>}"
+    signal_ready_runner "${deployment_id}" SIGUSR1 || return 1
+    echo "Halt requested for $(container_name "${deployment_id}"); it is in effect once the Manual Halt alert arrives. If the container restarts before that, run halt again."
+}
+
+cmd_reset() {
+    local deployment_id="${1:?Usage: trade.sh reset <deployment_id>}"
+    signal_ready_runner "${deployment_id}" SIGUSR2 || return 1
+    echo "Halt reset requested for $(container_name "${deployment_id}"); the Halt Reset alert confirms it, or Halt Reset Refused gives the reason. If the container restarts before either, run reset again."
 }
 
 cmd_stop() {
@@ -831,7 +845,7 @@ cmd_stop() {
     fi
 }
 
-SUBCOMMAND="${1:?Usage: trade.sh <start|stop|inspect|restart|halt> ...}"
+SUBCOMMAND="${1:?Usage: trade.sh <start|stop|inspect|restart|halt|reset> ...}"
 shift
 
 # Load non-trading deployment settings from the project root. Live credentials
@@ -858,8 +872,9 @@ case "${SUBCOMMAND}" in
     inspect) cmd_inspect "$@" ;;
     restart) cmd_restart "$@" ;;
     halt) cmd_halt "$@" ;;
+    reset) cmd_reset "$@" ;;
     *)
-        echo "Unknown subcommand: ${SUBCOMMAND} (expected start|stop|inspect|restart|halt)" >&2
+        echo "Unknown subcommand: ${SUBCOMMAND} (expected start|stop|inspect|restart|halt|reset)" >&2
         exit 1
         ;;
 esac

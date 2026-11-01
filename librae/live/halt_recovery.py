@@ -20,6 +20,10 @@ from .interfaces import RuntimeEventCallback
 from .state import HaltResetReadiness
 
 
+class HaltResetRefusedError(RuntimeError):
+    """``reset_halt`` refused because the run is not ready; nothing changed."""
+
+
 def evaluate_reset_readiness(
     *,
     halt_persisted: bool,
@@ -117,6 +121,6 @@ def refuse_reset(
             )
         )
     detail = f" for {list(readiness.blocking_symbols)}" if readiness.blocking_symbols else ""
-    raise RuntimeError(
+    raise HaltResetRefusedError(
         f"cannot reset halt: {readiness.reason}{detail}. {readiness.required_action}"
     )

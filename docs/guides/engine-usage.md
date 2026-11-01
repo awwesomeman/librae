@@ -160,7 +160,8 @@ broker reconciliation or order work, so separate manifests and launch paths
 cannot concurrently control the same declared `account_id`.
 
 The `Supervisor` protocol exposes only `start`, `stop`, `inspect`, `restart`,
-and `halt`, which asks a running process to halt trading without stopping it. Docker, systemd, Kubernetes, or another concrete process manager
+`halt`, which asks a running process to halt trading without stopping it, and
+`reset_halt`, which asks it to reset that halt. Docker, systemd, Kubernetes, or another concrete process manager
 implements those operations and remains the lifecycle source of truth.
 `DeploymentStatus` carries observed identity, phase, timestamp, and optional
 process, run, exit, and failure facts; it is not a second state store.
@@ -994,6 +995,20 @@ adapter at submission.
   applies pending requests first in its next cycle, after any cycle in
   progress, before order work and before a pending `request_flatten`,
   which the halted account then refuses. A restart drops a pending request.
+- `LiveTrader.request_halt_reset()` asks the loop to `reset_halt()` without
+  waiting and wakes it; `run()` maps `SIGUSR2` to it on POSIX. The next cycle
+  applies it after the halt retry above, even one that fails, and before any
+  order work, and alerts the outcome, since no caller waits for an error.
+  **Halt Reset** means it reset, and live mode re-verifies the broker before
+  any new decision as above; if the checkpoint write failed, the alert says
+  so, the reset holds only in memory, and the error propagates as a
+  poll-cycle error. **Halt Reset Refused** names why nothing changed: the
+  readiness refusal, recorded as for `reset_halt()`; another error, which
+  also propagates; an account that is not halted, left alone rather than
+  having its drawdown peak re-based; or a halt applied while the reset was
+  pending. Any halt applied while a reset is pending drops the reset, and one
+  requested as it applies lands right after it, so a reset never undoes a
+  later halt. A restart drops a pending request.
 - `LiveTrader.request_flatten(reason)` is the operator flatten: the same
   close-everything-and-halt as a drawdown breach, with exits carrying reason
   `operator_flatten`. It is safe from any thread because it only records the
