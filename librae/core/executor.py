@@ -415,7 +415,11 @@ class UnresolvedRebalanceLeg:
 
 @dataclass(frozen=True)
 class PortfolioRebalanceState:
-    """Backtest-only residual state for one portfolio target."""
+    """Legs of one portfolio target still to execute.
+
+    A backtest residual carried to later events, or the additions a
+    reductions-only pass withheld.
+    """
 
     target: PortfolioWeights
     orders: tuple[RebalanceOrderState, ...]
@@ -2770,8 +2774,16 @@ def execute_portfolio_weights(
     used_adv_quantity_by_symbol: dict[str, float] | None = None,
     get_executable_quantity: Callable[[str, float], float] | None = None,
     get_min_notional: Callable[[str], float | None] | None = None,
+    reductions_only: bool = False,
 ) -> ExecutionResult:
-    """Resolve and execute a portfolio rebalance as one deterministic batch."""
+    """Resolve and execute a portfolio rebalance as one deterministic batch.
+
+    ``reductions_only`` executes the reduction phase alone, for a caller that
+    may not open or add. The additions are sized but not executed, and come
+    back as ``pending_rebalance``; one with no price, or whose execution price
+    or side is unavailable, does not stop the reductions. A target that would
+    scale a grouped position is still refused, before anything moves.
+    """
     volume_consumed = used_bar_quantity_by_symbol if used_bar_quantity_by_symbol is not None else {}
     adv_consumed = used_adv_quantity_by_symbol if used_adv_quantity_by_symbol is not None else {}
     reference_price = get_reference_price or (
@@ -2798,7 +2810,8 @@ def execute_portfolio_weights(
         get_cost_model=get_cost_model,
         get_executable_quantity=get_executable_quantity,
     )
-    if state.unresolved_legs:
+    # An unresolved leg is an unheld symbol, so always an addition.
+    if state.unresolved_legs and not reductions_only:
         raise ExecutionPriceUnavailableError([leg.symbol for leg in state.unresolved_legs])
     reductions = [order.intent for order in state.orders if order.phase == "reduction"]
     additions = [order.intent for order in state.orders if order.phase == "addition"]
@@ -2824,6 +2837,12 @@ def execute_portfolio_weights(
             f"PortfolioWeights cannot scale {grouped_scale_ins}: held under a "
             "group id; close the group first or manage the symbol with grouped intents"
         )
+    withheld = None
+    if reductions_only:
+        withheld_orders = tuple(order for order in state.orders if order.phase == "addition")
+        if withheld_orders or state.unresolved_legs:
+            withheld = PortfolioRebalanceState(targets, withheld_orders, state.unresolved_legs)
+        additions = []
 
     unavailable_actions = sorted(
         {
@@ -2854,6 +2873,9 @@ def execute_portfolio_weights(
         get_executable_quantity=get_executable_quantity,
         get_min_notional=get_min_notional,
     )
+    if reductions_only:
+        reduction_result.pending_rebalance = withheld
+        return reduction_result
     cash_after_reductions = cash + reduction_result.cash_delta
     scaled_additions, cash_events = _scale_additions_to_cash(
         additions,

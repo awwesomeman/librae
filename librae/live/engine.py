@@ -2410,6 +2410,13 @@ class LiveTrader:
     def _require_running(self) -> None:
         if self._closed:
             raise RuntimeError("trader is not running: run() has shut down")
+        # Without the leases another process may own the account: acting here
+        # would write its checkpoint, cancel its orders and alert, while that
+        # process trades on unchanged.
+        if not self._executor.simulation and not (
+            self._lease_acquired and self._account_lease_acquired
+        ):
+            raise RuntimeError("trader is not running: run() has not taken the account leases")
 
     def stop(self) -> None:
         """Signal the runner to stop after the current cycle."""
@@ -2498,16 +2505,27 @@ class LiveTrader:
         cycle in progress, then applied once that cycle ends, raising any
         error to the caller. A cycle that starts first, or never ends,
         applies it itself at its start, so a slow or hung cycle cannot lose it.
-        Raises once ``run`` has shut down.
+        Raises unless ``run`` holds the account: in live mode until it has
+        taken its leases (a call made while it takes them waits), and once it
+        has shut down. Refused before the leases, the halt stays queued, and
+        the first cycle of ``run`` applies it, as it does ``request_halt``.
         """
         reason = _validated_reason(reason, "halt")
-        self._require_running()
-        self._halt_requests.put(reason)
+        if not self._closed:
+            self._halt_requests.put(reason)
         with self._cycle_lock:
-            if self._closed:
-                # Shut down while this call waited: nothing may apply it now.
-                self._drain_halt_requests()
-            self._require_running()
+            try:
+                self._require_running()
+            except RuntimeError as exc:
+                if self._closed:
+                    # Shut down while this call waited: nothing may apply it now.
+                    self._drain_halt_requests()
+                    raise
+                # Only this process's loop applies the queue, once it holds the
+                # leases; dropping the halt could lose one made as run() starts.
+                raise RuntimeError(
+                    f"{exc}; the halt stays queued for the first cycle of run()"
+                ) from None
             self._run_requested_halt()
 
     def request_halt(self, reason: str = "operator requested halt") -> None:
@@ -2541,7 +2559,8 @@ class LiveTrader:
         able to see the blocking reason without provoking an exception to
         obtain it. Remaining halted is always safe; being unable to find out
         why is not. Safe from any thread; it waits for the cycle in progress,
-        as ``halt`` does, and raises once ``run`` has shut down.
+        and raises unless ``run`` holds the account, as ``halt`` does, rather
+        than answer for a checkpoint another process may be changing.
 
         Every open position needs a mark that is both present and current.
         Presence alone would let a reset revalue the book on a price a dead
@@ -2569,7 +2588,8 @@ class LiveTrader:
         rather than an unhandled valuation error, and records the refusal so
         an operator can see it after the fact. Safe from any thread, waiting
         for the cycle in progress as ``halt`` does; a halt request still
-        pending then applies on the next cycle. Raises once ``run`` has shut down.
+        pending then applies on the next cycle. Raises unless ``run`` holds
+        the account, as ``halt`` does.
         """
         with self._cycle_lock:
             readiness = self.halt_reset_readiness()
@@ -2612,9 +2632,10 @@ class LiveTrader:
         """Stop submitting orders that open or add to a position, until ``resume_entries``.
 
         Live mode only, since it gates broker submission. It takes the cycle
-        lock, as ``halt`` does, so it never lands mid-submission. Every
-        successful call alerts, so a pause whose first write failed is still
-        announced once a repeat lands. Behavior: the runbook's Pausing entries.
+        lock, as ``halt`` does, so it never lands mid-submission, and raises
+        unless ``run`` holds the account, as ``halt`` does. Every successful
+        call alerts, so a pause whose first write failed is still announced
+        once a repeat lands. Behavior: the runbook's Pausing entries.
         """
         reason = _validated_reason(reason, "pause")
         if self._executor.simulation:
@@ -2631,7 +2652,10 @@ class LiveTrader:
             )
 
     def resume_entries(self) -> None:
-        """Let orders that open or add go out again after ``pause_entries``."""
+        """Let orders that open or add go out again after ``pause_entries``.
+
+        Raises unless ``run`` holds the account, as ``halt`` does.
+        """
         with self._cycle_lock:
             self._require_running()
             if not self._entries_paused:
@@ -3653,8 +3677,13 @@ class LiveTrader:
         lagged_adv_by_symbol: dict[str, float] | None = None,
         used_bar_quantity_by_symbol: dict[str, float] | None = None,
         sequence_start: int = 0,
+        withheld_entries: set[str] | None = None,
     ) -> list[OrderRequest]:
-        """Size intent at the latest completed close without inventing fills."""
+        """Size intent at the latest completed close without inventing fills.
+
+        Given ``withheld_entries``, a target plans only its reductions and adds
+        the symbols it would open or add to that set.
+        """
         primary_symbol = self._symbols[0]
         prices = {
             symbol: float(bar["close"])
@@ -3813,11 +3842,16 @@ class LiveTrader:
                     used_adv_quantity_by_symbol=planned_adv_quantity_by_symbol,
                     get_executable_quantity=self._get_executable_quantity,
                     get_min_notional=self._get_min_notional,
+                    reductions_only=withheld_entries is not None,
                 )
             except ExecutionPriceUnavailableError as exc:
                 if unavailable_side_symbols:
                     raise ExecutionSideUnavailableError(sorted(unavailable_side_symbols)) from exc
                 raise
+            if withheld_entries is not None and result.pending_rebalance is not None:
+                withheld = result.pending_rebalance
+                withheld_entries.update(order.intent.symbol for order in withheld.orders)
+                withheld_entries.update(leg.symbol for leg in withheld.unresolved_legs)
             temporarily_blocked = sorted(
                 {
                     event.symbol
@@ -4250,9 +4284,16 @@ class LiveTrader:
             for symbol, bar in bars.items()
         }
         batch.lagged_adv_by_symbol = dict(lagged_adv_by_symbol or {})
-        required_symbols = set(self._positions) | {
-            symbol for symbol, weight in batch.targets.weights.items() if abs(weight) > EPSILON
-        }
+        # While paused, only the reductions are planned: one the volume limit
+        # caps defers to the next bar as it does unpaused, and the entries,
+        # never sent, hold nothing up. With no reduction left the rebalance
+        # ends, recording the entries it withheld.
+        withheld: set[str] | None = set() if self._entries_paused else None
+        required_symbols = set(self._positions)
+        if withheld is None:
+            required_symbols |= {
+                symbol for symbol, weight in batch.targets.weights.items() if abs(weight) > EPSILON
+            }
         try:
             missing = sorted(required_symbols - set(batch.reference_prices))
             if missing:
@@ -4264,6 +4305,7 @@ class LiveTrader:
                 lagged_adv_by_symbol=lagged_adv_by_symbol,
                 used_bar_quantity_by_symbol=batch.filled_bar_quantity_by_symbol,
                 sequence_start=batch.next_sequence,
+                withheld_entries=withheld,
             )
         except ExecutionUnavailableError as exc:
             if batch.delay_bars >= self._max_rebalance_delay_bars:
@@ -4306,6 +4348,25 @@ class LiveTrader:
         if not requests:
             self._live_rebalance = None
             self._persist_state()
+            if withheld:
+                symbols = sorted(withheld)
+                message = (
+                    f"target rebalance ended with its reductions done; {', '.join(symbols)} "
+                    "not opened or added while entries are paused"
+                )
+                logger.info("Rebalance entries withheld: %s", message)
+                if self._on_runtime_event:
+                    self._on_runtime_event(
+                        RuntimeEvent(
+                            ts=ts,
+                            event_type="decision_skipped",
+                            detail={
+                                "reason": "entries_paused",
+                                "symbols": symbols,
+                                "message": message,
+                            },
+                        )
+                    )
             return False
 
         tracked = TrackedOrder(request=requests[0])
@@ -4483,7 +4544,9 @@ class LiveTrader:
 
         A group is judged once, before its first leg goes out, for the hedge
         reason ``_drop_unfunded_entry`` gives; a started group finishes. A
-        rebalance stops, as replanning would queue the same leg again.
+        target rebalance queues no entry while paused, so one dropped here was
+        queued before the pause; the rebalance carries on, as replanning
+        while paused plans only its reductions. A dropped exit stops it.
         Returns whether anything was dropped.
         """
         if not self._entries_paused:
@@ -4498,7 +4561,10 @@ class LiveTrader:
         if all(self._reduces_held_position(leg.request) for leg in legs):
             return False
         scope = "other orders remain eligible"
-        if self._live_rebalance is not None:
+        if self._live_rebalance is not None and any(
+            leg.request.position_effect in ("reduce", "close") for leg in legs
+        ):
+            # Replanning would queue the same exit again.
             self._live_rebalance = None
             scope = "the target rebalance stopped"
         if group_id is not None:

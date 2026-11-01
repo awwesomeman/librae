@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import timedelta
 from threading import Thread
 
 import pytest
@@ -24,6 +25,7 @@ from tests.engine.live_factories import (
     _test_cfg,
     make_live_runner,
     make_live_trader,
+    with_run_leases,
 )
 from tests.engine.test_live_flatten import (
     SYMBOLS,
@@ -99,6 +101,20 @@ def _pair() -> list[OrderIntent]:
         OrderIntent(action="long", symbol="AAA", quantity=1.0, group_id="pair"),
         OrderIntent(action="long", symbol="BBB", quantity=1.0, group_id="pair"),
     ]
+
+
+NEXT_BAR = TEST_CLOCK_NOW + timedelta(hours=1)
+
+
+def _cap_volume(trader, max_rebalance_delay_bars: int = 1) -> None:
+    """At a tenth of each bar's volume, so a target may need several bars."""
+    trader._max_bar_volume_participation_rate = 0.1
+    trader._max_rebalance_delay_bars = max_rebalance_delay_bars
+
+
+def _thin_aaa_bars() -> dict[str, dict[str, float]]:
+    """AAA trades 5 a bar, so the cap lets half of a held 1.0 go per bar."""
+    return {**_bars(), "AAA": {"close": 100.0, "volume": 5.0}}
 
 
 def _failing_persist(*_orders):
@@ -203,7 +219,7 @@ class TestPausedOrders:
         [skip] = _skips(events)
         assert (skip.symbol, skip.detail["position_effect"]) == ("AAA", "open")
 
-    def test_a_rebalance_sends_its_reductions_and_stops_at_its_first_entry(self):
+    def test_a_rebalance_sends_its_reductions_then_ends_recording_its_entries(self):
         """AAA flips from short to long: its close goes out, its open does not."""
         adapter = _adapter(below_minimum="")
         trader, events, _ = _paused(adapter)
@@ -221,8 +237,120 @@ class TestPausedOrders:
         assert trader._positions == {}
         assert trader._live_rebalance is None
         [skip] = _skips(events)
-        assert (skip.symbol, skip.detail["position_effect"]) == ("AAA", "open")
-        assert "rebalance stopped" in skip.detail["message"]
+        assert skip.detail["symbols"] == ["AAA"]
+        assert "target rebalance ended" in skip.detail["message"]
+
+    def test_a_rebalance_works_a_volume_capped_reduction_across_bars_before_its_entry(self):
+        adapter = _adapter(below_minimum="")
+        trader, events, _ = _paused(adapter)
+        _cap_volume(trader)
+        trader._positions = {"AAA": _position("AAA")}
+
+        complete = trader._execute_live_decision(
+            PortfolioWeights({"BBB": 0.5}), _thin_aaa_bars(), TEST_CLOCK_NOW
+        )
+
+        assert complete is False
+        assert trader._positions["AAA"].quantity == pytest.approx(0.5)
+        assert trader._live_rebalance is not None
+        assert _skips(events) == []
+
+        complete = trader._continue_live_rebalance(_thin_aaa_bars(), NEXT_BAR)
+
+        assert complete is True
+        assert _effects(adapter) == [("AAA", "reduce"), ("AAA", "close")]
+        assert trader._positions == {}
+        assert trader._live_rebalance is None
+        [skip] = _skips(events)
+        assert skip.detail["symbols"] == ["BBB"]
+
+    @pytest.mark.parametrize("entry", ["zero_volume", "below_venue_minimum", "no_bar"])
+    def test_a_rebalance_entry_that_could_not_go_out_holds_nothing_up(self, entry):
+        adapter = _adapter(below_minimum="BBB" if entry == "below_venue_minimum" else "")
+        trader, events, _ = _paused(adapter)
+        _cap_volume(trader, max_rebalance_delay_bars=0)
+        trader._positions = {"AAA": _position("AAA")}
+        bars = _bars()
+        if entry == "zero_volume":
+            bars["BBB"] = {"close": 100.0, "volume": 0.0}
+        elif entry == "no_bar":
+            del bars["BBB"]
+
+        complete = trader._execute_live_decision(
+            PortfolioWeights({"BBB": 0.5}), bars, TEST_CLOCK_NOW
+        )
+
+        assert complete is True
+        assert trader._halted is False
+        assert _effects(adapter) == [("AAA", "close")]
+        assert trader._live_rebalance is None
+        [skip] = _skips(events)
+        assert skip.detail["symbols"] == ["BBB"]
+
+    def test_a_flip_whose_close_used_the_bar_volume_ends_without_waiting_for_its_open(self):
+        adapter = _adapter(below_minimum="")
+        trader, events, _ = _paused(adapter)
+        _cap_volume(trader, max_rebalance_delay_bars=0)
+        trader._positions = {"AAA": replace(_position("AAA"), side="short")}
+        # A tenth of 10 is exactly the short's 1.0, so its close uses the bar up.
+        bars = {**_bars(), "AAA": {"close": 100.0, "volume": 10.0}}
+
+        complete = trader._execute_live_decision(
+            PortfolioWeights({"AAA": 0.5}), bars, TEST_CLOCK_NOW
+        )
+
+        assert complete is True
+        assert trader._halted is False
+        assert _effects(adapter) == [("AAA", "close")]
+        [skip] = _skips(events)
+        assert skip.detail["symbols"] == ["AAA"]
+
+    def test_an_entry_queued_before_the_pause_is_dropped_and_the_reductions_carry_on(self):
+        adapter = _adapter(below_minimum="")
+        trader, events, _ = _trader(adapter)
+        _cap_volume(trader)
+        trader._positions = {"AAA": _position("AAA")}
+        advance = trader._advance_live_orders
+
+        def advance_until_an_entry(**kwargs):
+            head = trader._active_orders[0] if trader._active_orders else None
+            if head is None or head.request.position_effect != "open":
+                advance(**kwargs)
+
+        # The process stops before sending BBB, queued behind AAA's capped reduction.
+        trader._advance_live_orders = advance_until_an_entry
+        trader._execute_live_decision(
+            PortfolioWeights({"BBB": 0.5}), _thin_aaa_bars(), TEST_CLOCK_NOW
+        )
+        trader._advance_live_orders = advance
+        trader.pause_entries("desk review")
+
+        trader._advance_live_orders()
+        complete = trader._continue_live_rebalance(_thin_aaa_bars(), NEXT_BAR)
+
+        assert complete is True
+        assert _effects(adapter) == [("AAA", "reduce"), ("AAA", "close")]
+        assert trader._positions == {}
+        dropped, ended = _skips(events)
+        assert (dropped.symbol, dropped.detail["position_effect"]) == ("BBB", "open")
+        assert ended.detail["symbols"] == ["BBB"]
+
+    def test_a_rebalance_resumed_before_its_reductions_finish_sends_its_entry(self):
+        adapter = _adapter(below_minimum="")
+        trader, events, _ = _paused(adapter)
+        _cap_volume(trader)
+        trader._positions = {"AAA": _position("AAA")}
+        trader._execute_live_decision(
+            PortfolioWeights({"BBB": 0.5}), _thin_aaa_bars(), TEST_CLOCK_NOW
+        )
+
+        trader.resume_entries()
+        complete = trader._continue_live_rebalance(_thin_aaa_bars(), NEXT_BAR)
+
+        assert complete is True
+        assert _effects(adapter) == [("AAA", "reduce"), ("AAA", "close"), ("BBB", "open")]
+        assert set(trader._positions) == {"BBB"}
+        assert _skips(events) == []
 
     def test_a_group_with_an_entry_is_dropped_whole_and_a_group_of_exits_goes_out(self):
         adapter = _adapter(below_minimum="")
@@ -351,9 +479,14 @@ class TestPausedOrders:
         events: list = []
         adapter = _mock_order_adapter()
         strategy = _BuyEveryBar()
-        trader = make_live_trader(strategy, adapter, on_runtime_event=events.append)
+        trader = make_live_trader(
+            strategy,
+            adapter,
+            on_runtime_event=events.append,
+            # The first point at which run() holds the account.
+            on_ready=lambda _run_id: trader.pause_entries("desk review"),
+        )
         trader._setup_signal_handlers = lambda: None
-        trader.pause_entries("desk review")
 
         trader.run(max_iterations=1)
 
@@ -367,7 +500,9 @@ class TestPauseDurability:
     def test_the_pause_survives_a_restart(self):
         store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
-        make_live_trader(_HoldStrategy(), adapter, state_store=store).pause_entries("desk review")
+        with_run_leases(
+            make_live_trader(_HoldStrategy(), adapter, state_store=store)
+        ).pause_entries("desk review")
         events: list = []
         strategy = _BuyEveryBar()
 
@@ -384,12 +519,14 @@ class TestPauseDurability:
         assert len(_skips(events)) == 1
 
     def _restart(self, store, adapter, events):
-        return make_live_trader(
-            _HoldStrategy(),
-            adapter,
-            state_store=store,
-            config=_test_cfg(mode="live", symbols=SYMBOLS),
-            on_runtime_event=events.append,
+        return with_run_leases(
+            make_live_trader(
+                _HoldStrategy(),
+                adapter,
+                state_store=store,
+                config=_test_cfg(mode="live", symbols=SYMBOLS),
+                on_runtime_event=events.append,
+            )
         )
 
     def test_a_restored_group_with_no_leg_sent_is_dropped_whole(self):
@@ -513,7 +650,7 @@ class TestPauseDurability:
     def test_a_resume_survives_a_restart(self):
         store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()
-        trader = make_live_trader(_HoldStrategy(), adapter, state_store=store)
+        trader = with_run_leases(make_live_trader(_HoldStrategy(), adapter, state_store=store))
         trader.pause_entries("desk review")
         trader.resume_entries()
 
@@ -603,7 +740,7 @@ class TestHaltsStayFullFreezes:
         assert trader._halted is True
 
     def test_reset_halt_leaves_the_pause_in_place(self):
-        trader = _single_symbol_trader(_HoldStrategy(), _mock_order_adapter())
+        trader = with_run_leases(_single_symbol_trader(_HoldStrategy(), _mock_order_adapter()))
         trader.pause_entries("desk review")
         trader._halted = True
 
@@ -667,6 +804,28 @@ class TestOperatorCalls:
         assert observed == [(True, call == "resume_entries")]
         assert not loop.is_alive() and not operator.is_alive()
         assert trader._entries_paused is (call == "pause_entries")
+
+    @pytest.mark.parametrize("call", ["pause_entries", "resume_entries"])
+    def test_a_second_process_cannot_pause_or_resume_the_running_one(self, call):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        running = make_live_trader(_HoldStrategy(), _mock_order_adapter(), state_store=store)
+        running._initialize_run()
+        running._entries_paused = call == "resume_entries"
+        running._persist_state()
+        second = make_live_trader(_HoldStrategy(), _mock_order_adapter(), state_store=store)
+        alerts: list = []
+        second._notify = lambda _method, **kwargs: alerts.append(kwargs)
+        stored = store.load(second._state_key)
+
+        try:
+            with pytest.raises(RuntimeError, match="not running"):
+                getattr(second, call)()
+        finally:
+            running._release_lease()
+
+        assert second._entries_paused is (call == "resume_entries")
+        assert store.load(second._state_key) == stored
+        assert alerts == []
 
     @pytest.mark.parametrize("call", ["pause_entries", "resume_entries"])
     def test_operator_call_after_run_returns_raises_without_mutating(self, call):

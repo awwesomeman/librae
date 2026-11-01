@@ -37,6 +37,7 @@ def _process(
     cost_model: CostModel | None = None,
     max_bar_volume_participation_rate: float | None = None,
     volumes: dict[str, float] | None = None,
+    reductions_only: bool = False,
 ) -> ExecutionResult:
     model = cost_model or CostModel.zero()
     return execute_portfolio_weights(
@@ -50,6 +51,7 @@ def _process(
         primary_symbol="A",
         max_bar_volume_participation_rate=max_bar_volume_participation_rate,
         get_volume=(lambda symbol: volumes.get(symbol)) if volumes is not None else None,
+        reductions_only=reductions_only,
     )
 
 
@@ -163,6 +165,64 @@ class TestRebalanceExecution:
         ]
         assert np.isclose(positions["A"].quantity, 2.5)
         assert np.isclose(positions["B"].quantity, 15.0)
+
+    def test_reductions_only_stops_before_adding(self) -> None:
+        positions: dict[str, PositionState] = {}
+        prices = {"A": 100.0, "B": 50.0}
+        first = _process(
+            PortfolioWeights(weights={"A": 0.5, "B": 0.5}), positions, 1_000.0, prices=prices
+        )
+        cash = 1_000.0 + first.cash_delta
+
+        second = _process(
+            PortfolioWeights(weights={"A": 0.25, "B": 0.75}),
+            positions,
+            cash,
+            prices=prices,
+            reductions_only=True,
+        )
+
+        assert [(event.event_type, event.symbol) for event in second.events] == [("reduce", "A")]
+        assert np.isclose(positions["B"].quantity, 10.0)
+        assert second.pending_rebalance is not None
+        assert [order.intent.symbol for order in second.pending_rebalance.orders] == ["B"]
+
+    def test_reductions_only_does_not_wait_on_an_unpriced_addition(self) -> None:
+        positions: dict[str, PositionState] = {}
+        first = _process(
+            PortfolioWeights(weights={"A": 1.0}), positions, 1_000.0, prices={"A": 100.0}
+        )
+
+        second = _process(
+            PortfolioWeights(weights={"B": 1.0}),
+            positions,
+            1_000.0 + first.cash_delta,
+            prices={"A": 100.0},
+            reductions_only=True,
+        )
+
+        assert [(event.event_type, event.symbol) for event in second.events] == [("close", "A")]
+        assert second.pending_rebalance is not None
+        assert [leg.symbol for leg in second.pending_rebalance.unresolved_legs] == ["B"]
+
+    def test_reductions_only_refuses_a_target_whose_addition_is_refused(self) -> None:
+        positions: dict[str, PositionState] = {}
+        prices = {"A": 100.0, "B": 50.0}
+        first = _process(
+            PortfolioWeights(weights={"A": 0.5, "B": 0.5}), positions, 1_000.0, prices=prices
+        )
+        positions["A"] = replace(positions["A"], group_id="pair")
+
+        with pytest.raises(ValueError, match="cannot scale"):
+            _process(
+                PortfolioWeights(weights={"A": 0.75}),
+                positions,
+                1_000.0 + first.cash_delta,
+                prices=prices,
+                reductions_only=True,
+            )
+
+        assert np.isclose(positions["B"].quantity, 10.0)
 
     def test_omitted_asset_is_closed(self) -> None:
         positions: dict[str, PositionState] = {}
