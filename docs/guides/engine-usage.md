@@ -965,6 +965,17 @@ adapter at submission.
   working. `reset_halt()` refuses with `halt_not_persisted` until then. A
   process that exits first restarts from the last written checkpoint,
   unhalted.
+- Audit trail: every halt alert records one `halted` runtime event, so one
+  stop can record several: a flatten whose exit fails records the exit's halt
+  and its own, and a halt repeated on an already-halted account records again.
+  An operator `halt()` of an already-halted account changes nothing and records
+  none. Each `reset_halt()` that applies records `halt_reset`, with
+  `persisted: false` when its checkpoint failed, and each order group failure
+  that leaves the account trading records `group_failed`. `halted` and
+  `group_failed` carry the alert's title as `reason` and its cause as
+  `message`. A refused reset stays a `decision_skipped` event
+  (`halt_reset_blocked`). How a failing sink is handled is in the
+  [callback contract](../../architecture.md#livetrader-callback-signatures-writing-your-own-db-sink-or-notifier).
 - Threading: `halt()`, `reset_halt()` and `halt_reset_readiness()` are safe
   from any thread. Each waits for the poll cycle in progress, which lasts as
   long as that cycle's broker and market-data calls, and applies between
@@ -1185,7 +1196,10 @@ shape; it is not a business/domain version.
 and active order facts for audit/idempotency without growing the checkpoint.
 Placement-attempted and its UTC wall-clock timestamp are saved before network
 I/O, so an ambiguous placement outcome is looked up rather than blindly
-retried, and local order age survives restart. A row whose checkpoint write
+retried, and local order age survives restart. The row's `error` keeps what a
+failed placement raised: the venue's reason for a definite refusal, which is
+`rejected`, or the error of an unknown outcome, whose status stays unresolved
+because the order may still rest at the venue. A row whose checkpoint write
 fails is carried by the next checkpoint that lands, even when the order went
 terminal meanwhile and left the snapshot. A row the store refuses while it
 still accepts the snapshot is dropped rather than failing every later

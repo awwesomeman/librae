@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import get_args
 
 import numpy as np
 from librae.app.grafana.generate_dashboards import (
@@ -12,6 +13,7 @@ from librae.app.grafana.generate_dashboards import (
     render_signal_monitor,
     render_unified_dashboard,
 )
+from librae.core.executor import RuntimeEventType
 from librae.core.market_data import MarketDataSubscription
 from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS
 from librae.core.utils import make_event_id
@@ -301,16 +303,20 @@ class TestRenderUnifiedDashboard:
         assert panel["fieldConfig"]["defaults"]["custom"]["filterable"] is True
 
     def test_runtime_events_panel_reads_runtime_events(self):
-        """runtime_events (state_recovered/decision_skipped) are written to
-        the DB, so they need a Grafana panel — otherwise the only way to see
-        them is querying the table directly."""
+        """runtime_events are written to the DB, so they need a Grafana panel —
+        otherwise reviewing why a run halted means querying the table directly.
+        The panel lists every event type of the run, and its description
+        explains each one."""
         d = render_unified_dashboard()
         panel = next(p for p in d["panels"] if p["title"] == "Runtime Events")
         sql = panel["targets"][0]["rawSql"]
         assert "runtime_events" in sql
         assert "${run_id}" in sql
+        assert "event_type" in sql and "event_type IN" not in sql
         assert "detail->>'reason'" in sql
         assert panel["fieldConfig"]["defaults"]["custom"]["filterable"] is True
+        for event_type in get_args(RuntimeEventType):
+            assert event_type in panel["description"], event_type
 
 
 class TestRenderAccountOverviewDashboard:

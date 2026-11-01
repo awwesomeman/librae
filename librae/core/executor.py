@@ -363,7 +363,9 @@ class PositionEvent:
     cash_flow: float | None = None
 
 
-RuntimeEventType = Literal["state_recovered", "decision_skipped"]
+RuntimeEventType = Literal[
+    "state_recovered", "decision_skipped", "halted", "halt_reset", "group_failed"
+]
 
 
 @dataclass(frozen=True)
@@ -372,12 +374,15 @@ class RuntimeEvent:
 
     ``event_type`` is a small, deliberately closed set (matches the
     ``runtime_events`` table's CHECK constraint) — new *kinds* of event
-    still extend it deliberately. ``decision_skipped`` instead covers every
-    "a decision hit an operational constraint and wasn't executed" case
-    (insufficient cash, a notional/volume cap, an unresolvable side, a
-    missing quantity, ...) under one type, with ``detail["reason"]``
-    naming which one — a free string, not part of the closed set, so a new
-    reason never needs a schema change.
+    still extend it deliberately. ``halted``, ``halt_reset`` and
+    ``group_failed`` record a live account stopping, an operator starting a
+    new risk epoch, and one order group failing while the account keeps
+    trading. ``decision_skipped`` instead covers every "a decision hit an
+    operational constraint and wasn't executed" case (insufficient cash, a
+    notional/volume cap, an unresolvable side, a missing quantity, ...)
+    under one type, with ``detail["reason"]`` naming which one — a free
+    string, not part of the closed set, so a new reason never needs a
+    schema change.
     """
 
     ts: datetime

@@ -638,11 +638,12 @@ class LiveExecutor:
     def submit_order(self, request: OrderRequest) -> ExecutionReport | None:
         """Submit a request and return its normalized broker state.
 
-        ``None`` means the placement outcome is unknown or the adapter
-        response violated the execution-report contract. An
-        ``OrderRejectedError`` becomes a rejected report with no order id.
-        Accepted but unfilled orders are returned as such; acknowledgement is
-        never treated as a fill.
+        ``None`` only in simulation. An ``OrderRejectedError`` becomes a
+        rejected report with no order id. Any other error, including an
+        adapter response that violates the execution-report contract, leaves
+        the outcome unknown and is logged and re-raised, so the caller can
+        record it and look the order up. Accepted but unfilled orders are
+        returned as such; acknowledgement is never treated as a fill.
         """
         if self._simulation:
             return None
@@ -685,7 +686,7 @@ class LiveExecutor:
                 request.symbol,
                 request.quantity,
             )
-            return None
+            raise
 
         logger.info(
             "Order report: %s %s qty=%.4f status=%s filled=%.4f order_id=%s",

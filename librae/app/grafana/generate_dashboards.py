@@ -1136,12 +1136,19 @@ BASE_PANELS_DEF: list[dict] = [
             "\n"
             "- `#` — row index.\n"
             "- Time — event timestamp.\n"
-            "- Symbol — trading pair; blank for run-level events (state_recovered).\n"
+            "- Symbol — trading pair; blank for run-level events (state_recovered,\n"
+            "  halted, halt_reset).\n"
             "- Event — state_recovered (process resumed from checkpoint after a\n"
-            "  restart, sim/live only) or decision_skipped (a risk/sizing\n"
-            "  constraint blocked an order this period).\n"
+            "  restart, sim/live only), decision_skipped (a risk/sizing\n"
+            "  constraint blocked an order this period), halted (one per halt\n"
+            "  alert, so one stop can show several), halt_reset (an operator\n"
+            "  called reset_halt() to start a new risk epoch; Detail's\n"
+            "  was_halted says whether the account was halted) or group_failed\n"
+            "  (one order group failed and was cancelled; the account kept\n"
+            "  trading).\n"
             "- Reason — why a decision was skipped, e.g. insufficient_cash,\n"
-            "  opposite_side, notional_capped; blank for state_recovered.\n"
+            "  opposite_side, notional_capped, or the alert title of a halt or\n"
+            "  group failure; blank for state_recovered and halt_reset.\n"
             "- Detail — full raw event payload behind Reason, for deeper checks."
         ),
         "type": "table",
@@ -1166,8 +1173,8 @@ BASE_PANELS_DEF: list[dict] = [
         "fieldConfig": {
             "defaults": {"custom": {"filterable": True}},
             "overrides": [
-                # Event is deliberately uncolored — both event types are
-                # expected, by-design occurrences, not alarms.
+                # Event is deliberately uncolored: a halt already pages through
+                # its alert, and here every type is a record, not an alarm.
                 _width_override("#", 40),
                 _width_override("Time", 180),
                 _width_override("Symbol", 120),

@@ -132,6 +132,9 @@ class TimescaleLiveStateStore:
                             request.submitted_at,
                             tracked.executed_at,
                             json.dumps(tracked.to_dict()["request"]),
+                            # psycopg2 refuses a string holding NUL, and the
+                            # refused row would block every later write of it.
+                            tracked.error.replace("\x00", "") or None,
                         )
                     )
                 psycopg2.extras.execute_values(
@@ -142,7 +145,7 @@ class TimescaleLiveStateStore:
                             placement_attempted_at, cancel_requested,
                             requested_quantity,
                             filled_quantity, filled_notional, commission,
-                            slippage, tax, submitted_at, executed_at, request)
+                            slippage, tax, submitted_at, executed_at, request, error)
                        VALUES %s
                        ON CONFLICT (state_key, client_order_id) DO UPDATE SET
                          broker_order_id=EXCLUDED.broker_order_id,
@@ -156,6 +159,7 @@ class TimescaleLiveStateStore:
                          slippage=EXCLUDED.slippage,
                          tax=EXCLUDED.tax,
                          executed_at=EXCLUDED.executed_at,
+                         error=COALESCE(EXCLUDED.error, broker_orders.error),
                          updated_at=NOW()""",
                     rows,
                 )
