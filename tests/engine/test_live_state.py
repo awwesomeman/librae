@@ -47,6 +47,7 @@ def _order() -> TrackedOrder:
             order_type="limit",
             limit_price=99.0,
             submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
+            reference_price=100.0,
         ),
         placement_attempted=True,
         placement_attempted_at=datetime(2025, 1, 2, tzinfo=UTC),
@@ -163,6 +164,7 @@ def test_exact_future_order_identity_survives_checkpoint_round_trip():
             quantity=1.0,
             order_type="market",
             submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
+            reference_price=100.0,
             security_type="FUT",
             exchange="CME",
             currency="USD",
@@ -175,6 +177,81 @@ def test_exact_future_order_identity_survives_checkpoint_round_trip():
     assert restored.request.symbol == "ES_202609"
     assert restored.request.venue_symbol == "ES"
     assert restored.request.contract_month == "202609"
+
+
+def _filled(side: str, average_price: float) -> TrackedOrder:
+    return TrackedOrder(
+        request=OrderRequest(
+            client_order_id="strategy-order-1",
+            symbol="BTC/USDT",
+            side=side,
+            quantity=2.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
+            reference_price=100.0,
+        ),
+        status="filled",
+        filled_quantity=2.0,
+        filled_notional=2.0 * average_price,
+    )
+
+
+@pytest.mark.parametrize(
+    ("side", "average_price", "expected"),
+    [
+        ("buy", 101.0, 0.01),
+        ("sell", 99.0, 0.01),
+        ("buy", 99.0, -0.01),
+        ("sell", 101.0, -0.01),
+    ],
+)
+def test_implementation_shortfall_is_positive_when_the_fill_is_adverse(
+    side, average_price, expected
+):
+    assert _filled(side, average_price).implementation_shortfall == pytest.approx(expected)
+
+
+def test_implementation_shortfall_is_unmeasured_before_any_fill():
+    order = _filled("buy", 101.0)
+    order.filled_quantity = 0.0
+    order.filled_notional = 0.0
+
+    assert order.implementation_shortfall is None
+
+
+def test_reference_price_and_shortfall_survive_checkpoint_round_trip():
+    restored = TrackedOrder.from_dict(_filled("sell", 99.0).to_dict())
+
+    assert restored.request.reference_price == 100.0
+    assert restored.implementation_shortfall == pytest.approx(0.01)
+
+
+def test_tracked_order_requires_the_decision_reference_price():
+    request = OrderRequest(
+        client_order_id="strategy-order-1",
+        symbol="BTC/USDT",
+        side="buy",
+        quantity=2.0,
+        order_type="market",
+        submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
+    )
+
+    with pytest.raises(ValueError, match="reference_price"):
+        TrackedOrder(request=request)
+
+
+@pytest.mark.parametrize("reference_price", [0.0, -1.0, float("nan"), float("inf")])
+def test_order_request_rejects_an_invalid_reference_price(reference_price):
+    with pytest.raises(ValueError, match="reference_price"):
+        OrderRequest(
+            client_order_id="strategy-order-1",
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=2.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 2, tzinfo=UTC),
+            reference_price=reference_price,
+        )
 
 
 def test_live_rebalance_round_trip_and_memory_store_isolation():

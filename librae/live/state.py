@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from math import isfinite
 from typing import Protocol
 
+from librae.core import EPSILON
 from librae.core.market_data import MarketDataSubscription
 from librae.core.run_config import LiveMode
 from librae.core.strategy import (
@@ -48,7 +49,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 27
+_STATE_SCHEMA_VERSION = 28
 
 
 def normalize_runtime_revision(
@@ -125,9 +126,29 @@ class TrackedOrder:
     filled_quantity: float = 0.0
     filled_notional: float = 0.0
     commission: float = 0.0
-    slippage: float = 0.0
     tax: float = 0.0
     executed_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        # WHY: every live order is prepared against a decision price; one
+        # without it would leave its fills' shortfall silently unmeasured.
+        if self.request.reference_price is None:
+            raise ValueError("tracked order requires the decision reference_price")
+
+    @property
+    def implementation_shortfall(self) -> float | None:
+        """Signed fill cost against the decision price, as a fraction of it.
+
+        Uses the average price of everything filled so far. Positive is
+        adverse for either side: a buy above, or a sell below, the reference.
+        ``None`` until something fills.
+        """
+        if self.filled_quantity <= EPSILON:
+            return None
+        reference = self.request.reference_price
+        assert reference is not None
+        shortfall = (self.filled_notional / self.filled_quantity - reference) / reference
+        return shortfall if self.request.side == "buy" else -shortfall
 
     def to_dict(self) -> dict:
         request = asdict(self.request)
@@ -144,7 +165,6 @@ class TrackedOrder:
             "filled_quantity": self.filled_quantity,
             "filled_notional": self.filled_notional,
             "commission": self.commission,
-            "slippage": self.slippage,
             "tax": self.tax,
             "executed_at": self.executed_at.isoformat() if self.executed_at else None,
         }
@@ -169,7 +189,6 @@ class TrackedOrder:
             filled_quantity=float(raw["filled_quantity"]),
             filled_notional=float(raw["filled_notional"]),
             commission=float(raw["commission"]),
-            slippage=float(raw["slippage"]),
             tax=float(raw["tax"]),
             executed_at=_to_utc(raw["executed_at"]),
         )

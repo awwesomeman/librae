@@ -481,7 +481,6 @@ class TestLiveExecutor:
             filled_quantity=0.0,
             average_price=None,
             commission=0.0,
-            slippage=0.0,
             tax=0.0,
             executed_at=None,
             rejection_reason="ReduceOnly Order is rejected.",
@@ -567,6 +566,7 @@ class TestLiveTrader:
             quantity=1.0,
             order_type="market",
             submitted_at=TEST_CLOCK_NOW,
+            reference_price=100.0,
         )
         tracked = TrackedOrder(request=request, placement_attempted=True)
         values = {
@@ -579,7 +579,6 @@ class TestLiveTrader:
             "filled_quantity": 0.0,
             "average_price": None,
             "commission": 0.0,
-            "slippage": 0.0,
             "tax": 0.0,
             "executed_at": None,
             field: value,
@@ -4127,6 +4126,7 @@ class TestLiveExecutionLifecycle:
                     quantity=1.0,
                     order_type="market",
                     submitted_at=TEST_CLOCK_NOW,
+                    reference_price=100.0,
                 ),
                 placement_attempted=True,
                 placement_attempted_at=TEST_CLOCK_NOW,
@@ -4659,6 +4659,41 @@ class TestLiveExecutionLifecycle:
         assert runner._positions["C"].quantity == pytest.approx(1.0)
         assert runner._positions["D"].quantity == pytest.approx(1.0)
         assert runner._positions["SOLO"].quantity == pytest.approx(1.0)
+
+    def test_live_fills_record_adverse_shortfall_against_the_decision_price(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _mock_order_adapter()
+        buy_report = _broker_report(order_id="a-1", quantity=1.0, average=101.0)
+        sell_report = _broker_report(order_id="b-1", quantity=1.0, average=99.0)
+        # A broker-reported currency slippage is not a cost: the average
+        # price already embeds it.
+        buy_report["slippage"] = 5.0
+        adapter.place_order.side_effect = [buy_report, sell_report]
+        runner = make_live_trader(
+            _HoldStrategy(),
+            adapter,
+            state_store=store,
+            config=_test_cfg(mode="live", symbols=["A", "B"]),
+        )
+        runner._last_prices = {"A": 100.0, "B": 100.0}
+
+        complete = runner._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="A", quantity=1.0),
+                OrderIntent(action="short", symbol="B", quantity=1.0),
+            ],
+            {symbol: {"close": 100.0, "volume": 10_000.0} for symbol in ("A", "B")},
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is True
+        orders = {order.request.symbol: order for order in store.orders.values()}
+        assert orders["A"].request.side == "buy"
+        assert orders["B"].request.side == "sell"
+        for order in orders.values():
+            assert order.request.reference_price == 100.0
+            assert order.implementation_shortfall == pytest.approx(0.01)
+        assert runner._positions["A"].entry_slippage == 0.0
 
     def test_live_group_adapter_preflight_failure_submits_no_sibling(self):
         adapter = _mock_order_adapter()
@@ -7254,6 +7289,7 @@ class TestLiveExecutionLifecycle:
             quantity=1.0,
             order_type="market",
             submitted_at=TEST_CLOCK_NOW,
+            reference_price=100.0,
         )
         adapter.list_open_orders.return_value = [
             {"id": "", "clientOrderId": adapter.broker_client_order_id(request.client_order_id)}

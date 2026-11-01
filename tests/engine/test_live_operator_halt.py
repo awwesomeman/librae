@@ -84,6 +84,7 @@ def _planned_order(symbol: str = "AAA") -> TrackedOrder:
             quantity=1.0,
             order_type="market",
             submitted_at=TEST_CLOCK_NOW,
+            reference_price=100.0,
         )
     )
 

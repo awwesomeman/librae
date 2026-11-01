@@ -427,9 +427,9 @@ document scoped to layering, boundaries, and naming conventions.
 | Type | Description |
 |------|------|
 | `Fill` | fill report: price, quantity, commission, slippage, tax |
-| `OrderRequest` | live broker request: client id, canonical + venue symbol, side/quantity, position effect, market or limit, submission time, time_in_force (resolved to `ioc`/`day` by order type when unset) |
+| `OrderRequest` | live broker request: client id, canonical + venue symbol, side/quantity, position effect, market or limit, submission time, time_in_force (resolved to `ioc`/`day` by order type when unset), and the decision reference price that implementation shortfall is measured against |
 | `PositionRequest` | broker-neutral live reconciliation identity: canonical + venue symbol, currency, multiplier, and concrete routing fields |
-| `ExecutionReport` | normalized live state: submitted/accepted/partial/cancel_pending/filled/cancelled/rejected plus confirmed execution facts, or a placement refusal's reason |
+| `ExecutionReport` | normalized live state: submitted/accepted/partial/cancel_pending/filled/cancelled/rejected plus confirmed execution facts, or a placement refusal's reason; no slippage cost, since the fill price already embeds it |
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
 | `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |

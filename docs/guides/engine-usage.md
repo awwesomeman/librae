@@ -520,8 +520,14 @@ reports never mutate positions. A partial report commits only its confirmed
 fill delta. Submitted, accepted, and partial orders remain in a durable,
 serial queue and are polled before another strategy decision. Repeated
 cumulative reports are idempotent; filled quantity, notional, commission,
-slippage, and tax can only advance. Cancelled/rejected orders halt dependent
-work. A placement that raises has one of two outcomes:
+and tax can only advance. Live fills carry no slippage cost, because the
+broker price already embeds it; slippage is measured instead as each order's
+signed implementation shortfall, `(average fill − reference) / reference`,
+positive when adverse for either side. The reference is the price the order
+was sized against when it was planned: a deferred rebalance leg uses the bar
+it was re-planned on and a flatten exit the last stored mark, so delay before
+planning is not counted. Cancelled/rejected orders halt dependent work. A
+placement that raises has one of two outcomes:
 
 - **Definite refusal** (the adapter raised `OrderRejectedError`): the order
   is recorded as rejected, with no lookup, and the alert carries the venue's

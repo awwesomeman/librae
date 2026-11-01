@@ -104,6 +104,11 @@ expressed by adding a value there. The flag is checkpointed before the cancel
 call, which is what lets a restart resume an unresolved cancellation rather
 than lose it.
 
+`broker_orders.slippage` holds the order's signed implementation shortfall
+(a fraction, not a currency cost; 0 until something fills), and
+`request.reference_price` the decision price it is measured against; see
+[engine usage](engine-usage.md) for the definition.
+
 `config_hash` encodes hash-included mappings with explicit type tags instead
 of a `default=str` fallback, and hashes a timeframe in its canonical form, so a
 configuration written in ccxt timeframe form hashes like its canonical

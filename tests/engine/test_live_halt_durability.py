@@ -214,6 +214,7 @@ class TestHaltCheckpointFailure:
             quantity=1.0,
             order_type="market",
             submitted_at=TEST_CLOCK_NOW,
+            reference_price=100.0,
         )
         trader._active_orders = [
             TrackedOrder(

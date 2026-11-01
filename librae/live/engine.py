@@ -4631,9 +4631,8 @@ class LiveTrader:
             delta_notional = cumulative_notional - tracked.filled_notional
             if delta_notional <= 0:
                 raise ValueError("broker cumulative fill notional moved backwards")
-            delta_slippage = report.slippage - tracked.slippage
             delta_tax = report.tax - tracked.tax
-            if delta_slippage < -EPSILON or delta_tax < -EPSILON:
+            if delta_tax < -EPSILON:
                 raise ValueError("broker cumulative execution costs moved backwards")
             fill = Fill(
                 symbol=report.symbol,
@@ -4641,7 +4640,9 @@ class LiveTrader:
                 price=delta_notional / delta_quantity,
                 quantity=delta_quantity,
                 commission=report.commission - tracked.commission,
-                slippage=max(0.0, delta_slippage),
+                # WHY: the broker price already embeds slippage; it is
+                # measured as the order's implementation shortfall instead.
+                slippage=0.0,
                 tax=max(0.0, delta_tax),
             )
             self._cash, result = apply_execution_fill(
@@ -4665,7 +4666,6 @@ class LiveTrader:
         tracked.filled_quantity = report.filled_quantity
         tracked.filled_notional = cumulative_notional
         tracked.commission = report.commission
-        tracked.slippage = report.slippage
         tracked.tax = report.tax
         tracked.executed_at = report.executed_at or tracked.executed_at
         if report.status in ("filled", "cancelled", "rejected"):
