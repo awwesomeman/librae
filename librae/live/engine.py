@@ -36,6 +36,7 @@ from librae.core.executor import (
     ExecutionUnavailableError,
     PositionEvent,
     RuntimeEvent,
+    RuntimeEventType,
     apply_execution_fill,
     calc_equity,
     calculate_position_weights,
@@ -2028,8 +2029,36 @@ class LiveTrader:
             title=f"[{self._executor.strategy_name}] {title}",
             message=f"{message}; trading halted{note}.",
         )
+        self._record_runtime_event("halted", {"reason": title, "message": message})
         if failure is not None:
             raise failure
+
+    def _record_runtime_event(
+        self,
+        event_type: RuntimeEventType,
+        detail: Mapping[str, object],
+        *,
+        symbol: str | None = None,
+    ) -> None:
+        """Offer a halt, reset or group failure once the action it records is done.
+
+        Coming last, a slow sink cannot delay the action; a failing one is
+        logged rather than raised, so it neither undoes the action nor hides
+        the action's own error. Stamped with the wall clock, not a bar ts:
+        several can fall in one bar, and the checkpoint or broker call each
+        makes first keeps two from sharing a timestamp, which the table's
+        dedupe key would merge.
+        """
+        if not self._on_runtime_event:
+            return
+        try:
+            self._on_runtime_event(
+                RuntimeEvent(
+                    ts=self._utc_now(), event_type=event_type, symbol=symbol, detail=detail
+                )
+            )
+        except Exception:
+            logger.exception("Runtime event %s not recorded", event_type)
 
     def _persist_halt(self, *, cancel_on_retry: bool) -> tuple[Exception | None, str]:
         """Checkpoint a halt, or keep it for retry and return a note naming the failure.
@@ -2159,6 +2188,16 @@ class LiveTrader:
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}",
             message=f"{message}; group {group_id!r} cancelled, other groups unaffected.",
+        )
+        self._record_runtime_event(
+            "group_failed",
+            {
+                "reason": title,
+                "group_id": group_id,
+                "client_order_id": request.client_order_id,
+                "message": message,
+            },
+            symbol=request.symbol,
         )
         return False
 
@@ -2530,7 +2569,8 @@ class LiveTrader:
                     utc_now=self._utc_now,
                 )
             equity, _ = self._calc_account_snapshot()
-            if self._halted:
+            was_halted = self._halted
+            if was_halted:
                 # The operator may have touched the account while halted:
                 # compare it with the broker on the next cycle, before any new
                 # decision.
@@ -2548,7 +2588,14 @@ class LiveTrader:
             self._equity_peak = equity
             self._prev_equity = equity
             self._status_window_equity = equity
-            self._persist_state()
+            detail = {"was_halted": was_halted, "equity": equity}
+            try:
+                self._persist_state()
+            except Exception:
+                # The reset already applied in memory, so it is recorded too.
+                self._record_runtime_event("halt_reset", {**detail, "persisted": False})
+                raise
+            self._record_runtime_event("halt_reset", {**detail, "persisted": True})
 
     def _setup_signal_handlers(self) -> None:
         """Handle SIGTERM/SIGINT as graceful shutdown and SIGUSR1 as a halt request."""
@@ -4264,9 +4311,17 @@ class LiveTrader:
                 tracked.placement_attempted = True
                 tracked.placement_attempted_at = attempted_at.astimezone(UTC)
                 self._persist_state(tracked)
-                report = self._timed_order_call(
-                    lambda request=request: self._executor.submit_order(request)
-                )
+                try:
+                    report = self._timed_order_call(
+                        lambda request=request: self._executor.submit_order(request)
+                    )
+                except Exception as exc:
+                    # The order may rest at the venue, so its status stays
+                    # unresolved. The error lands with this order's next row
+                    # write (the lookup's report, or the halt's cancellation),
+                    # not a write of its own that could fail ahead of them.
+                    tracked.error = f"{type(exc).__name__}: {exc}"
+                    report = None
                 if report is None:
                     report = self._timed_order_call(
                         lambda request=request: self._executor.find_order(request)
@@ -4668,6 +4723,7 @@ class LiveTrader:
         tracked.slippage = report.slippage
         tracked.tax = report.tax
         tracked.executed_at = report.executed_at or tracked.executed_at
+        tracked.error = report.rejection_reason or tracked.error
         if report.status in ("filled", "cancelled", "rejected"):
             self._active_orders.remove(tracked)
         if result is not None:
@@ -5539,6 +5595,7 @@ class LiveTrader:
             detail,
             outcome,
         )
+        self._record_runtime_event("halted", {"reason": title, "message": f"{detail} — {outcome}"})
         if submit_failure is not None:
             raise submit_failure
         if failure is not None:

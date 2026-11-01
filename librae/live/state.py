@@ -128,6 +128,10 @@ class TrackedOrder:
     slippage: float = 0.0
     tax: float = 0.0
     executed_at: datetime | None = None
+    # WHY: what a failed placement raised is for the order ledger only, so the
+    # checkpoint document leaves it out and keeps its shape; see the
+    # ``state_store`` contract in architecture.md.
+    error: str = ""
 
     def to_dict(self) -> dict:
         request = asdict(self.request)
@@ -571,7 +575,11 @@ class MemoryLiveStateStore:
     ) -> None:
         self._states[state.state_key] = deepcopy(state)
         for order in orders:
-            self.orders[order.request.client_order_id] = deepcopy(order)
+            stored = deepcopy(order)
+            previous = self.orders.get(order.request.client_order_id)
+            if not stored.error and previous is not None:
+                stored.error = previous.error
+            self.orders[order.request.client_order_id] = stored
 
     def acquire_lease(self, state_key: str) -> bool:
         if state_key in self._leases:

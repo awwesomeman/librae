@@ -23,12 +23,12 @@ CREATE TABLE IF NOT EXISTS librae_schema_revision (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO librae_schema_revision (singleton, revision)
-VALUES (TRUE, 3)
+VALUES (TRUE, 4)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
-    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 3 THEN
-        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 3';
+    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 4 THEN
+        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 4';
     END IF;
 END
 $$;
@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS broker_orders (
     executed_at     TIMESTAMPTZ,
     request         JSONB NOT NULL,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    error           TEXT,
     PRIMARY KEY (state_key, client_order_id),
     CONSTRAINT chk_broker_order_side CHECK (side IN ('buy', 'sell')),
     CONSTRAINT chk_broker_order_status CHECK (
@@ -289,9 +290,10 @@ CREATE INDEX IF NOT EXISTS idx_financing_cash_flows_run_id
     ON financing_cash_flows(run_id, account_id, ts DESC);
 
 -- ============================================================
--- runtime_events — operational audit trail (restarts, skipped decisions),
--- not a fill. event_type is deliberately small; extend it only when a new
--- call site actually needs to report one.
+-- runtime_events — operational audit trail (restarts, skipped decisions,
+-- halts, halt resets, group failures), not a fill. event_type is
+-- deliberately small; extend it only when a new call site actually needs to
+-- report one.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS runtime_events (
     ts              TIMESTAMPTZ NOT NULL,
@@ -300,7 +302,9 @@ CREATE TABLE IF NOT EXISTS runtime_events (
     symbol          TEXT,
     detail          JSONB,
     CONSTRAINT chk_runtime_event_type
-        CHECK (event_type IN ('state_recovered', 'decision_skipped'))
+        CHECK (event_type IN (
+            'state_recovered', 'decision_skipped', 'halted', 'halt_reset', 'group_failed'
+        ))
 );
 SELECT create_hypertable('runtime_events', 'ts', if_not_exists => TRUE);
 -- COALESCE(symbol, '') so multiple NULL-symbol events (state_recovered,
@@ -621,7 +625,7 @@ BEGIN
              AND table_name = 'backtest_runs'
              AND column_name = 'execution_identity'
        ) THEN
-        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 3';
+        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 4';
     END IF;
 END
 $$;

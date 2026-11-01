@@ -358,7 +358,7 @@ class TestLiveExecutor:
         assert 1 <= len(request.client_order_id) <= 36
         assert re.fullmatch(r"[a-zA-Z0-9_-]+", request.client_order_id)
 
-    def test_submit_order_returns_none_on_broker_error(self):
+    def test_submit_order_raises_a_broker_error_for_the_caller_to_resolve(self):
         mock_adapter = MagicMock()
         mock_adapter.place_order.side_effect = RuntimeError("connection refused")
         ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
@@ -370,7 +370,8 @@ class TestLiveExecutor:
             order_type="market",
             submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
         )
-        assert ex.submit_order(request) is None
+        with pytest.raises(RuntimeError, match="connection refused"):
+            ex.submit_order(request)
 
     @pytest.mark.parametrize("route", ["placement", "polling", "restart"])
     @pytest.mark.parametrize(
@@ -408,8 +409,11 @@ class TestLiveExecutor:
 
         if route == "placement":
             adapter.place_order.return_value = raw
-            with caplog.at_level(logging.ERROR, logger="librae.live.executor"):
-                assert ex.submit_order(request) is None
+            with (
+                caplog.at_level(logging.ERROR, logger="librae.live.executor"),
+                pytest.raises(ValueError, match=message),
+            ):
+                ex.submit_order(request)
             assert message in caplog.text
         elif route == "polling":
             adapter.get_order.return_value = raw
@@ -494,7 +498,9 @@ class TestLiveExecutor:
         mock_adapter.place_order.side_effect = TimeoutError("read timed out")
         ex = LiveExecutor(_zero_cost_model(), simulation=False, order_adapter=mock_adapter)
 
-        assert ex.submit_order(ex.request_from_event(_make_fill_event())) is None
+        with pytest.raises(TimeoutError, match="read timed out"):
+            ex.submit_order(ex.request_from_event(_make_fill_event()))
+        mock_adapter.find_order.assert_not_called()
 
     def test_pending_cancel_has_a_distinct_nonterminal_status(self):
         assert LiveExecutor._normalize_status("pending_cancel") == "cancel_pending"
@@ -541,7 +547,8 @@ class TestLiveExecutor:
             submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
         )
 
-        assert ex.submit_order(request) is None
+        with pytest.raises(ValueError, match="missing broker execution timestamp"):
+            ex.submit_order(request)
 
 
 # ---------------------------------------------------------------------------
