@@ -12,8 +12,8 @@
 -- position_events/signal_events deliberately have no FK to backtest_runs
 -- (`ff9baf4c "unify field naming"` — standalone queryability without
 -- joining backtest_runs), so deleting backtest_runs does NOT cascade to
--- them; they're cleaned up explicitly below along with ohlcv/
--- ohlcv_coverage_ranges, which never had a run_id column to cascade from.
+-- them; they're cleaned up explicitly below along with ohlcv, which never
+-- had a run_id column to cascade from.
 --
 -- Manual cleanup (equity_curve/strategy_performance cascade with backtest_runs):
 --   psql "$TIMESCALE_DSN" -c "
@@ -22,13 +22,11 @@
 --     DELETE FROM signal_events WHERE run_id = 'seed_test_run';
 --     DELETE FROM runtime_events WHERE run_id = 'seed_test_run';
 --     DELETE FROM ohlcv WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
---     DELETE FROM ohlcv_coverage_ranges WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
 --   "
 
 DELETE FROM position_events WHERE run_id = 'seed_test_run';
 DELETE FROM signal_events WHERE run_id = 'seed_test_run';
 DELETE FROM ohlcv WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
-DELETE FROM ohlcv_coverage_ranges WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
 -- Cascades to equity_curve/strategy_performance (real FK ON DELETE CASCADE).
 DELETE FROM backtest_runs WHERE run_id = 'seed_test_run';
 
@@ -80,17 +78,6 @@ FROM generate_series(0, 14 * 24 - 1) AS i,
 ON CONFLICT (
     ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type
 ) DO NOTHING;
-
-INSERT INTO ohlcv_coverage_ranges (
-    symbol, timeframe, calendar_id, data_source, range_started_at, range_ended_at
-)
-SELECT s, 'H1', '24/7', 'binance_spot', NOW() - INTERVAL '14 days', NOW()
-FROM unnest(ARRAY['BTCUSDT', 'ETHUSDT', 'SOLUSDT']) AS s
-WHERE NOT EXISTS (
-    SELECT 1 FROM ohlcv_coverage_ranges
-    WHERE symbol = s AND timeframe = 'H1' AND calendar_id = '24/7'
-      AND data_source = 'binance_spot'
-);
 
 -- Hourly equity_curve over the same window — mild uptrend with one
 -- drawdown dip, so Equity Curve/Drawdown/Sharpe-type panels have something

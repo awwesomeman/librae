@@ -60,9 +60,9 @@ _ADAPTER_BY_DATA_SOURCE: dict[str, AdapterName] = {
 # matching DB CHECK constraint in librae/db/timescale_init.sql) when a new type is
 # actually needed — don't pre-enumerate speculative ones.
 #
-# This is the single source of truth for the value — librae/artifacts.py and
-# librae/db/timescale_writer.py both call validate_instrument_type() below
-# instead of re-declaring the set, so a caller who never touches TimescaleDB
+# This is the single source of truth for the value — code that persists an
+# instrument type calls validate_instrument_type() below instead of
+# re-declaring the set, so a caller who never touches TimescaleDB
 # (Parquet/SQLite/no persistence at all) still gets it rejected here instead
 # of silently writing a value only the Postgres CHECK constraint would catch.
 ALLOWED_INSTRUMENT_TYPES = frozenset(

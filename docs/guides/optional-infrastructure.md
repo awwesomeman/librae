@@ -68,10 +68,10 @@ Normal integrations call the high-level functions in
 ad hoc SQL. The repository runner skips database writes when
 `RunOptions.database_enabled` is false.
 
-`timescale_writer`'s `instrument_type` params are validated in Python
-against `librae.config.symbols.ALLOWED_INSTRUMENT_TYPES` before any SQL
-runs — fails fast instead of relying on the `CHECK` constraint at `INSERT`.
-OHLCV read/write and coverage helpers accept a `MarketDataSubscription`
+`instrument_type` values are validated in Python against
+`librae.config.symbols.ALLOWED_INSTRUMENT_TYPES` before any SQL runs — fails
+fast instead of relying on the `CHECK` constraint at `INSERT`.
+OHLCV read/write helpers accept a `MarketDataSubscription`
 instead of a collection of optional scalar filters. `load_ohlcv(as_of=...)`
 filters on `available_at`, so a DB-backed warmup cannot observe a bar merely
 because its start label is inside the requested range.

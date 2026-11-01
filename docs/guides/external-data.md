@@ -214,11 +214,9 @@ The execution-phase frontier is checkpointed first, so retrying the same event
 does not replay a confirmed fill or reuse that bar's liquidity.
 
 For backtests, perform the same point-in-time join before constructing
-`Backtest`. The optional `external_factors` table is a persistence primitive,
-not an automatic third-party ingestion service. Its
-`load_external_factor(as_of=...)` returns each value as known at `as_of`,
-under the version rules in
-[architecture](../../architecture.md#python-database-helper-conventions).
+`Backtest`. Librae stores no third-party factors: where they are kept, how
+revisions are versioned and how an as-of read works are the caller's (see
+[who owns which table](../../architecture.md#who-owns-which-table)).
 
 ## Database boundary
 
