@@ -74,6 +74,7 @@ def test_a_recorded_placement_error_survives_a_restored_order(mock_get_conn, moc
             quantity=1.0,
             order_type="market",
             submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            reference_price=100.0,
         ),
         placement_attempted=True,
         placement_attempted_at=datetime(2025, 1, 1, tzinfo=UTC),
@@ -106,6 +107,7 @@ def test_a_nul_in_a_placement_error_cannot_freeze_the_order_row(mock_get_conn, m
             quantity=1.0,
             order_type="market",
             submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            reference_price=100.0,
         ),
         error="RuntimeError: bad\x00 payload",
     )
