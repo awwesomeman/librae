@@ -77,3 +77,14 @@ def test_bootstrap_states_one_revision_everywhere_it_is_written() -> None:
     assert f"WHERE singleton = TRUE) <> {revision} THEN" in schema
     assert f"does not match bootstrap revision {revision}" in schema
     assert f"complete Librae schema revision {revision}" in schema
+
+
+def test_the_instrument_type_domain_survives_a_rerun() -> None:
+    """CREATE DOMAIN has no IF NOT EXISTS; unwrapped, a re-run against an
+    initialized database aborts under ON_ERROR_STOP and skips everything after."""
+    schema = BOOTSTRAP.read_text(encoding="utf-8")
+    start = schema.index("CREATE DOMAIN instrument_type_t")
+    block = schema[schema.rindex("DO $$", 0, start) : schema.index("END $$;", start)]
+
+    assert "EXCEPTION WHEN duplicate_object" in block
+    assert start < schema.index("CREATE TABLE IF NOT EXISTS ohlcv")

@@ -721,16 +721,14 @@ when a table has no such reader or writer.
 
 Everything else is the caller's, however many of the caller's projects share
 it: third-party factors, ingestion coverage bookkeeping, inventories of what
-has been collected, instrument-specific stores. The caller defines those
+has been collected, a persisted instrument master (the engine resolves
+instruments from `librae.config.symbols`, never from a table),
+instrument-specific stores. The caller defines those
 tables, migrates them, and writes their read and write functions, then hands
 the engine prepared point-in-time data (see
 [External market data and factors](docs/guides/external-data.md)). They may
 live in the same database and join to Librae's tables without being defined
 here.
-
-`symbols` is an exception. The engine resolves instruments from
-`librae.config.symbols.SymbolInfo`, not from this table, but the table's
-columns are that registry's persisted form, so they change together here.
 
 `timescale_init.sql` is the *current* schema and stamps its revision; bringing
 an existing database to it is the deployment's job, specified by the diff of
@@ -800,7 +798,6 @@ flowchart TD
 | `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data, keyed by the six-field immutable subscription identity and carrying `available_at` | no FK; unique `(ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type)` | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
-| `symbols` | instrument master: what a fact table's bare `symbol` string means (market, multiplier, tick size, venue symbol, calendar, ...) | PK `(symbol, data_source, instrument_type)`; deliberately no FK from the fact tables | no |
 | `librae_schema_revision` | authoritative reference-schema revision; writable only by the table owner | singleton PK | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
 | `broker_orders` | durable broker order lifecycle records, with the error a failed placement raised | PK `state_key` + `client_order_id` | no |

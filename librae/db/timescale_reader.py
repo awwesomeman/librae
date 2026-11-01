@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from librae.backtest.schema import RunMetadata, StrategyMetrics
-from librae.config.symbols import validate_instrument_type
 from librae.core.market_data import MarketDataSubscription
 from librae.db import get_conn
 
@@ -229,35 +228,6 @@ def load_position_events(
         if "entry_at" in df.columns:
             df["entry_at"] = pd.to_datetime(df["entry_at"], utc=True)
     return df
-
-
-def load_symbols(
-    *,
-    market: str | None = None,
-    instrument_type: str | None = None,
-    dsn: str | None = None,
-) -> pd.DataFrame:
-    """Load the instrument master, optionally narrowed to one market or type.
-
-    Join it to a fact table on (symbol, data_source, instrument_type) to
-    answer questions the bare `symbol` string cannot -- which contracts share
-    a market, what a symbol's multiplier or trading calendar is.
-    """
-    sql = "SELECT * FROM symbols"
-    conditions: list[str] = []
-    params: list = []
-    if market is not None:
-        conditions.append("market = %s")
-        params.append(market)
-    if instrument_type is not None:
-        validate_instrument_type(instrument_type)
-        conditions.append("instrument_type = %s")
-        params.append(instrument_type)
-    if conditions:
-        sql += " WHERE " + " AND ".join(conditions)
-    sql += " ORDER BY market, symbol, data_source"
-    with get_conn(dsn) as conn:
-        return pd.read_sql(sql, conn, params=params or None)
 
 
 def load_financing_cash_flows(
