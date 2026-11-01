@@ -562,8 +562,9 @@ for example when a withdrawal left the account holding less than the ledger.
   before its first entry are credited: an exit queued after it has released
   nothing when the entry goes out. A rotation funded by its own exit must
   therefore list the exit first. A group that fails is cancelled whole, exit
-  legs included, before anything is sent. A group restored from a checkpoint
-  is not rechecked.
+  legs included, before anything is sent. Whether a group has sent a leg is
+  checkpointed, so after a restart one that had not is still checked and one
+  that had is not.
 - Ungrouped exits (`reduce`/`close`) are never checked.
 - An adapter without `get_balance` skips the check and logs a warning.
 
@@ -988,6 +989,10 @@ adapter at submission.
   priced, so its exit is skipped with a `decision_skipped` event (reason
   `close_without_mark`) and an alert. Sim queues the exits for the next
   observed open, as for a drawdown breach. `reset_halt()` is the resume path.
+- `LiveTrader.pause_entries(reason)` and `resume_entries()` are the live
+  entries-only brake: unsubmitted orders that open or add are dropped while
+  reduces and closes go out. Behavior and when to use it instead of a halt are
+  in [Pausing entries](operational-runbook.md#pausing-entries).
 - Volume-aware slippage (`CostModel.volume_impact_ticks`) is independent of this switch and also defaults to off: as long as volume data is supplied and that market/symbol's `volume_impact_ticks > 0` (set via `market_config.py`/`symbols.py`/`cost_overrides`), slippage scales linearly with the fill's share of that bar's volume, regardless of whether a cap is configured.
 
 The backtest timeframe is inferred independently for each symbol. Every symbol
@@ -1150,9 +1155,9 @@ interval:
 During a run, `ExecutionReport` is the only source that changes the local
 position ledger. `execution_runtime_state` atomically checkpoints the cycle
 timestamp, per-symbol bar watermarks, pending intent, cash, positions, last
-prices, equity peak, halt/risk counters, target-rebalance lifecycle, funding
-watermarks, and active order queue. The current runtime-state schema persists
-scalar account state, the caller-owned `runtime_revision`, and exact/rolling contract
+prices, equity peak, halt and entry-pause flags, risk counters,
+target-rebalance lifecycle, funding watermarks, and active order queue. The
+current runtime-state schema persists scalar account state, the caller-owned `runtime_revision`, and exact/rolling contract
 identity nested in active `OrderRequest` values. Only the current
 checkpoint is accepted; every older schema requires an explicit external
 migration or removal.

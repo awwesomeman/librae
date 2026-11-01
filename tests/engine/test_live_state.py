@@ -131,6 +131,8 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         period_index=8,
         status_period_count=2,
         halted=True,
+        entries_paused=True,
+        unstarted_groups=["pair"],
         adv_session_labels={"BTC/USDT": "2025-01-02"},
         adv_filled_quantities={"BTC/USDT": 0.5},
     )

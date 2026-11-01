@@ -857,6 +857,8 @@ class LiveTrader:
         self._positions: dict[str, PositionState] = {}
         self._cash = config.account.initial_cash
         self._halted: bool = False
+        # Operator pause: orders that open or add are dropped, exits still go out.
+        self._entries_paused: bool = False
         # A halt the store has not recorded: a restart would resume unhalted.
         self._halt_unpersisted = False
         # Whether a halt still owes the live cancellation it skipped or that failed.
@@ -890,10 +892,12 @@ class LiveTrader:
         self._reconciliation_history: deque[bool] = deque(maxlen=self.FETCH_HEALTH_WINDOW)
         self._reconciliation_degraded = False
         self._skipped_close_alerts: dict[tuple[str, str], float] = {}
-        # Not checkpointed: a restart re-alerts once, and a group restored
-        # mid-way is never rechecked, since its earlier legs may have filled.
+        # Not checkpointed: a restart re-alerts once.
         self._unfunded_entry_alerts: set[tuple[str, str]] = set()
-        self._groups_to_fund: set[str] = set()
+        # Queued groups that have sent no leg, which the funding and pause
+        # checks still judge. Checkpointed: a restart must neither send an
+        # unjudged group nor re-judge a started one.
+        self._unstarted_groups: set[str] = set()
         # Set only while a flatten submits its exits, before it halts the account.
         self._flatten_at: datetime | None = None
         self._cycle_fetch_seconds: dict[str, float] = {}
@@ -1111,6 +1115,8 @@ class LiveTrader:
             period_index=self._period_index,
             status_period_count=self._status_period_count,
             halted=self._halted,
+            entries_paused=self._entries_paused,
+            unstarted_groups=sorted(self._unstarted_groups),
             adv_session_labels=dict(self._adv_session_labels),
             adv_filled_quantities=dict(self._adv_filled_quantities),
         )
@@ -1163,6 +1169,7 @@ class LiveTrader:
         self._pending_resting_since = dict(state.pending_resting_since)
         self._pending_ohlcv = list(state.pending_ohlcv)
         self._active_orders = state.active_orders
+        self._unstarted_groups = set(state.unstarted_groups)
         self._live_rebalance = state.live_rebalance
         self._equity_peak = state.equity_peak
         self._prev_equity = state.prev_equity
@@ -1172,16 +1179,19 @@ class LiveTrader:
         self._period_index = state.period_index
         self._status_period_count = state.status_period_count
         self._halted = state.halted
+        self._entries_paused = state.entries_paused
         self._adv_session_labels = state.adv_session_labels
         self._adv_filled_quantities = state.adv_filled_quantities
         self._restored_state = True
         logger.info(
-            "Restored runtime state: key=%s run_id=%s cycle=%s orders=%d halted=%s",
+            "Restored runtime state: key=%s run_id=%s cycle=%s orders=%d halted=%s "
+            "entries_paused=%s",
             self._state_key,
             self._run_id,
             self._last_cycle_ts,
             len(self._active_orders),
             self._halted,
+            self._entries_paused,
         )
         # Notify callbacks of the restored run_id before firing any event —
         # state_recovered below fires synchronously, and callers like
@@ -1199,6 +1209,7 @@ class LiveTrader:
                         ),
                         "active_orders": len(self._active_orders),
                         "halted": self._halted,
+                        "entries_paused": self._entries_paused,
                     },
                 )
             )
@@ -2549,6 +2560,48 @@ class LiveTrader:
             self._prev_equity = equity
             self._status_window_equity = equity
             self._persist_state()
+
+    def pause_entries(self, reason: str = "operator paused entries") -> None:
+        """Stop submitting orders that open or add to a position, until ``resume_entries``.
+
+        Live mode only, since it gates broker submission. It takes the cycle
+        lock, as ``halt`` does, so it never lands mid-submission. Every
+        successful call alerts, so a pause whose first write failed is still
+        announced once a repeat lands. Behavior: the runbook's Pausing entries.
+        """
+        reason = _validated_reason(reason, "pause")
+        if self._executor.simulation:
+            raise RuntimeError("pause_entries gates broker order submission; it needs live mode")
+        with self._cycle_lock:
+            self._require_running()
+            self._entries_paused = True
+            self._persist_state()
+            logger.warning("Entries paused: %s", reason)
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Entries Paused",
+                message=f"{reason}; orders that open or add are dropped, exits keep working.",
+            )
+
+    def resume_entries(self) -> None:
+        """Let orders that open or add go out again after ``pause_entries``."""
+        with self._cycle_lock:
+            self._require_running()
+            if not self._entries_paused:
+                return
+            self._entries_paused = False
+            try:
+                self._persist_state()
+            except Exception:
+                # Fail closed in memory, whatever the store kept.
+                self._entries_paused = True
+                raise
+            logger.warning("Entries resumed")
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Entries Resumed",
+                message="Orders that open or add go out again.",
+            )
 
     def _setup_signal_handlers(self) -> None:
         """Handle SIGTERM/SIGINT as graceful shutdown and SIGUSR1 as a halt request."""
@@ -4114,10 +4167,12 @@ class LiveTrader:
 
         queued = [TrackedOrder(request=request) for request in requests]
         self._active_orders.extend(queued)
-        self._persist_state(*queued)
-        self._groups_to_fund.update(
+        # Marked before the write, so legs a failed write leaves queued are still
+        # judged. Assigned, not added: the queue was empty, so any older id is stale.
+        self._unstarted_groups = {
             request.group_id for request in requests if request.group_id is not None
-        )
+        }
+        self._persist_state(*queued)
         self._advance_live_orders()
         return not self._active_orders and not self._halted
 
@@ -4253,7 +4308,7 @@ class LiveTrader:
             if not tracked.placement_attempted:
                 if not submit_planned:
                     return
-                if self._drop_unfunded_entry(tracked):
+                if self._drop_paused_entry(tracked) or self._drop_unfunded_entry(tracked):
                     continue
                 # Persist placement-attempted before network I/O. A crash in
                 # the following call is recovered by client-order lookup and
@@ -4263,6 +4318,9 @@ class LiveTrader:
                     raise ValueError("clock must return a timezone-aware datetime")
                 tracked.placement_attempted = True
                 tracked.placement_attempted_at = attempted_at.astimezone(UTC)
+                # Its first leg starts a group, recorded in the same write.
+                if request.group_id is not None:
+                    self._unstarted_groups.discard(request.group_id)
                 self._persist_state(tracked)
                 report = self._timed_order_call(
                     lambda request=request: self._executor.submit_order(request)
@@ -4365,6 +4423,77 @@ class LiveTrader:
             if report.status != "filled":
                 return
 
+    def _drop_paused_entry(self, tracked: TrackedOrder) -> bool:
+        """Drop an unsubmitted entry, with its group, while entries are paused.
+
+        A group is judged once, before its first leg goes out, for the hedge
+        reason ``_drop_unfunded_entry`` gives; a started group finishes. A
+        rebalance stops, as replanning would queue the same leg again.
+        Returns whether anything was dropped.
+        """
+        if not self._entries_paused:
+            return False
+        group_id = tracked.request.group_id
+        if group_id is None:
+            legs = [tracked]
+        elif group_id in self._unstarted_groups:
+            legs = [order for order in self._active_orders if order.request.group_id == group_id]
+        else:
+            return False
+        if all(self._reduces_held_position(leg.request) for leg in legs):
+            return False
+        scope = "other orders remain eligible"
+        if self._live_rebalance is not None:
+            self._live_rebalance = None
+            scope = "the target rebalance stopped"
+        if group_id is not None:
+            self._unstarted_groups.discard(group_id)
+            scope = f"group {group_id!r} dropped whole"
+        # Out of the queue before the one write, so a failed write leaves no
+        # leg to go out.
+        for leg in legs:
+            leg.status = "cancelled"
+            self._active_orders.remove(leg)
+        self._persist_state(*legs)
+        for leg in legs:
+            request = leg.request
+            message = (
+                f"{request.side} {request.quantity:g} to {request.position_effect} "
+                f"not submitted while entries are paused; {scope}"
+            )
+            logger.info("Dropped %s order: %s", request.symbol, message)
+            if self._on_runtime_event:
+                self._on_runtime_event(
+                    RuntimeEvent(
+                        ts=self._utc_now(),
+                        event_type="decision_skipped",
+                        symbol=request.symbol,
+                        detail={
+                            "reason": "entries_paused",
+                            "group_id": group_id,
+                            "position_effect": request.position_effect,
+                            "quantity": request.quantity,
+                            "message": message,
+                        },
+                    )
+                )
+        return True
+
+    def _reduces_held_position(self, request: OrderRequest) -> bool:
+        """Whether ``request`` only reduces the ledger position it trades against.
+
+        Its position effect alone is not enough: an exit is sized at planning
+        against a staged book that may include an entry dropped since, and
+        sent as sized it would cross the position.
+        """
+        position = self._positions.get(request.symbol)
+        return (
+            request.position_effect in ("reduce", "close")
+            and position is not None
+            and request.side == ("sell" if position.side == "long" else "buy")
+            and request.quantity <= position.quantity + EPSILON
+        )
+
     def _drop_unfunded_entry(self, tracked: TrackedOrder) -> bool:
         """Drop an unsubmitted entry the broker's free balance cannot fund.
 
@@ -4390,9 +4519,8 @@ class LiveTrader:
             legs = [tracked]
             subject = request.symbol
         else:
-            if group_id not in self._groups_to_fund:
+            if group_id not in self._unstarted_groups:
                 return False
-            self._groups_to_fund.discard(group_id)
             legs = [order for order in self._active_orders if order.request.group_id == group_id]
             if all(leg.request.position_effect in ("reduce", "close") for leg in legs):
                 return False
@@ -4441,6 +4569,9 @@ class LiveTrader:
             scope = f"group {group_id!r} cancelled, other groups unaffected"
         for leg in legs:
             self._cancel_tracked_order(leg)
+        if group_id is not None:
+            # Only now: a write that failed above leaves the rest queued to be judged again.
+            self._unstarted_groups.discard(group_id)
         if group_id is None:
             what = f"{request.side} {request.quantity:g} to {request.position_effect}"
             needs = "needs"
