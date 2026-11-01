@@ -706,64 +706,39 @@ args = parse_with_config(p, config_path=Path(__file__).parent / "config.yaml")
 ## Optional reference database flows
 
 These are optional persistence integrations, not the engine's acquisition
-path. `get_ohlcv()`/`get_factor()` are external, caller-owned functions (not
-shipped by Librae); the first subgraph only illustrates how such a data layer
-could use the reference `librae/db/` primitives. The other subgraphs show
-optional engine result/runtime writes. Per the
-[Failure handling policy](#failure-handling-policy), the "DB unavailable"
-branch is the reference-data fallback case, not the fail-fast case — a caller
-implementing it must still log a warning when it triggers, not fall back to
-the API silently.
+path: the engine never reads market or factor data from the database on its
+own. The diagram shows which reference writers fill which tables.
 
-### Who owns which half of the data layer
+### Who owns which table
 
-Librae owns the **data model** — every table in `timescale_init.sql`,
-including `ohlcv`, `external_factors`, `symbols`, and the two
-`*_coverage_ranges` tables it never fetches into. The caller owns the
-**behavior**: fetcher registration, DB-first reads, coverage gap-filling,
-retries, and rate limits.
+A table is Librae's when an engine path reads or writes it: the live runtime's
+callbacks and state store, the schema revision gate, or the shipped Grafana
+dashboards. Its definition then sits beside the code that depends on its shape,
+so changing either is one reviewed diff. `timescale_init.sql` holds those
+tables and nothing else, and
+[`test_schema_ownership.py`](tests/db_tests/test_schema_ownership.py) fails
+when a table has no such reader or writer.
 
-That data model is the *current* schema: `timescale_init.sql` stamps its
-revision, and bringing an existing database to it is the deployment's job,
-specified by the diff of `timescale_init.sql` between versions (see
+Everything else is the caller's, however many of the caller's projects share
+it: third-party factors, ingestion coverage bookkeeping, inventories of what
+has been collected, instrument-specific stores. The caller defines those
+tables, migrates them, and writes their read and write functions, then hands
+the engine prepared point-in-time data (see
+[External market data and factors](docs/guides/external-data.md)). They may
+live in the same database and join to Librae's tables without being defined
+here.
+
+`symbols` is an exception. The engine resolves instruments from
+`librae.config.symbols.SymbolInfo`, not from this table, but the table's
+columns are that registry's persisted form, so they change together here.
+
+`timescale_init.sql` is the *current* schema and stamps its revision; bringing
+an existing database to it is the deployment's job, specified by the diff of
+`timescale_init.sql` between versions (see
 [Schema revisions](docs/guides/optional-infrastructure.md#schema-revisions)).
-
-The split is deliberate rather than accidental. A schema is a contract
-between deployments, and several of them read the same database; a data
-layer is one deployment's implementation of how rows get there. Two callers
-may fetch OHLCV completely differently and still have to agree on what an
-`ohlcv` row is, which is why the definition sits with the engine that reads
-those rows and the caller-side fetching does not.
-
-Two consequences worth stating so they do not have to be rediscovered per
-table:
-
-- **A new table for data librae does not fetch still belongs here** if
-  librae, or more than one caller, reads it. Propose it against this schema
-  rather than creating it caller-side, or the deployments stop agreeing.
-- **A table librae neither reads nor defines behavior for belongs to the
-  caller.** Instrument-specific stores that no engine path consumes (an
-  option chain, a vendor's raw payload) are the caller's, and they can join
-  to `symbols` without being defined here.
 
 ```mermaid
 flowchart TD
-    subgraph read["Read: DB-first + gap backfill"]
-        get_ohlcv["get_ohlcv()"] -- "DB has data" --> direct1["return directly"]
-        get_ohlcv -- "DB has a gap" --> apifill["backfill via API → write back to DB"]
-        get_ohlcv -- "DB unavailable" --> fallback["API fallback (no write)"]
-        apifill --> r_ohlcv[("ohlcv")]
-        apifill --> r_ohlcv_cov[("ohlcv_coverage_ranges")]
-
-        get_factor["get_factor()"] -- "DB has data" --> direct2["return directly"]
-        get_factor -- "DB has a gap" --> factorfill["backfill via fetcher → write back to DB"]
-        factorfill --> r_factors[("external_factors")]
-        factorfill --> r_factor_cov[("external_factor_coverage_ranges")]
-        factorfill --> r_factor_hist[("external_factors_history")]
-
-        sync_symbols["write_symbols()"] --> r_symbols[("symbols")]
-    end
-
     subgraph backtest["Backtest result writes"]
         save_signal["save_signal_results()"] --> b_signal_events[("signal_events")]
         save_signal --> b_ohlcv[("ohlcv")]
@@ -794,7 +769,7 @@ flowchart TD
 
 | Type | Rule | Example |
 |---|---|---|
-| Discrete event/record table (each row is one independently-occurring event or record) | plural | `backtest_runs`, `position_events`, `signal_events`, `ohlcv_coverage_ranges` |
+| Discrete event/record table (each row is one independently-occurring event or record) | plural | `backtest_runs`, `position_events`, `signal_events`, `runtime_events` |
 | Domain term for a continuous time series as a whole (each row is one point in the series, but the table name refers to the series itself) | keep the domain's conventional singular term | `equity_curve`, `ohlcv` |
 | Singleton state table (one current snapshot per key) | singular | `execution_runtime_state` |
 
@@ -812,11 +787,6 @@ flowchart TD
 | `exit_at` | when a trade was exited | `TradeResult` |
 | `last_heartbeat_at` | last time the running process reported itself alive | `backtest_runs` |
 | `available_at` | earliest safe observation time of the current OHLCV row version; late corrections may be non-monotonic across `ts` | `ohlcv` and normalized market-data artifacts |
-| `range_started_at` | start of a cache coverage range | `ohlcv_coverage_ranges` |
-| `range_ended_at` | end of a cache coverage range | `ohlcv_coverage_ranges` |
-| `recorded_at` | when this system stored a factor value | `external_factors`, `external_factors_history` |
-| `vintage_at` | the version or publication time the source states for a factor value | `external_factors`, `external_factors_history` |
-| `superseded_at` | when a factor version stopped being current | `external_factors_history` |
 
 ### Current tables
 
@@ -830,11 +800,6 @@ flowchart TD
 | `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `ohlcv` | shared market data, keyed by the six-field immutable subscription identity and carrying `available_at` | no FK; unique `(ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type)` | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
-| `ohlcv_coverage_ranges` | tracks `get_ohlcv()`'s cache coverage ranges (one row per range) | no FK | no |
-| `external_factors` | third-party factor data (funding rate, open interest, ...) — a long table with a uniform schema, so new data sources need no migration; `get_factor()` writes to it automatically; one current version per key | no FK (unique index: ts+symbol+factor_name+timeframe+data_source+instrument_type) | yes (`ts`) |
-| `external_factors_history` | factor versions a later write replaced, for as-of reads | no FK (index: symbol+factor_name+timeframe+data_source+instrument_type+ts) | no |
-| `external_factor_coverage_ranges` | tracks `get_factor()`'s cache coverage ranges, same mechanism as `ohlcv_coverage_ranges` | no FK | no |
-| `factor_registry` | one row per `factor_name` — the frequency + data source it is registered at, domain knowledge written once via `write_factor_registry()`, not inferred from `ts` gaps (unreliable for sparsely-sampled factors) | PK `factor_name` | no |
 | `symbols` | instrument master: what a fact table's bare `symbol` string means (market, multiplier, tick size, venue symbol, calendar, ...) | PK `(symbol, data_source, instrument_type)`; deliberately no FK from the fact tables | no |
 | `librae_schema_revision` | authoritative reference-schema revision; writable only by the table owner | singleton PK | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
@@ -885,8 +850,8 @@ must not imply a daily or annual convention.
 Exact prefix definitions live beside the implementation in
 [`timescale_writer.py`](librae/db/timescale_writer.py) and
 [`timescale_reader.py`](librae/db/timescale_reader.py). Writer helpers
-distinguish single-table writes, partial updates, read-modify-write merges,
-multi-table saves, and aggregate refreshes. Reader helpers distinguish small
+distinguish single-table writes, partial updates, multi-table saves, and
+aggregate refreshes. Reader helpers distinguish small
 lookups, DataFrame loads, and derived results.
 
 Backtest and signal-result persistence serialize writers for the same
@@ -901,20 +866,6 @@ cache reuse is disabled and does not serialize otherwise equal configurations.
 `available_at` against the provable completion floor. On identity conflict,
 only a strictly later `available_at` replaces the stored OHLCV values and
 version time; equal or older versions are no-ops.
-
-`write_external_factor()` keeps every factor value it replaces, so
-`load_external_factor(as_of=...)` can return what was known at a time; a source
-that revises silently otherwise leaks later knowledge into a backtest. It
-compares before it writes: a value identical to the version it would follow
-writes nothing, with no tolerance, and a changed one moves the replaced row to
-`external_factors_history` in the same transaction. The two clocks stay
-separate and neither is inferred from the other: `recorded_at` is this
-system's, `vintage_at` the source's. A version takes effect at
-`COALESCE(vintage_at, recorded_at)`, which also orders a source's vintages
-loaded in one call or out of order. Rows with both clocks NULL predate version
-tracking and are not point-in-time; an as-of read returns them as stored and
-warns when `as_of` precedes every recorded time of the factor. Publication
-lag stays the caller's, applied to the returned clocks.
 
 ## Maintenance rules
 

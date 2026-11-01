@@ -1308,12 +1308,6 @@ def test_market_data_schema_keeps_complete_subscriptions_distinct() -> None:
     )
     assert "available_at    TIMESTAMPTZ NOT NULL" in schema
     assert "chk_ohlcv_available_at CHECK (available_at >= ts)" in schema
-    assert (
-        "GROUP BY symbol, data_source, timeframe, instrument_type, calendar_id, session_mode"
-        in schema
-    )
-    assert "NULL::TEXT AS calendar_id" in schema
-    assert "NULL::TEXT AS session_mode" in schema
 
     seed = (ROOT / "librae/db/seed_fake_data.sql").read_text(encoding="utf-8")
     assert "date_trunc('hour', NOW()) - INTERVAL '14 days'" in seed

@@ -459,7 +459,7 @@ source, including regular hours; `regular` excludes prints outside the venue's
 regular session. It is part of `config_hash`, so backtest caches cannot reuse a
 run built from the other bar set. The implicit/default `extended` value retains
 the legacy hash so an unchanged live run can recover its existing checkpoint.
-Market-data artifacts, database OHLCV rows, and coverage ranges carry all six
+Market-data artifacts and database OHLCV rows carry all six
 dimensions; run metadata stores the exact primary identities so readers never
 fall back to a broad run-level source/type match. Built-in IBKR wiring maps
 the generic session value to IBKR's `useRTH` request
@@ -1063,9 +1063,9 @@ Backtest and shadow-simulation bars may contain a `funding_rate` observation,
 expressed as a decimal rate for that payment. `funding_mark_price` is optional;
 the same event's raw `close` is used when it is absent. Missing rates mean no
 payment: the engine never forward-fills or fetches them.
-When rates come from `external_factors`, the data pipeline exact-joins its
-`value` as `funding_rate` on symbol and payment timestamp; an as-of join or
-forward fill would turn one payment into repeated charges.
+When rates come from a stored factor series, the caller's data pipeline
+exact-joins each value as `funding_rate` on symbol and payment timestamp; an
+as-of join or forward fill would turn one payment into repeated charges.
 
 Funding is applied after the event's confirmed simulated fills and stops, and
 before its equity snapshot and strategy decision. Positive rates mean longs

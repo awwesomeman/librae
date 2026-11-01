@@ -23,12 +23,12 @@ CREATE TABLE IF NOT EXISTS librae_schema_revision (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO librae_schema_revision (singleton, revision)
-VALUES (TRUE, 5)
+VALUES (TRUE, 6)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
-    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 5 THEN
-        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 5';
+    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 6 THEN
+        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 6';
     END IF;
 END
 $$;
@@ -367,7 +367,7 @@ END $$;
 -- symbols — instrument master. The fact tables store `symbol` as a bare
 -- string; this is what that string means. Keyed by the same
 -- (symbol, data_source, instrument_type) triple the fact tables already
--- carry, so it joins to ohlcv/external_factors without touching them --
+-- carry, so it joins to ohlcv without touching it --
 -- deliberately no foreign keys: a hypertable FK costs a lookup per inserted
 -- row, and reference data arriving after the facts is normal, not an error.
 --
@@ -419,10 +419,8 @@ CREATE TABLE IF NOT EXISTS ohlcv (
     ts              TIMESTAMPTZ NOT NULL,
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
-    -- Caller-selectable axis (register_ohlcv_fetcher) — the same symbol
-    -- legitimately has multiple valid values (research: 'yahoo', live:
-    -- 'ibkr'), so it is chosen per call. external_factors.data_source
-    -- names the same concept but is fixed per factor_name, not selectable.
+    -- Caller-selectable axis — the same symbol legitimately has multiple
+    -- valid values (research: 'yahoo', live: 'ibkr'), so it is chosen per call.
     data_source     TEXT NOT NULL,
     instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
     calendar_id     TEXT NOT NULL,
@@ -472,173 +470,6 @@ CREATE INDEX IF NOT EXISTS idx_signal_events_run_id ON signal_events(run_id, ts 
 CREATE INDEX IF NOT EXISTS idx_signal_events_lookup
     ON signal_events (strategy_name, symbol, mode, ts DESC);
 
--- ============================================================
--- ohlcv_coverage_ranges — get_ohlcv() cache 覆蓋區間追蹤 (非 hypertable)
--- ============================================================
-CREATE TABLE IF NOT EXISTS ohlcv_coverage_ranges (
-    id              SERIAL PRIMARY KEY,
-    symbol          TEXT NOT NULL,
-    timeframe       TEXT NOT NULL,
-    data_source     TEXT NOT NULL,
-    instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
-    calendar_id     TEXT NOT NULL,
-    session_mode    TEXT NOT NULL DEFAULT 'extended',
-    range_started_at     TIMESTAMPTZ NOT NULL,
-    range_ended_at       TIMESTAMPTZ NOT NULL,
-    CONSTRAINT chk_ohlcv_coverage_session_mode
-        CHECK (session_mode IN ('regular', 'extended'))
-);
-CREATE INDEX IF NOT EXISTS idx_ohlcv_coverage_ranges_lookup
-    ON ohlcv_coverage_ranges(
-        symbol, timeframe, calendar_id, session_mode, data_source, instrument_type,
-        range_started_at
-    );
-
--- ============================================================
--- external_factors — 通用第三方因子資料 (hypertable)
--- 收「有外部抓取成本」的原始序列（funding rate、open interest 等）；
--- 從 OHLCV 現算的衍生特徵（cross_asset、regime）不進這張表，因為隨時能
--- 重算，不需要 gap-tracking。schema 刻意跟 ohlcv 一致（symbol/ts + 一個
--- long 欄位），新資料源只是新的 factor_name，不需要 migration。
--- ============================================================
-CREATE TABLE IF NOT EXISTS external_factors (
-    ts              TIMESTAMPTZ NOT NULL,
-    symbol          TEXT NOT NULL,
-    factor_name     TEXT NOT NULL,
-    -- Observation frequency of THIS row, the factor-family counterpart of
-    -- ohlcv.timeframe. In the fact key so one factor can be stored at
-    -- several frequencies; packing it into factor_name instead
-    -- ('x_1d'/'x_1h') would hide a real dimension inside a string.
-    timeframe       TEXT NOT NULL,
-    -- Same concept as ohlcv.data_source (which upstream produced this),
-    -- but fixed 1:1 per factor_name at registration time
-    -- (register_factor_fetcher) rather than chosen per call. Don't expect
-    -- two rows with the same factor_name and different data_source.
-    data_source     TEXT NOT NULL,
-    instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
-    -- Deliberately one scalar number. An observation that is non-numeric
-    -- (a regime label) or multi-dimensional (a term structure, an option
-    -- chain row) gets its OWN fact table with its own columns and
-    -- constraints -- it does not get a value_json/value_text sibling here.
-    -- Two nullable value columns with no way to require exactly one is the
-    -- point where a fact table stops being queryable or checkable, and the
-    -- extra dimensions (strike, expiry, tenor) would still have nowhere to
-    -- live. Storing them as several factor_names is the same mistake in a
-    -- different place.
-    value           DOUBLE PRECISION NOT NULL,
-    -- Two clocks, never derived from each other. recorded_at is when this
-    -- system stored the value; vintage_at is the version or publication time
-    -- the source states (ALFRED's realtime_start). A row with both NULL
-    -- predates version tracking and is not point-in-time.
-    recorded_at     TIMESTAMPTZ,
-    vintage_at      TIMESTAMPTZ
-);
-SELECT create_hypertable('external_factors', 'ts', if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS idx_external_factors_lookup ON external_factors(symbol, factor_name, timeframe, data_source, ts DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_external_factors_unique ON external_factors (ts, symbol, factor_name, timeframe, data_source, instrument_type);
-
--- ============================================================
--- external_factors_history -- superseded external_factors versions.
--- write_external_factor() moves a row here before changing its value, so
--- load_external_factor(as_of=...) can answer what was known at a time.
--- superseded_at is when the version stopped being current. A plain table:
--- revisions are rare next to the facts, and every read is by factor key.
--- ============================================================
-CREATE TABLE IF NOT EXISTS external_factors_history (
-    ts              TIMESTAMPTZ NOT NULL,
-    symbol          TEXT NOT NULL,
-    factor_name     TEXT NOT NULL,
-    timeframe       TEXT NOT NULL,
-    data_source     TEXT NOT NULL,
-    instrument_type instrument_type_t NOT NULL,
-    value           DOUBLE PRECISION NOT NULL,
-    recorded_at     TIMESTAMPTZ,
-    vintage_at      TIMESTAMPTZ,
-    superseded_at   TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_external_factors_history_key
-    ON external_factors_history(symbol, factor_name, timeframe, data_source, instrument_type, ts);
-
--- ============================================================
--- external_factor_coverage_ranges — get_factor() cache 覆蓋區間追蹤
--- (非 hypertable，跟 ohlcv_coverage_ranges 同一種設計)
--- ============================================================
-CREATE TABLE IF NOT EXISTS external_factor_coverage_ranges (
-    id              SERIAL PRIMARY KEY,
-    symbol          TEXT NOT NULL,
-    factor_name     TEXT NOT NULL,
-    timeframe       TEXT NOT NULL,
-    data_source     TEXT NOT NULL,
-    instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
-    range_started_at     TIMESTAMPTZ NOT NULL,
-    range_ended_at       TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_external_factor_coverage_ranges_lookup
-    ON external_factor_coverage_ranges(symbol, factor_name, timeframe, data_source, instrument_type, range_started_at);
-
--- ============================================================
--- factor_registry — 每個 factor_name 的更新頻率 (timeframe)（一 factor_name 一行，
--- 不是每筆 fact row 都存一次）。由 register_factor_fetcher() 呼叫時的
--- domain 知識寫死，不是從 ts 間隔統計推算——sync_factor_registry() 寫入。
--- timeframe 沿用 librae/core/utils.py 既有的 canonical 字母代碼
--- (M5/H8/D1/W2/MN3 ...)，另加 'IRREGULAR' 給沒有固定格點的真實事件資料
--- (股利、分割)。
--- ============================================================
--- timeframe here is the frequency a factor is REGISTERED at, which a factor
--- with no rows yet still has; external_factors.timeframe is what each stored
--- row actually is. They normally agree.
-CREATE TABLE IF NOT EXISTS factor_registry (
-    factor_name TEXT PRIMARY KEY,
-    data_source TEXT NOT NULL,
-    timeframe   TEXT NOT NULL
-);
-
--- ============================================================
--- data_inventory — 「目前收錄哪些資料」的即時清單 (view, 非手動維護)
--- 直接查 ohlcv/external_factors 本身算出來，新增 factor 不用同步更新任何
--- 文件——避免命名/清單 drift（見 2026-07 決策討論：不建 UUID catalog table，
--- 靠 DB 自身當唯一真相）。
---
--- timeframe：兩個家族的 fact row 都自己帶，不需要 JOIN factor_registry（domain 知識寫死，
--- 見上面 factor_registry 的註解）——不再用相鄰 ts 統計推算，因為樣本少的
--- factor（例如目前只有 2 筆的 us_short_interest）統計出來的間隔不可靠，
--- 也會隨新資料進來一直變動，不是穩定的描述。
--- ============================================================
-CREATE OR REPLACE VIEW data_inventory AS
-SELECT
-    'ohlcv' AS table_name,
-    symbol,
-    data_source,
-    timeframe,
-    instrument_type,
-    calendar_id,
-    session_mode,
-    NULL::TEXT AS factor_name,
-    count(*) AS rows,
-    min(ts) AS start_ts,
-    max(ts) AS end_ts
-FROM ohlcv
-GROUP BY symbol, data_source, timeframe, instrument_type, calendar_id, session_mode
-
-UNION ALL
-
-SELECT
-    'external_factors' AS table_name,
-    ef.symbol,
-    ef.data_source,
-    ef.timeframe,
-    ef.instrument_type,
-    NULL::TEXT AS calendar_id,
-    NULL::TEXT AS session_mode,
-    ef.factor_name,
-    count(*) AS rows,
-    min(ef.ts) AS start_ts,
-    max(ef.ts) AS end_ts
-FROM external_factors ef
-GROUP BY ef.symbol, ef.data_source, ef.timeframe, ef.instrument_type, ef.factor_name
-
-ORDER BY table_name, symbol, factor_name;
-
 DO $$
 BEGIN
     IF to_regclass('public.backtest_runs') IS NULL
@@ -646,7 +477,6 @@ BEGIN
        OR to_regclass('public.broker_orders') IS NULL
        OR to_regclass('public.position_events') IS NULL
        OR to_regclass('public.runtime_events') IS NULL
-       OR to_regclass('public.external_factors_history') IS NULL
        OR NOT EXISTS (
            SELECT 1
            FROM information_schema.columns
@@ -654,7 +484,7 @@ BEGIN
              AND table_name = 'backtest_runs'
              AND column_name = 'execution_identity'
        ) THEN
-        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 5';
+        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 6';
     END IF;
 END
 $$;
