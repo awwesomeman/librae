@@ -22,14 +22,6 @@ DB = LIBRAE / "db"
 # is a helper that counts only when an engine path calls into it.
 DB_ENGINE_MODULES = frozenset({"timescale_state.py", "schema.py"})
 
-# A table no engine path touches, kept on purpose. Each entry needs its reason.
-NOT_ENGINE_READ = {
-    "symbols": (
-        "persisted form of librae.config.symbols.SymbolInfo; the engine resolves "
-        "instruments from that registry, so the columns change with it here"
-    ),
-}
-
 _TABLE = re.compile(
     r"CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?(\w+)", re.IGNORECASE
 )
@@ -148,7 +140,7 @@ def _schema_tables() -> list[str]:
 
 
 def test_every_schema_table_has_an_engine_reader_or_writer() -> None:
-    unused = sorted(set(_schema_tables()) - _engine_tables() - NOT_ENGINE_READ.keys())
+    unused = sorted(set(_schema_tables()) - _engine_tables())
 
     assert not unused, (
         f"{unused} in timescale_init.sql has no reader or writer on an engine path. "
@@ -156,14 +148,6 @@ def test_every_schema_table_has_an_engine_reader_or_writer() -> None:
         "the caller uses is the caller's to define and migrate (architecture.md, "
         "'Who owns which table'). Move it out, or add the engine path that uses it."
     )
-
-
-def test_every_exception_is_still_a_schema_table_the_engine_does_not_use() -> None:
-    """An exception that stopped being needed would hide the next unused table."""
-    schema = set(_schema_tables())
-
-    assert NOT_ENGINE_READ.keys() <= schema
-    assert not NOT_ENGINE_READ.keys() & _engine_tables()
 
 
 def test_the_walk_sees_the_engine_tables() -> None:

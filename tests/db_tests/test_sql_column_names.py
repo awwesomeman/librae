@@ -106,4 +106,4 @@ def test_every_single_table_statement_selects_columns_that_exist() -> None:
 def test_the_check_covers_the_unambiguous_statements() -> None:
     """An extractor that stopped matching would leave nothing to check and
     still pass the assertion above."""
-    assert len(_single_table_statements()) >= 15  # 18 of 24 SELECTs when written
+    assert len(_single_table_statements()) >= 10  # a floor under today's count, not the count

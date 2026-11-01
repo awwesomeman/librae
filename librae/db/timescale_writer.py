@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -32,7 +32,6 @@ import pandas as pd
 
 from librae.backtest.cache import build_backtest_cache_key, normalize_backtest_revision
 from librae.backtest.schema import BacktestOutput
-from librae.config.symbols import SymbolInfo
 from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
     MarketDataSubscription,
@@ -740,71 +739,6 @@ def write_ohlcv(
         cur.close()
 
     return len(accepted)
-
-
-def write_symbols(symbols: Iterable[SymbolInfo], dsn: str | None = None) -> int:
-    """Upsert instrument-master rows from the resolved symbol registry.
-
-    One row per (symbol, data_source, instrument_type) — reference data, not
-    a time series. Call it from the data/orchestration layer with
-    ``load_symbol_registry().values()``, or with a registry that already has
-    the run's instrument_overrides applied, so the database describes the
-    symbols the facts were actually written under.
-    """
-    rows = [
-        (
-            info.symbol,
-            info.data_source,
-            info.instrument_type,
-            info.market,
-            info.multiplier,
-            info.data_adapter,
-            info.venue_symbol,
-            info.currency,
-            info.continuous_alias,
-            info.contract_month,
-            info.tick_size,
-            info.security_type,
-            info.exchange,
-            info.calendar_id,
-            info.quantity_step,
-            info.min_quantity,
-        )
-        for info in symbols
-    ]
-    if not rows:
-        return 0
-
-    with get_conn(dsn) as conn:
-        cur = conn.cursor()
-        psycopg2.extras.execute_values(
-            cur,
-            """INSERT INTO symbols
-                   (symbol, data_source, instrument_type, market, multiplier,
-                    data_adapter, venue_symbol, currency, continuous_alias,
-                    contract_month, tick_size, security_type, exchange, calendar_id,
-                    quantity_step, min_quantity)
-               VALUES %s
-               ON CONFLICT (symbol, data_source, instrument_type) DO UPDATE SET
-                 market=EXCLUDED.market,
-                 multiplier=EXCLUDED.multiplier,
-                 data_adapter=EXCLUDED.data_adapter,
-                 venue_symbol=EXCLUDED.venue_symbol,
-                 currency=EXCLUDED.currency,
-                 continuous_alias=EXCLUDED.continuous_alias,
-                 contract_month=EXCLUDED.contract_month,
-                 tick_size=EXCLUDED.tick_size,
-                 security_type=EXCLUDED.security_type,
-                 exchange=EXCLUDED.exchange,
-                 calendar_id=EXCLUDED.calendar_id,
-                 quantity_step=EXCLUDED.quantity_step,
-                 min_quantity=EXCLUDED.min_quantity,
-                 updated_at=NOW()""",
-            rows,
-            page_size=500,
-        )
-        cur.close()
-    return len(rows)
 
 
 def write_signal_event(
