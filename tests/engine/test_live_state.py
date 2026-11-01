@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -414,6 +415,27 @@ def test_runtime_state_rejects_malformed_pending_decision(
 
     with pytest.raises(error, match=match):
         LiveRuntimeState.from_dict(raw)
+
+
+def test_memory_store_keeps_a_recorded_error_when_a_later_save_carries_none():
+    """The same rule as the durable store: a restored order carries no error."""
+    store = MemoryLiveStateStore()
+    state = LiveRuntimeState(
+        state_key="sim:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="sim",
+        account_id="default",
+        cash=1_000.0,
+    )
+    failed = replace(_order(), error="TimeoutError: read timed out")
+
+    store.save(state, [failed])
+    store.save(state, [TrackedOrder.from_dict(failed.to_dict())])
+
+    assert store.orders["strategy-order-1"].error == "TimeoutError: read timed out"
+    store.save(state, [replace(failed, error="OrderRejectedError: newer")])
+    assert store.orders["strategy-order-1"].error == "OrderRejectedError: newer"
 
 
 def test_memory_store_lease_is_exclusive_until_release():

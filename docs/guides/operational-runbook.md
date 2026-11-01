@@ -91,7 +91,7 @@ Order placement alerts (rules in
 | Alert title | Meaning | Action |
 |---|---|---|
 | Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled. A failed flatten or drawdown exit alerts as Close Rejected or Close Cancelled instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted |
-| Ambiguous Order Placement | Placement failed with an error the adapter could not classify and the client-id lookup found nothing: the order may still exist at the venue; halted | Check the broker's order history for the client order id. `reset_halt()` refuses (`unresolved_broker_orders`) until the engine resolves the order |
+| Ambiguous Order Placement | Placement failed with an error the adapter could not classify and the client-id lookup found nothing: the order may still exist at the venue; halted. The error is in the order's `broker_orders.error` | Check the broker's order history for the client order id. `reset_halt()` refuses (`unresolved_broker_orders`) until the engine resolves the order |
 | Insufficient Free Balance, Free Balance Unavailable, Unpriced Entry | An entry, or a whole group with an entry leg, was not submitted: the broker's free balance was below its requirement, could not be read, or the requirement could not be priced (the alert names the amounts or the error). The other queued orders still went out, and a target rebalance stopped until the next decision; not halted. The alert repeats for a cause and symbol only after a check for that symbol passes or `reset_halt()`; every refusal is still a `decision_skipped` event | Restore the balance, or stop flat and start from the broker balance (see the `reset_halt()` step of [Kill-switch rehearsal](#kill-switch-rehearsal)); for an unreadable balance or price, fix what the error names. A rotation refused for want of cash its own exit would free must list that exit first |
 
 ## Kill-switch rehearsal
@@ -151,7 +151,10 @@ reset. It reports one of `halt_not_persisted` (see
 [Halt not persisted](#halt-not-persisted)), `unresolved_broker_orders`,
 `missing_valuation_mark` or `stale_valuation_mark`, the symbols responsible,
 and what to do next. A refused reset is also recorded as a `decision_skipped`
-runtime event with reason `halt_reset_blocked`.
+runtime event with reason `halt_reset_blocked`; every halt alert and applied
+reset is recorded too, as `halted` and `halt_reset`. The strategy dashboard's
+Runtime Events panel lists them per run, so reviewing why a run stopped does
+not depend on container logs.
 
 A missing mark clears itself: the engine establishes marks from completed
 bars, so a restored non-flat account becomes resettable once its symbols
