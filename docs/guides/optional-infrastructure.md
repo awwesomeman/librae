@@ -566,7 +566,9 @@ under a supervisor appropriate to the environment and must provide durable
 state, secret management, monitoring, and recovery procedures before live
 capital is enabled. An operator can call `LiveTrader.halt(reason)` to persist a
 fail-closed halt and cancel tracked broker orders; resumption requires an
-explicit `reset_halt()` after reconciliation.
+explicit `reset_halt()` after reconciliation. `pause_entries(reason)` instead
+blocks only orders that open or add
+([Pausing entries](operational-runbook.md#pausing-entries)).
 
 The [operational runbook](operational-runbook.md) is where the named
 operator, secret rotation, and rehearsed alert/kill-switch/backup/restart

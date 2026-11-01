@@ -295,6 +295,51 @@ the book. A request pending at a restart is dropped, so request it again. Engine
 behavior is in
 [engine-usage.md](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics).
 
+## Pausing entries
+
+`trader.pause_entries(reason)` stops new exposure while the strategy keeps
+running and managing its exits; `trader.resume_entries()` lifts it. Both are
+in-process calls in live mode: like `reset_halt()`, the reference runner and
+`trade.sh` do not expose them, so the strategy's runner provides the entry
+point. They are safe from any thread but not from a signal handler, since they
+wait for the poll cycle in progress; `request_halt()` is the signal-safe call.
+
+Which brake to use:
+
+- **Pause** when broker state is known and the book is sound, but no new risk
+  should go on. With positions open, the strategy exits through the engine
+  rather than the venue UI, which would desynchronise the checkpoint. An
+  **Entries Paused** alert confirms it.
+- **Halt** when broker state may be unknown or wrong. A halt freezes
+  everything, cancels working exits too, and stops strategy evaluation.
+  Ambiguous placements and reconciliation mismatches still halt, paused or not.
+- **Flatten** to close every position now ([Operator flatten](#operator-flatten)).
+
+While paused, each order is judged when it is about to be submitted:
+
+- One that opens or adds is dropped, recorded as a `decision_skipped` event
+  with reason `entries_paused`. So is a reduce or close that is not opposite
+  the held position or exceeds it, which happens when it was sized against an
+  entry dropped ahead of it.
+- Every other reduce or close goes out, recovery exits included. A flip's
+  close goes out and its open is dropped; a target rebalance stops at its first
+  entry leg, after its reductions.
+- A group is judged before its first leg goes out: one holding an entry is
+  dropped whole, exits included. A close belongs to its position's group, not
+  the intent's. A group that has sent a leg finishes, across a restart too.
+- An order already at the venue is left to its timeout and time in force, so
+  a resting entry placed before the pause can still fill, and the strategy is
+  not evaluated while it works. If that is unacceptable, halt: cancelling an
+  ungrouped order at the venue halts the account anyway, as Order Cancelled.
+
+The pause survives a restart and is independent of a halt: `reset_halt()`
+leaves it in place, so pausing before the reset resumes a reviewed account
+with exits only. A call whose checkpoint write fails raises: a pause still
+applies in the process and repeating it retries the write; a failed resume
+leaves the process paused. If only an order row failed after the snapshot
+landed, though, the store records the resume until the next checkpoint, so a
+restart in that window resumes entries.
+
 ## Unclosable remainders
 
 A **Close Below Venue Minimum** alert (its title names the symbol) means an

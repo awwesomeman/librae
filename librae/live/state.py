@@ -48,7 +48,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 27
+_STATE_SCHEMA_VERSION = 28
 
 
 def normalize_runtime_revision(
@@ -281,6 +281,9 @@ class LiveRuntimeState:
     period_index: int = 0
     status_period_count: int = 0
     halted: bool = False
+    entries_paused: bool = False
+    # Queued groups that have sent no leg yet, so the entry checks still judge them.
+    unstarted_groups: list[str] = field(default_factory=list)
     adv_session_labels: dict[str, str] = field(default_factory=dict)
     adv_filled_quantities: dict[str, float] = field(default_factory=dict)
 
@@ -360,6 +363,8 @@ class LiveRuntimeState:
             "period_index": self.period_index,
             "status_period_count": self.status_period_count,
             "halted": self.halted,
+            "entries_paused": self.entries_paused,
+            "unstarted_groups": list(self.unstarted_groups),
             "adv_session_labels": self.adv_session_labels,
             "adv_filled_quantities": self.adv_filled_quantities,
         }
@@ -435,6 +440,8 @@ class LiveRuntimeState:
             period_index=int(raw["period_index"]),
             status_period_count=int(raw["status_period_count"]),
             halted=bool(raw["halted"]),
+            entries_paused=bool(raw["entries_paused"]),
+            unstarted_groups=[str(group_id) for group_id in raw["unstarted_groups"]],
             adv_session_labels={
                 str(symbol): str(label) for symbol, label in raw["adv_session_labels"].items()
             },
