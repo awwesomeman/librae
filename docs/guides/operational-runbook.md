@@ -283,17 +283,29 @@ A halt whose checkpoint write fails is still applied in memory
 | Halt Persisted | The retry succeeded; a restart now resumes halted. A plain halt's cancellations go out now, and the alert names one that fails (below); a flatten's exits, including ones it could not record before, go out and keep working | Continue the normal halt review; `reset_halt()` stops refusing with `halt_not_persisted` |
 
 A halt or Halt Persisted alert that says `cancelling tracked orders failed
-(<error>)` is recorded, but its cancellation stopped at that error, so orders
-it did not reach keep working. Every later cycle retries the cancellation and
-does nothing else until it runs through, so a Poll Error alert follows if the
-error persists. **Halt Cancellation Completed** follows only once no order is
-tracked; until then cancel at the venue anything that must not fill. A repeat
+(<error>)` is recorded, and its cancellation went on to every other tracked
+order, but the one the error names may still be working. Every later cycle
+retries the cancellation and does nothing else until it runs through, so a
+Poll Error alert follows if the error persists. **Halt Cancellation
+Completed** follows only once no order is tracked; until then cancel at the
+venue anything that must not fill. A repeat
 halt retries the cancellation: once a retry runs through with orders still
 tracked, it answers with a **Manual Halt** alert that says `cancellation owed,
 <N> tracked`; while the retry fails, `halt()` raises that error and a signalled
 halt shows as a poll-cycle error. A failure while the run starts stops it
 instead; the next start cancels tracked orders again unless every one is a
 recovery exit, and those keep working. Find the cause before `reset_halt()`.
+
+An error that says `broker report not applied` names an order the venue
+answered about with something the engine could not match to it. Its cancel
+went out anyway if the error ends `cancel sent` or `cancel already pending`;
+`cancel not confirmed (<error>)` or `no order id to cancel` mean it may not
+have. Fills that answer carried may be missing from the ledger: compare that
+order and its position at the broker with the ledger. Met while a running
+account finishes a cancel, such as a timeout's after a restart, the same
+answer then halts it, as **Order Reconciliation Failed**; met by an operator
+flatten cancelling working orders, it fails that cycle and the flatten tries
+again in the next.
 
 A process that exits before **Halt Persisted** restarts from the last written
 checkpoint, unhalted: nothing in the engine can recover a halt the store never

@@ -762,6 +762,31 @@ class TestRefusedRecoveryExit:
         assert skip.symbol == "BBB"
         assert "Order Timeout" in skip.detail["message"]
 
+    def test_an_exit_the_venue_cancels_in_two_steps_is_recorded(self):
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = lambda signal: _accepted(signal["client_order_id"])
+        trader, events, alerts = _trader(adapter)
+        trader._positions = {"AAA": _position("AAA")}
+        trader.request_flatten("desk asked to stop")
+        trader._poll_cycle()
+        [exit_order] = trader._active_orders
+
+        answers = iter(["pending_cancel", "canceled"])
+        adapter.get_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": next(answers),
+        }
+        trader._poll_cycle()
+        assert exit_order.status == "cancel_pending"
+        trader._poll_cycle()
+
+        adapter.cancel_order.assert_not_called()
+        assert trader._active_orders == []
+        assert set(trader._positions) == {"AAA"}
+        [skip] = _skips(events, "close_cancelled")
+        assert skip.symbol == "AAA"
+        assert len(_titled(alerts, "Close Cancelled")) == 1
+
     def test_every_refused_exit_reports_that_no_position_fully_closed(self):
         adapter = _adapter(below_minimum="")
         adapter.place_order.side_effect = OrderRejectedError(_REDUCE_ONLY_REFUSAL)

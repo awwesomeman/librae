@@ -550,6 +550,17 @@ def _is_recovery_exit(request: OrderRequest) -> bool:
     ) and request.position_effect in ("reduce", "close")
 
 
+class ReportNotAppliedError(RuntimeError):
+    """A venue answer about a tracked order did not reconcile with it; its cancel went ahead."""
+
+
+def _timeout_message(request: OrderRequest, order_id: str, report: ExecutionReport) -> str:
+    return (
+        f"{request.symbol} order_id={order_id} status={report.status} "
+        f"filled={report.filled_quantity:.4f}/{report.requested_quantity:.4f}"
+    )
+
+
 class LiveTrader:
     """Polling-based runner for sim/live modes.
 
@@ -4459,9 +4470,47 @@ class LiveTrader:
         ):
             tracked = self._active_orders[0]
             request = tracked.request
-            if tracked.cancel_requested or tracked.status == "cancel_pending":
-                self._cancel_tracked_order(tracked)
-                return
+            # The engine's own cancels finish here, as does any cancel of an
+            # order a halt owns. One the venue started on its own is polled
+            # below and fails the order when it ends, as any venue cancel does.
+            if tracked.cancel_requested or (
+                self._halted
+                and tracked.status == "cancel_pending"
+                and not _is_recovery_exit(request)
+            ):
+                try:
+                    report = self._cancel_tracked_order(tracked)
+                except ReportNotAppliedError as exc:
+                    # The cancel went out regardless. A halt has stopped
+                    # trading already and a flatten retries its cancels next
+                    # cycle; otherwise what the venue holds is unknown.
+                    if self._halted or self._flatten_request is not None:
+                        raise
+                    self._halt_live(title="Order Reconciliation Failed", message=str(exc))
+                    return
+                # Over age, the order fails as its timeout would have failed
+                # it, whichever cancel this was, a halt's of a recovery exit
+                # included, since its position stays open: a restart between
+                # the timeout's recorded cancel and its outcome leaves that to
+                # this pass. A younger order's cancel was a halt's, a
+                # flatten's or a failed group's, each alerting on its own, as
+                # are the cancels of a flatten still waiting on them.
+                if (
+                    report is None
+                    or report.status not in ("cancelled", "rejected")
+                    or (self._halted and not _is_recovery_exit(request))
+                    or self._flatten_request is not None
+                    or not self._live_order_timed_out(tracked)
+                ):
+                    return
+                order_id = report.order_id or tracked.order_id
+                if self._fail_group_or_halt(
+                    tracked,
+                    title="Order Timeout",
+                    message=_timeout_message(request, order_id, report),
+                ):
+                    return
+                continue
             if not tracked.placement_attempted:
                 if not submit_planned:
                     return
@@ -4885,11 +4934,7 @@ class LiveTrader:
         if cancel_report.status == "filled":
             return
         status = cancel_report.status
-        message = (
-            f"{request.symbol} order_id={order_id} status={status} "
-            f"filled={cancel_report.filled_quantity:.4f}/"
-            f"{cancel_report.requested_quantity:.4f}"
-        )
+        message = _timeout_message(request, order_id, cancel_report)
         if status in ("cancelled", "rejected"):
             self._fail_group_or_halt(tracked, title="Order Timeout", message=message)
         else:
@@ -4979,70 +5024,134 @@ class LiveTrader:
         self._persist_state(tracked)
         self._publish_checkpointed_results()
 
-    def _cancel_tracked_order(self, tracked: TrackedOrder) -> None:
-        """Reconcile and cancel one tracked order without resubmitting it."""
+    def _cancel_tracked_order(self, tracked: TrackedOrder) -> ExecutionReport | None:
+        """Reconcile and cancel one tracked order without resubmitting it.
+
+        Returns the applied report that ended the order, or None while it may
+        still be working. A ValueError from a broker call or from applying its
+        report is a venue answer that does not reconcile with the tracked
+        order, raised by ``_cancel_unreconciled`` once the cancel is out; any
+        other broker error is the venue not answering, logged and left to the
+        next pass.
+        """
         if not tracked.placement_attempted:
             tracked.status = "cancelled"
             self._active_orders.remove(tracked)
             self._persist_state(tracked)
-            return
+            return None
 
-        cancellation_acknowledged = tracked.status == "cancel_pending"
+        cancel_sent = tracked.status == "cancel_pending"
         if not tracked.cancel_requested:
             tracked.cancel_requested = True
             self._persist_state(tracked)
 
+        request = tracked.request
+        order_id = tracked.order_id
         try:
-            report = self._timed_order_call(
-                lambda request=tracked.request, order_id=tracked.order_id: (
-                    self._executor.get_order(request, order_id)
-                    if order_id
-                    else self._executor.find_order(request)
+            try:
+                report = self._timed_order_call(
+                    lambda: (
+                        self._executor.get_order(request, order_id)
+                        if order_id
+                        else self._executor.find_order(request)
+                    )
                 )
-            )
+            except ValueError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile tracked order before cancellation %s",
+                    request.client_order_id,
+                )
+                return None
             if report is None:
-                logger.error(
-                    "Cannot cancel unresolved order %s",
-                    tracked.request.client_order_id,
+                logger.error("Cannot cancel unresolved order %s", request.client_order_id)
+                return None
+            order_id = order_id or report.order_id
+            self._apply_order_report(tracked, report)
+            if report.status in ("filled", "cancelled", "rejected"):
+                return report
+            if cancel_sent or report.status == "cancel_pending":
+                if report.status != "cancel_pending":
+                    tracked.status = "cancel_pending"
+                    self._persist_state(tracked)
+                return None
+
+            cancel_sent = True
+            try:
+                cancel_report = self._timed_order_call(
+                    lambda: self._executor.cancel_order(request, order_id)
                 )
-                return
-        except Exception:
-            logger.exception(
-                "Failed to reconcile tracked order before cancellation %s",
-                tracked.request.client_order_id,
-            )
-            return
+                if cancel_report is None:
+                    raise RuntimeError("broker cancellation returned no execution report")
+            except ValueError:
+                raise
+            except Exception:
+                logger.exception("Failed to cancel tracked order %s", request.client_order_id)
+                return None
+            self._apply_order_report(tracked, cancel_report)
+            ended = cancel_report.status in ("filled", "cancelled", "rejected")
+            return cancel_report if ended else None
+        except ValueError as exc:
+            self._cancel_unreconciled(tracked, order_id, exc, cancel_sent=cancel_sent)
+            return None
 
-        self._apply_order_report(tracked, report)
-        if report.status in ("filled", "cancelled", "rejected"):
-            return
-        if cancellation_acknowledged or report.status == "cancel_pending":
-            if report.status != "cancel_pending":
-                tracked.status = "cancel_pending"
-                self._persist_state(tracked)
-            return
+    def _cancel_unreconciled(
+        self, tracked: TrackedOrder, order_id: str, error: ValueError, *, cancel_sent: bool
+    ) -> None:
+        """Send the cancel a venue answer that does not reconcile held back, then raise it.
 
-        try:
-            cancel_report = self._timed_order_call(
-                lambda request=tracked.request, order_id=report.order_id: (
-                    self._executor.cancel_order(request, order_id)
+        The order may still be working at the venue, and the answer may carry
+        fills the ledger lacks, so the error names the order and what became
+        of its cancel. The order stays tracked until a report that applies
+        ends it.
+        """
+        request = tracked.request
+        failure = (
+            f"{request.symbol} order_id={order_id or 'unassigned'} broker report not applied "
+            f"({type(error).__name__}: {error})"
+        )
+        if cancel_sent:
+            pending = tracked.status == "cancel_pending"
+            outcome = "cancel already pending" if pending else "cancel sent"
+        elif not order_id:
+            outcome = "no order id to cancel"
+        else:
+            try:
+                cancel_report = self._timed_order_call(
+                    lambda: self._executor.cancel_order(request, order_id)
                 )
-            )
-            if cancel_report is None:
-                raise RuntimeError("broker cancellation returned no execution report")
-        except Exception:
-            logger.exception(
-                "Failed to cancel tracked order %s",
-                tracked.request.client_order_id,
-            )
-            return
-
-        self._apply_order_report(tracked, cancel_report)
+                if cancel_report is None:
+                    raise RuntimeError("broker cancellation returned no execution report")
+                self._apply_order_report(tracked, cancel_report)
+            except Exception as exc:
+                logger.exception("Cancel not confirmed for %s", request.client_order_id)
+                outcome = f"cancel not confirmed ({type(exc).__name__}: {exc})"
+            else:
+                outcome = "cancel sent"
+        raise ReportNotAppliedError(f"{failure}; {outcome}") from error
 
     def _cancel_active_orders(self) -> None:
-        """Best-effort cancellation used whenever live trading halts."""
+        """Cancel every tracked order, then raise the first failure, if any.
+
+        A failure at one order does not stop the others, so an order queued
+        behind it cannot go out ahead of a flatten that waits on this pass.
+        """
+        failure: Exception | None = None
         for tracked in list(self._active_orders):
-            self._cancel_tracked_order(tracked)
+            try:
+                self._cancel_tracked_order(tracked)
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+                else:
+                    logger.error(
+                        "Cancelling %s also failed",
+                        tracked.request.client_order_id,
+                        exc_info=exc,
+                    )
+        if failure is not None:
+            raise failure
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
         """Process one symbol through the portfolio-cycle path."""
