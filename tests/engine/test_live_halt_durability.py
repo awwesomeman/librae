@@ -4,7 +4,9 @@ The run stays halted in memory, retries the checkpoint first thing in every
 later cycle, and refuses ``reset_halt()`` until the store has recorded the
 halt, so nobody resumes from a state the store never saw. An outage fails
 every write, so the tests do too unless they pin a narrower path. A halt whose
-cancellation fails retries it the same way and says when it has run through.
+cancellation fails retries it the same way and says when it has run through. A
+broker answer that cannot be applied fails the cancellation without holding
+the cancel back.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from tests.engine.test_live_flatten import (
     _trader,
 )
 from tests.engine.test_live_operator_halt import _resting
+from tests.engine.test_live_runner import _broker_report
 
 OUTAGE = "state store unavailable"
 
@@ -237,7 +240,7 @@ class TestHaltCheckpointFailure:
         _buy_two(trader)
         adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
 
-        with pytest.raises(ValueError, match="order id changed"):
+        with pytest.raises(RuntimeError, match="order id changed"):
             trader.halt("desk asked to stop")
 
         assert trader._state_store.load(trader._state_key).halted is True
@@ -247,14 +250,128 @@ class TestHaltCheckpointFailure:
         assert "cancelling tracked orders failed" in halt["message"]
 
 
+def _partly_filled(order_id: str, status: str = "open", **fields) -> dict:
+    return {**_broker_report(order_id=order_id, status=status, filled=0.5), **fields}
+
+
+def _unappliable(mismatch: str, order_id: str) -> dict:
+    """A status report for ``order_id`` that does not reconcile with what is tracked."""
+    if mismatch == "order_id":
+        return _partly_filled("another-order")
+    if mismatch == "filled_backwards":
+        return _partly_filled(order_id, filled=0.25)
+    return _partly_filled(order_id, amount=2.0)
+
+
+class TestAReportThatCannotBeAppliedStillCancels:
+    """The order may still be working, so the cancel goes out and the mismatch is raised."""
+
+    @pytest.mark.parametrize("mismatch", ["order_id", "filled_backwards", "quantity"])
+    def test_a_halt_sends_the_cancel_and_names_the_mismatch(self, mismatch):
+        adapter = _resting_adapter()
+        adapter.place_order.side_effect = lambda signal: _partly_filled(signal["client_order_id"])
+        adapter.cancel_order.side_effect = lambda order_id, _s: _partly_filled(order_id, "canceled")
+        trader, _, alerts = _trader(adapter)
+        _buy_two(trader)
+        aaa = trader._active_orders[0]
+        adapter.get_order.side_effect = lambda order_id, _s: _unappliable(mismatch, order_id)
+
+        with pytest.raises(Exception, match="not applied"):
+            trader.halt("desk asked to stop")
+
+        adapter.cancel_order.assert_called_once()
+        assert adapter.cancel_order.call_args.args[0] == aaa.order_id
+        [halt] = _titled(alerts, "Manual Halt")
+        assert "cancelling tracked orders failed" in halt["message"]
+        assert f"AAA order_id={aaa.order_id} broker report not applied" in halt["message"]
+        assert "cancel sent" in halt["message"]
+        # The cancel's own report applied, so the venue has confirmed it, and
+        # the pass went on to drop BBB.
+        assert aaa.status == "cancelled"
+        assert aaa.filled_quantity == pytest.approx(0.5)
+        assert trader._active_orders == []
+
+        trader._poll_cycle()
+        trader._poll_cycle()
+
+        assert trader._active_orders == []
+        assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
+        adapter.cancel_order.assert_called_once()
+
+    def test_a_running_account_sends_the_cancel_then_halts(self):
+        """A cancel restored from the checkpoint meets a report naming another order."""
+        adapter = _resting_adapter()
+        trader, _, alerts = _trader(adapter)
+        _buy_two(trader)
+        aaa = trader._active_orders[0]
+        aaa.cancel_requested = True
+        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
+
+        trader._advance_live_orders()
+
+        assert trader._halted is True
+        adapter.cancel_order.assert_called_once()
+        assert adapter.cancel_order.call_args.args[0] == aaa.order_id
+        [halt] = _titled(alerts, "Order Reconciliation Failed")
+        assert f"AAA order_id={aaa.order_id} broker report not applied" in halt["message"]
+        assert "cancel sent" in halt["message"]
+        assert trader._active_orders == [], "AAA's cancel was confirmed and BBB never sent"
+        adapter.place_order.assert_called_once()
+
+    def test_a_flatten_sends_the_cancel_and_goes_ahead_next_cycle(self):
+        """Its cancels are retried next cycle rather than halting the account it closes."""
+        adapter = _resting_adapter()
+        trader, _, alerts = _trader(adapter)
+        _buy_two(trader)
+        polls: list[str] = []
+
+        def get_order(order_id, _symbol):
+            polls.append(order_id)
+            # The flatten's own status read is the one answered about another order.
+            return _resting("another-order" if len(polls) == 2 else order_id)
+
+        adapter.get_order.side_effect = get_order
+        trader.request_flatten("desk asked to close")
+
+        with pytest.raises(Exception, match="order id changed"):
+            trader._poll_cycle()
+
+        adapter.cancel_order.assert_called_once()
+        assert trader._halted is False
+        assert trader._active_orders == [], "BBB was dropped in the same pass, never sent"
+        adapter.place_order.assert_called_once()
+
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert len(_submitted(adapter)) == 2, "the flatten sent its first exit"
+        assert len(_titled(alerts, "Operator Flatten")) == 1
+        assert _titled(alerts, "Refused") == []
+        assert _titled(alerts, "Order Reconciliation Failed") == []
+
+
+def _answer_about_another_order(adapter):
+    """Make every status and cancel answer name another order; return what undoes it.
+
+    No answer can be applied, so the venue never confirms the cancel.
+    """
+    answers = adapter.get_order.side_effect, adapter.cancel_order.side_effect
+    adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
+    adapter.cancel_order.side_effect = lambda _order_id, _s: _resting("another-order", "canceled")
+
+    def undo():
+        adapter.get_order.side_effect, adapter.cancel_order.side_effect = answers
+
+    return undo
+
+
 class TestHaltCancellationFailure:
     @pytest.mark.parametrize("retry_by", ["poll_cycle", "repeat_halt"])
     def test_it_is_retried_until_it_completes(self, retry_by):
         adapter = _resting_adapter()
         trader, _, alerts = _trader(adapter)
         _buy_two(trader)
-        answers = adapter.get_order.side_effect
-        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
+        undo = _answer_about_another_order(adapter)
 
         def retry():
             if retry_by == "poll_cycle":
@@ -262,19 +379,19 @@ class TestHaltCancellationFailure:
             else:
                 trader.halt("desk asked again")
 
-        with pytest.raises(ValueError, match="order id changed"):
+        with pytest.raises(RuntimeError, match="order id changed"):
             trader.halt("desk asked to stop")
-        with pytest.raises(ValueError, match="order id changed"):
+        with pytest.raises(RuntimeError, match="order id changed"):
             retry()
         assert _titled(alerts, "Halt Cancellation Completed") == []
 
-        adapter.get_order.side_effect = answers
+        undo()
         retry()
         retry()
 
         assert trader._halted is True
         assert trader._active_orders == [], "the order queued behind the failure is cancelled"
-        assert adapter.cancel_order.call_count == 1
+        assert adapter.cancel_order.call_count == 3, "one per pass until the venue confirms"
         adapter.place_order.assert_called_once()
         assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
         assert _titled(alerts, "Halt Persisted") == []
@@ -290,7 +407,7 @@ class TestHaltCancellationFailure:
         outage["down"] = False
         answers = adapter.get_order.side_effect
         adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
-        with pytest.raises(ValueError, match="order id changed"):
+        with pytest.raises(RuntimeError, match="order id changed"):
             trader._poll_cycle()
         [persisted] = _titled(alerts, "Halt Persisted")
         assert "cancelling tracked orders failed" in persisted["message"]
@@ -306,12 +423,11 @@ class TestHaltCancellationFailure:
         adapter = _resting_adapter()
         trader, _, alerts = _trader(adapter)
         _buy_two(trader)
-        answers = adapter.get_order.side_effect
-        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
-        with pytest.raises(ValueError, match="order id changed"):
+        undo = _answer_about_another_order(adapter)
+        with pytest.raises(RuntimeError, match="order id changed"):
             trader.halt("desk asked to stop")
 
-        adapter.get_order.side_effect = answers
+        undo()
         cancels = adapter.cancel_order.side_effect
         # Swallowed per order: the retry runs through with AAA still working.
         adapter.cancel_order.side_effect = RuntimeError("venue busy")
@@ -333,11 +449,10 @@ class TestHaltCancellationFailure:
         adapter = _resting_adapter(calls)
         trader, _, alerts = _trader(adapter)
         _buy_two(trader)
-        answers = adapter.get_order.side_effect
-        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
-        with pytest.raises(ValueError, match="order id changed"):
+        undo = _answer_about_another_order(adapter)
+        with pytest.raises(RuntimeError, match="order id changed"):
             trader.halt("desk asked to stop")
-        adapter.get_order.side_effect = answers
+        undo()
 
         def busy(_order_id, _symbol):
             calls.append("cancel_order")
@@ -380,7 +495,7 @@ class TestHaltCancellationFailure:
         _buy_two(trader)
         answers = adapter.get_order.side_effect
         adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
-        with pytest.raises(ValueError, match="order id changed"):
+        with pytest.raises(RuntimeError, match="order id changed"):
             trader.halt("desk asked to stop")
         # The orders resolve before any retry, so the operator may reset.
         trader._active_orders = []

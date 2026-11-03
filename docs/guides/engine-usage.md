@@ -984,7 +984,13 @@ adapter at submission.
   [the operational runbook](operational-runbook.md).
 - Halt durability: every halt applies in memory, writes its checkpoint, and
   only then cancels, each cancel recording itself before it is sent; the alert
-  names a cancellation that fails. Each later cycle retries that cancellation
+  names a cancellation that fails. A broker answer that cannot be applied to
+  its order (another order id, a cumulative fill that went backwards, another
+  quantity) fails the cancellation but never holds its cancel back, since the
+  order may still be working, nor the cancels of the other tracked orders.
+  Met while a running account finishes a cancel, such as a timeout's after a
+  restart, it then halts the account; an operator flatten retries its cancels
+  next cycle instead. Each later cycle retries that cancellation
   before any order work and stops there while it fails; so does a repeated
   `halt()`, which raises until it runs through. A **Halt Cancellation
   Completed** alert follows once no order is tracked. If the checkpoint write fails, nothing is

@@ -5,7 +5,8 @@ Each event is offered to ``on_runtime_event`` after the action it records, so
 a slow or failing sink can neither delay it nor undo it: a sink that raises is
 logged, and the halt still happens and still raises its own error. A failed
 grouped leg also stops a target rebalance, which would otherwise send it
-again in the same cycle. A placement's error text reaches its
+again in the same cycle, and so does one whose cancel ends in a later cycle,
+after a restart or a pending acknowledgement. A placement's error text reaches its
 ``broker_orders`` row; a definite refusal is ``rejected``, while an unknown
 outcome keeps its unresolved status because the order may still rest at the
 venue.
@@ -15,14 +16,23 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from datetime import datetime, timedelta
 
 import pytest
-from librae.core.run_config import RiskPolicy
+from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import OrderIntent, PortfolioWeights
 from librae.live.executor import OrderRejectedError
+from librae.live.state import MemoryLiveStateStore
 
-from tests.engine.live_factories import TEST_CLOCK_NOW, _HoldStrategy, _test_cfg, make_live_trader
+from tests.engine.live_factories import (
+    TEST_CLOCK_NOW,
+    _HoldStrategy,
+    _test_cfg,
+    make_live_trader,
+    with_run_leases,
+)
 from tests.engine.test_live_flatten import (
+    SYMBOLS,
     _adapter,
     _bars,
     _position,
@@ -31,6 +41,7 @@ from tests.engine.test_live_flatten import (
     _trader,
 )
 from tests.engine.test_live_halt_durability import OUTAGE, _resting_adapter, _store_outage
+from tests.engine.test_live_operator_halt import _resting
 from tests.engine.test_live_runner import _broker_report, _mock_order_adapter
 
 
@@ -342,6 +353,120 @@ class TestGroupFailureIsRecorded:
         assert failed.detail["group_id"] == "pair"
         [alert] = _titled(alerts, f"Order {outcome.title()}")
         assert "target rebalance stopped" in alert["message"]
+
+    @pytest.mark.parametrize("grouped", [True, False])
+    @pytest.mark.parametrize("ends_after", ["restart", "pending_cancel"])
+    def test_a_rebalance_leg_whose_cancel_ends_later_fails_as_one_ending_at_once(
+        self, ends_after, grouped
+    ):
+        """A cancel finished in a later cycle must not let the rebalance send the leg again.
+
+        After a restart, the timeout's cancel ends there as Order Timeout; a
+        cancel the venue only acknowledged ends as Order Cancelled.
+        """
+        title = "Order Timeout" if ends_after == "restart" else "Order Cancelled"
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        now = [TEST_CLOCK_NOW]
+        trader, events, alerts = _timeout_trader(adapter, store, now)
+        trader._positions = {
+            symbol: replace(_position(symbol), group_id="pair" if grouped else None)
+            for symbol in ("AAA", "BBB")
+        }
+        trader._execute_live_decision(PortfolioWeights({"BBB": 0.0}), _bars(), TEST_CLOCK_NOW)
+        assert [order.request.symbol for order in trader._active_orders] == ["AAA"]
+
+        if ends_after == "restart":
+            # The timeout's cancel is checkpointed, then the process dies sending it.
+            now[0] += timedelta(seconds=30)
+            adapter.cancel_order.side_effect = _Crash
+            with pytest.raises(_Crash):
+                trader._advance_live_orders()
+            adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
+            adapter.get_position.side_effect = lambda request: _held(request, "AAA", "BBB")
+            trader, events, alerts = _timeout_trader(adapter, store, now)
+            trader._initialize_run()
+        else:
+            answers = iter(["pending_cancel", "canceled"])
+            adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, next(answers))
+            trader._advance_live_orders()
+            assert trader._active_orders[0].status == "cancel_pending"
+            trader._advance_live_orders()
+        # The next bar.
+        trader._continue_live_rebalance(_bars(), now[0])
+
+        assert _submitted(adapter) == ["AAA"]
+        assert trader._active_orders == []
+        assert trader._live_rebalance is None
+        assert trader._state_store.load(trader._state_key).live_rebalance is None
+        if grouped:
+            assert trader._halted is False
+            [failed] = _of_type(events, "group_failed")
+            assert failed.detail["group_id"] == "pair"
+            [alert] = _titled(alerts, title)
+            assert "target rebalance stopped" in alert["message"]
+        else:
+            assert trader._halted is True
+            [halted] = _of_type(events, "halted")
+            assert halted.detail["reason"] == title
+
+    def test_a_flatten_cancel_finished_after_a_restart_fails_nothing(self):
+        """Only an over-age order fails when an engine cancel ends after a restart."""
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _timeout_trader(adapter, store, now)
+        trader._execute_live_decision(
+            [OrderIntent(action="long", symbol="AAA", quantity=1.0)], _bars(), TEST_CLOCK_NOW
+        )
+        trader.request_flatten("desk asked to close")
+        adapter.cancel_order.side_effect = _Crash
+        with pytest.raises(_Crash):
+            trader._poll_cycle()
+        adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
+
+        trader, events, alerts = _timeout_trader(adapter, store, now)
+        trader._initialize_run()
+
+        assert trader._active_orders == []
+        assert trader._halted is False
+        assert [event.event_type for event in events] == ["state_recovered"]
+        assert alerts == []
+
+
+class _Crash(BaseException):
+    """The process dies inside a broker call, past every ``except Exception``."""
+
+
+def _timeout_trader(adapter, store, now: list[datetime]):
+    """A trader on ``store`` whose orders time out 30 seconds after placement."""
+    events: list = []
+    alerts: list[dict] = []
+    trader = make_live_trader(
+        _HoldStrategy(),
+        adapter,
+        config=_test_cfg(
+            mode="live",
+            symbols=SYMBOLS,
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None,
+                warmup_periods=5,
+                live_order_timeout_seconds=30,
+            ),
+        ),
+        state_store=store,
+        clock=lambda: now[0],
+        on_runtime_event=events.append,
+    )
+    trader._notify = lambda method, **kw: alerts.append(kw) if method == "send_alert" else None
+    trader._last_prices = {symbol: 100.0 for symbol in SYMBOLS}
+    return with_run_leases(trader), events, alerts
+
+
+def _held(request, *symbols: str) -> dict:
+    """The broker's answer for a book holding one long of each of ``symbols``."""
+    size = 1.0 if request.symbol in symbols else 0.0
+    return {"symbol": request.symbol, "size": size, "avg_price": 100.0, "unrealized_pnl": 0.0}
 
 
 class TestPlacementErrorReachesTheOrderRow:
