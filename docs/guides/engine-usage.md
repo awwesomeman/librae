@@ -616,9 +616,11 @@ working, is sent again. An order the venue reports `cancel_pending` on its own
 is polled until it ends, and is under its timeout again if it reverts to
 working. A status report that cannot be applied to its order (another order
 id, a cumulative fill that went backwards) leaves the order tracked and under
-its timeout, alerts once naming it, and lets the rest of the cycle run; at
-startup it still fails closed. While an operator flatten is pending, any
-status that cannot be read or applied is left to the flatten's own cancel.
+its timeout, alerts naming it, repeating while it lasts (see the runbook's
+[lasting problems](operational-runbook.md#lasting-problems)), and lets the
+rest of the cycle run; at startup it still fails closed. While an operator
+flatten is pending, any status that cannot be read or applied is left to the
+flatten's own cancel.
 Operational/error
 halts cancel tracked strategy orders. A drawdown
 breach instead clears the pending strategy decision and keeps its emergency

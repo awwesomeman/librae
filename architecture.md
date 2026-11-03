@@ -367,6 +367,7 @@ librae/
 │   ├── auxiliary_cache.py    auxiliary refetch cadence + freshness that never holds the run
 │   ├── ohlcv_audit.py        best-effort vs at-least-once OHLCV audit delivery + its queue
 │   ├── halt_recovery.py      whether a halted run may reset, and the blocking reason
+│   ├── persistent_alerts.py  alerts for a lasting problem — first, repeat, resolved
 │   └── resting_orders.py     live intent lifetime — replace, expire, prune (mirrors backtest)
 │
 └── config/                   configuration management

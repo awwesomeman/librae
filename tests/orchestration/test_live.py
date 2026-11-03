@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1027,6 +1027,60 @@ def test_live_ohlcv_bar_with_a_rejected_timestamp_is_alerted_and_acknowledged() 
     assert "not H1 bar starts" in notifier.send_alert.call_args.kwargs["message"]
     # The database did not fail, so this must not build toward "DB Write Failing".
     assert callbacks._failures.get("write_ohlcv", 0) == 0
+
+
+def test_live_ohlcv_bars_rejected_for_hours_alert_hourly_and_resolve_once() -> None:
+    """A feed that misstamps every bar is one problem, not one per bar: it
+    alerts at the first bar, reminds once an hour with how long and how many,
+    and says once when its bars have been stored for an hour. A bad bar among
+    good ones before then is the same problem, not a new alert."""
+    from librae.core.market_data import BarTimestampError
+
+    config = make_test_cfg(mode="sim")
+    notifier = MagicMock(enabled=True)
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        notifier,
+    )
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    bar = {"open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 10.0}
+
+    class _Clock(datetime):
+        at = start
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.at
+
+    with (
+        patch("librae.orchestration.live.datetime", _Clock),
+        patch(
+            "librae.db.timescale_writer.write_ohlcv",
+            autospec=True,
+            side_effect=BarTimestampError("1 of 1 timestamps are not M1 bar starts"),
+        ) as write,
+    ):
+        rejected = write.side_effect
+        for minute in range(163):
+            _Clock.at = start + timedelta(minutes=minute)
+            write.side_effect = None if minute == 100 or minute >= 102 else rejected
+            callbacks.on_ohlcv("BTCUSDT", "M1", bar, _Clock.at)
+            if minute == 161:
+                assert notifier.send_alert.call_count == 2, "not yet clear for an hour"
+
+    sent = [call.kwargs for call in notifier.send_alert.call_args_list]
+    assert [alert["title"] for alert in sent] == [
+        f"[{config.strategy_name}] OHLCV Bar Rejected",
+        f"[{config.strategy_name}] OHLCV Bar Rejected",
+        f"[{config.strategy_name}] Resolved",
+    ]
+    first, reminder, resolved = (alert["message"] for alert in sent)
+    assert "not M1 bar starts" in first
+    assert "still so" not in first
+    assert "not M1 bar starts" in reminder
+    assert "still so after 1h 0m, seen 61 times" in reminder
+    assert resolved.startswith("OHLCV Bar Rejected cleared after 1h 42m, seen 101 times")
 
 
 def test_timescale_callbacks_writes_runtime_event() -> None:
