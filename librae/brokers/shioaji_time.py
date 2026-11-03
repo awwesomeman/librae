@@ -20,9 +20,10 @@ def shioaji_kbar_starts(raw_ts: npt.ArrayLike) -> pd.DatetimeIndex:
     (https://sinotrade.github.io/zh/tutor/market_data/historical/). TXFR1
     kbars from 2026-10-27 to 2026-11-03 agree: no minute is stamped 08:45 or
     15:00, the last ones are 13:45 and 05:00, and read as minute ends they
-    reproduce TradingView's TAIFEX:TXF1! 08:45 hourly bar of 2026-11-02.
-    Index contracts such as IX0001 get the same conversion; that they stamp
-    the same way is unverified.
+    reproduce TradingView's TAIFEX:TXF1! 08:45 hourly bar of 2026-11-02
+    (O/H/L/C 45000/45265/44700/45057). Index contracts stamp the same way:
+    IX0001's 23,672 minute bars from 2026-06-25 to 2026-11-03 run
+    09:01-13:34 and never read 09:00.
     """
     raw = np.asarray(raw_ts, dtype=np.int64)
     return pd.to_datetime(raw - _TAIPEI_UTC_OFFSET_NS - _KBAR_NS, unit="ns", utc=True)

@@ -118,6 +118,41 @@ def session_label(value: object, calendar_id: str) -> date:
         ) from exc
 
 
+def execution_session_label(value: object, calendar_id: str) -> date:
+    """Return the session a fill or print at ``value`` counts toward.
+
+    Bars are half-open, but an execution is an instant: one stamped at a
+    segment close ends that segment, and one stamped between the segments
+    this calendar knows belongs to the session that last traded. So this is
+    the session of the latest segment opened at or before ``value``, which
+    inside a segment is ``session_label``'s answer. An instant after a close
+    is logged: on a venue that trades only in these segments, a correctly
+    stamped execution never lands there.
+    """
+    timestamp = _timestamp(value)
+    if calendar_id == ALWAYS_OPEN_CALENDAR:
+        return timestamp.date()
+    calendar = _exchange_calendar(calendar_id)
+    # A session can open on a date before its label (a TAIFEX night segment
+    # opens on the previous session's date), so the newest candidate is the
+    # first session after the instant's date.
+    newest = calendar.date_to_session(
+        pd.Timestamp(timestamp.date() + timedelta(days=1)), direction="next"
+    )
+    for label in reversed(calendar.sessions_window(newest, -3)):
+        segments = _session_segments(calendar_id, label.date())
+        if segments[0][0] <= timestamp:
+            if not any(start <= timestamp <= end for start, end in segments):
+                logger.warning(
+                    "Execution at %s is after a %s close; counted toward session %s",
+                    timestamp.isoformat(),
+                    calendar_id,
+                    label.date().isoformat(),
+                )
+            return label.date()
+    raise ValueError(f"{timestamp.isoformat()} precedes every {calendar_id} session")
+
+
 def bucket_geometry_is_known(*, calendar_id: str, session_mode: str) -> bool:
     """Whether this calendar describes bucket geometry for this session mode.
 

@@ -84,6 +84,7 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 from librae.core.trading_calendar import (
+    execution_session_label,
     session_label,
     session_labels,
     validate_calendar_id,
@@ -4934,6 +4935,7 @@ class LiveTrader:
             delta_tax = report.tax - tracked.tax
             if delta_tax < -EPSILON:
                 raise ValueError("broker cumulative execution costs moved backwards")
+            adv_session = self._fill_adv_session(report.symbol, report.executed_at)
             fill = Fill(
                 symbol=report.symbol,
                 side="long" if report.side == "buy" else "short",
@@ -4956,7 +4958,7 @@ class LiveTrader:
                 group_id=request.group_id,
                 time_in_force=request.time_in_force,
             )
-            self._record_adv_fill(report.symbol, delta_quantity, report.executed_at)
+            self._record_adv_fill(report.symbol, delta_quantity, adv_session)
             if self._live_rebalance is not None:
                 consumed = self._live_rebalance.filled_bar_quantity_by_symbol
                 consumed[report.symbol] = consumed.get(report.symbol, 0.0) + delta_quantity
@@ -5141,25 +5143,40 @@ class LiveTrader:
             market_data=market_data,
         )
 
-    def _reset_adv_session(self, symbol: str, ts: datetime) -> None:
-        """Reset one symbol's cumulative ADV usage when its session changes."""
-        if self._adv_lookback_sessions is None:
-            return
+    def _adv_session(self, symbol: str, ts: datetime) -> str:
+        """Session key one symbol's ADV budget is counted under at a bar."""
         if self._interval_delta.days >= 1:
-            label = pd.Timestamp(ts).date().isoformat()
-        else:
-            calendar_id = self._market_data_subscriptions[symbol].calendar_id
-            label = session_label(ts, calendar_id).isoformat()
-        if self._adv_session_labels.get(symbol) != label:
-            self._adv_session_labels[symbol] = label
+            return pd.Timestamp(ts).date().isoformat()
+        calendar_id = self._market_data_subscriptions[symbol].calendar_id
+        return session_label(ts, calendar_id).isoformat()
+
+    def _reset_adv_session(self, symbol: str, session: str) -> None:
+        """Reset one symbol's cumulative ADV usage when its session changes."""
+        if self._adv_session_labels.get(symbol) != session:
+            self._adv_session_labels[symbol] = session
             self._adv_filled_quantities[symbol] = 0.0
 
-    def _record_adv_fill(self, symbol: str, quantity: float, executed_at: datetime) -> None:
-        """Accumulate confirmed broker fills against the active session budget."""
+    def _fill_adv_session(self, symbol: str, executed_at: datetime) -> str | None:
+        """Session a confirmed fill counts toward; None keeps the current one.
+
+        Resolved before the fill is applied, so a calendar that cannot place
+        the execution fails before positions or cash change.
+        """
+        if self._adv_lookback_sessions is None:
+            return None
+        if self._interval_delta.days >= 1:
+            if symbol in self._adv_session_labels:
+                return None
+            return pd.Timestamp(executed_at).date().isoformat()
+        calendar_id = self._market_data_subscriptions[symbol].calendar_id
+        return execution_session_label(executed_at, calendar_id).isoformat()
+
+    def _record_adv_fill(self, symbol: str, quantity: float, session: str | None) -> None:
+        """Accumulate a confirmed broker fill against its session budget."""
         if self._adv_lookback_sessions is None:
             return
-        if self._interval_delta.days < 1 or symbol not in self._adv_session_labels:
-            self._reset_adv_session(symbol, executed_at)
+        if session is not None:
+            self._reset_adv_session(symbol, session)
         self._adv_filled_quantities[symbol] = (
             self._adv_filled_quantities.get(symbol, 0.0) + quantity
         )
@@ -5224,8 +5241,8 @@ class LiveTrader:
                 if previous_volume is not None and not pd.isna(previous_volume):
                     previous_volumes[symbol] = float(previous_volume)
             self._last_prices[symbol] = close
-            self._reset_adv_session(symbol, ts)
             if self._adv_lookback_sessions is not None:
+                self._reset_adv_session(symbol, self._adv_session(symbol, ts))
                 calendar_id = self._market_data_subscriptions[symbol].calendar_id
                 labels = None
                 if self._interval_delta.days < 1:

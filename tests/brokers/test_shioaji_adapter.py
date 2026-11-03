@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -165,9 +164,6 @@ def _make_kbars_response():
     }
 
 
-_TXFR1_TRADING_DAY = Path(__file__).parent / "fixtures" / "shioaji_txfr1_1m_2026-11-02.csv"
-
-
 def _taipei(value: str) -> pd.Timestamp:
     return pd.Timestamp(value, tz="Asia/Taipei").tz_convert("UTC")
 
@@ -179,16 +175,34 @@ def _txfr1_kbars(
     untraded: str | None = None,
     extra: dict | None = None,
 ) -> dict:
-    """Real TXFR1 minutes for one trading day, shaped as Shioaji's kbars().
+    """Synthetic minutes for the TAIFEX trading day 2026-11-02, shaped as
+    Shioaji's kbars() returns them.
 
-    The night session is stamped 15:01-05:00 and the day session 08:46-13:45:
-    each raw stamp is the minute's end. ``since`` and ``through`` cut the feed
-    at raw stamps (Taipei wall clock), as a window starting at a date or a
-    fetch during the session would see it; ``untraded`` removes the raw
-    minutes from ``since`` up to it, as a thin contract would show them;
-    ``extra`` appends one raw minute.
+    The stamps have the real shape: the night session reads 15:01-05:00 and
+    the day session 08:46-13:45, each raw stamp the minute's end. Prices
+    follow a fixed rule so expectations can be worked by hand: the i-th
+    minute (0 at 15:01) opens at 10000 + i, reaches 5 points either side,
+    closes 1 point up and trades one lot.
+
+    ``since`` and ``through`` cut the feed at raw stamps (Taipei wall clock),
+    as a window starting at a date or a fetch during the session would see
+    it; ``untraded`` removes the raw minutes from ``since`` up to it, as a
+    thin contract would show them; ``extra`` appends one raw minute.
     """
-    frame = pd.read_csv(_TXFR1_TRADING_DAY, comment="#")
+    stamps = pd.date_range("2026-10-30 15:01", "2026-10-31 05:00", freq="min").append(
+        pd.date_range("2026-11-02 08:46", "2026-11-02 13:45", freq="min")
+    )
+    minute = pd.RangeIndex(len(stamps))
+    frame = pd.DataFrame(
+        {
+            "ts": stamps.strftime("%Y-%m-%d %H:%M"),
+            "Open": 10000 + minute,
+            "High": 10005 + minute,
+            "Low": 9995 + minute,
+            "Close": 10001 + minute,
+            "Volume": 1,
+        }
+    )
     if since is not None:
         frame = frame.loc[frame["ts"] >= since]
     if untraded is not None:
@@ -392,8 +406,8 @@ class TestFetchOhlcv:
 
 
 class TestTaifexSessionBars:
-    """Real TXFR1 minutes rebuilt into session bars, checked against TAIFEX's
-    sessions and TradingView's TAIFEX:TXF1! bars for the same day."""
+    """Minutes stamped as Shioaji stamps TXFR1, rebuilt into TAIFEX session
+    bars. The night session is minutes 0-839 and the day session 840-1139."""
 
     def test_minutes_start_at_each_session_open(self):
         minutes = _fetch_txfr1("1m").index
@@ -418,34 +432,38 @@ class TestTaifexSessionBars:
         assert _taipei("2026-10-31 05:00") not in bars
         assert _taipei("2026-11-02 13:45") not in bars
 
-    def test_hourly_bar_matches_tradingview(self):
+    def test_first_day_hour_holds_the_sixty_minutes_from_the_open(self):
+        """Raw 08:46-09:45 are minutes 840-899: open 10000 + 840, high
+        10005 + 899, low 9995 + 840, close 10001 + 899."""
         bar = _fetch_txfr1("1h").loc[_taipei("2026-11-02 08:45")]
 
-        assert (bar["open"], bar["high"], bar["low"], bar["close"]) == (
-            45000,
-            45265,
-            44700,
-            45057,
+        assert (bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"]) == (
+            10840,
+            10904,
+            10835,
+            10900,
+            60,
         )
 
     def test_daily_bar_keeps_the_whole_trading_day(self):
+        """Every minute of the trading day, 0-1139."""
         days = _fetch_txfr1("1d")
 
         assert list(days.index) == [_taipei("2026-10-30 15:00")]
         day = days.iloc[0]
         assert (day["open"], day["high"], day["low"], day["close"], day["volume"]) == (
-            45395,
-            45420,
-            44052,
-            45256,
-            96347,
+            10000,
+            11144,
+            9995,
+            11140,
+            1140,
         )
 
     def test_a_print_after_the_close_is_dropped_not_a_stub_bar(self, caplog):
         """A print stamped one minute past the last day minute starts at the
         13:45 close, which is outside the session."""
-        late = {"ts": "2026-11-02 13:46", "Open": 45300, "High": 45300}
-        late |= {"Low": 45300, "Close": 45300, "Volume": 1}
+        late = {"ts": "2026-11-02 13:46", "Open": 20000, "High": 20000}
+        late |= {"Low": 20000, "Close": 20000, "Volume": 1}
         kbars = _txfr1_kbars(extra=late)
 
         with caplog.at_level("WARNING"):
@@ -454,8 +472,8 @@ class TestTaifexSessionBars:
 
         assert hours.index[-1] == _taipei("2026-11-02 12:45")
         assert "dropped 1 bar" in caplog.text
-        assert days.iloc[0]["close"] == 45256
-        assert days.iloc[0]["volume"] == 96347
+        assert days.iloc[0]["close"] == 11140
+        assert days.iloc[0]["volume"] == 1140
 
     @pytest.mark.parametrize(
         ("timeframe", "first_bar"),
@@ -509,7 +527,7 @@ class TestLiveBarClock:
 
         assert forming.index[-1] == _taipei("2026-10-31 04:00")
         assert completed.index[-1] == _taipei("2026-11-02 08:45")
-        assert completed.iloc[-1]["close"] == 45057
+        assert completed.iloc[-1]["close"] == 10900
 
     def test_the_forming_minute_is_dropped(self):
         minutes = self._fetch_completed_at("2026-11-02 09:00:30", "1m", through="2026-11-02 09:01")

@@ -4503,6 +4503,97 @@ class TestLiveExecutionLifecycle:
         assert runner._adv_session_labels == {"AAA": t1.date().isoformat()}
         assert runner._adv_filled_quantities == {"AAA": 0.0}
 
+    @staticmethod
+    def _taifex_adv_trader(adapter: MagicMock) -> LiveTrader:
+        runner = make_live_trader(
+            _HoldStrategy(),
+            adapter,
+            config=_test_cfg(
+                mode="live",
+                symbols=["AAA"],
+                timeframe="H1",
+                instrument_overrides={"AAA": {"calendar_id": "XTAIFEX"}},
+                execution=ExecutionPolicy(
+                    max_bar_volume_participation_rate=None,
+                    adv_lookback_sessions=1,
+                    max_adv_participation_rate=0.5,
+                    warmup_periods=5,
+                ),
+            ),
+        )
+        runner._last_prices = {"AAA": 100.0}
+        return runner
+
+    @pytest.mark.parametrize(
+        ("bar", "executed_at", "session"),
+        [
+            ("2026-11-02 12:45", "2026-11-02 13:45:00", "2026-11-02"),
+            ("2026-11-03 04:00", "2026-11-03 05:00:00", "2026-11-03"),
+            ("2026-11-02 12:45", "2026-11-02 13:45:01", "2026-11-02"),
+        ],
+    )
+    def test_a_fill_at_or_after_a_taifex_close_counts_toward_the_session_it_ended(
+        self, bar, executed_at, session
+    ):
+        """A fill stamped exactly at the 13:45 or 05:00 close, or just after
+        it, belongs to the session that last traded, though bars exclude that
+        instant."""
+
+        def taipei(value: str) -> datetime:
+            return pd.Timestamp(value, tz="Asia/Taipei").tz_convert("UTC").to_pydatetime()
+
+        adapter = _mock_order_adapter()
+        adapter.place_order.return_value = _broker_report(
+            order_id="a-1", quantity=1.0, average=100.0, executed_at=taipei(executed_at)
+        )
+        runner = self._taifex_adv_trader(adapter)
+        runner._adv_session_labels = {"AAA": session}
+        runner._adv_filled_quantities = {"AAA": 2.0}
+
+        runner._execute_live_decision(
+            [OrderIntent(action="long", symbol="AAA", quantity=1.0)],
+            {"AAA": {"close": 100.0, "volume": 10_000.0}},
+            taipei(bar),
+            lagged_adv_by_symbol={"AAA": 10_000.0},
+        )
+
+        assert runner._positions["AAA"].quantity == pytest.approx(1.0)
+        assert runner._adv_session_labels == {"AAA": session}
+        assert runner._adv_filled_quantities == {"AAA": pytest.approx(3.0)}
+
+    def test_a_fill_the_calendar_cannot_place_changes_nothing(self):
+        """Raising before any state changes is what makes the next poll a
+        safe retry: it recomputes the same fill delta."""
+        adapter = _mock_order_adapter()
+        executed_at = datetime(2026, 11, 2, 5, 45, tzinfo=UTC)
+        adapter.place_order.return_value = _broker_report(
+            order_id="a-1", quantity=1.0, average=100.0, executed_at=executed_at
+        )
+        runner = self._taifex_adv_trader(adapter)
+        runner._adv_session_labels = {"AAA": "2026-11-02"}
+        runner._adv_filled_quantities = {"AAA": 2.0}
+        cash = runner._cash
+
+        with (
+            patch(
+                "librae.live.engine.execution_session_label",
+                side_effect=ValueError("no session"),
+            ),
+            pytest.raises(ValueError, match="no session"),
+        ):
+            runner._execute_live_decision(
+                [OrderIntent(action="long", symbol="AAA", quantity=1.0)],
+                {"AAA": {"close": 100.0, "volume": 10_000.0}},
+                executed_at - timedelta(hours=1),
+                lagged_adv_by_symbol={"AAA": 10_000.0},
+            )
+
+        assert runner._positions == {}
+        assert runner._cash == cash
+        assert runner._adv_session_labels == {"AAA": "2026-11-02"}
+        assert runner._adv_filled_quantities == {"AAA": 2.0}
+        assert [order.filled_quantity for order in runner._active_orders] == [0.0]
+
     def test_restored_live_target_waits_for_a_fresh_completed_bar(self):
         store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _mock_order_adapter()

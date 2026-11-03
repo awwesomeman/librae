@@ -467,12 +467,16 @@ date. The basis is TAIFEX's
 (2025-06-23 edition): Q3 assigns night-session trades to the next regular
 session, and Q11 publishes each session's prices separately. TradingView's
 `TAIFEX:TXF1!` builds the same 60-minute bars, stamped at their start
-(observed for 2026-11-02).
+(observed for 2026-11-02: the 08:45 bar was O/H/L/C
+45000/45265/44700/45057).
 
 Segments are half-open: `XTAIFEX`'s are `[15:00, 05:00)` and `[08:45, 13:45)`,
 so the last day minute starts at 13:44. A print stamped at a close or later
 came after it and belongs to no bar of that session: resampling drops it with
-a warning rather than opening a one-minute stub bar.
+a warning rather than opening a one-minute stub bar. An execution is an
+instant, not a bar: a fill stamped at a close, or between segments, counts
+toward the session that last traded (`execution_session_label`), and that is
+the session its ADV budget books; one stamped after a close is logged.
 
 Mitake (三竹) charts differ (a user's observation, unconfirmed by any Mitake
 document): they stamp intraday bars at their end and align hourly bars to the
