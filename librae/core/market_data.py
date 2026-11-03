@@ -12,6 +12,7 @@ import pandas as pd
 
 from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
+    bar_start_problem,
     bucket_geometry_is_known,
     period_close,
     period_start,
@@ -541,6 +542,60 @@ def validate_bar_cadence(
     diffs = np.diff(ordinals)
     if np.any(diffs < interval) or np.any(diffs % interval != 0):
         raise ValueError(f"{context} timestamps are not aligned to timeframe={canonical}")
+
+
+class BarTimestampError(ValueError):
+    """Bar timestamps that are not bar starts on their calendar.
+
+    A type of its own because no retry can fix one: a caller holding rows in
+    an ordered queue drops such a row instead of retrying it forever.
+    """
+
+
+_REPORTED_BAR_STARTS = 5
+
+
+def validate_bar_starts(
+    timestamps: object,
+    timeframe: str,
+    calendar_id: str,
+    *,
+    session_mode: MarketDataSessionMode,
+    context: str = "bar data",
+) -> None:
+    """Reject the batch if any timestamp is not a bar start on this calendar.
+
+    The rule per timestamp is ``bar_start_problem``. It catches what the
+    other checks miss because the series stays well formed: a feed stamped at
+    bar close or in the wrong time zone is still increasing and evenly spaced.
+    Every timestamp is checked before raising, so the error says how many are
+    wrong and shows the first few with the reason for each.
+
+    Order and duplicates are not judged here: a table holding many contracts
+    per bar repeats each timestamp.
+    """
+    index = _utc_index(timestamps, field_name="bar timestamps").unique().sort_values()
+    problems = [
+        (timestamp, problem)
+        for timestamp in index
+        if (
+            problem := bar_start_problem(
+                timestamp, timeframe, calendar_id, session_mode=session_mode
+            )
+        )
+        is not None
+    ]
+    if not problems:
+        return
+    shown = "; ".join(
+        f"{timestamp.isoformat()} ({problem})"
+        for timestamp, problem in problems[:_REPORTED_BAR_STARTS]
+    )
+    raise BarTimestampError(
+        f"{context}: {len(problems)} of {len(index)} timestamps are not "
+        f"{to_canonical(timeframe)} bar starts on calendar {calendar_id!r} "
+        f"({session_mode}); first {min(len(problems), _REPORTED_BAR_STARTS)}: {shown}"
+    )
 
 
 def normalize_bar_times(
