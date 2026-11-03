@@ -6887,7 +6887,9 @@ class TestLiveExecutionLifecycle:
         runner._poll_cycle()
 
         assert runner._halted is True
-        assert runner._active_orders[0].status == "cancel_pending"
+        # The halt's status read, just after the cancel, still says accepted.
+        assert runner._active_orders[0].status == "accepted"
+        assert runner._active_orders[0].cancel_requested is True
         adapter.cancel_order.assert_called_once()
 
         runner._poll_cycle()

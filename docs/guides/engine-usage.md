@@ -605,9 +605,17 @@ for example when a withdrawal left the account holding less than the ledger.
 While an order remains active, polling still refreshes the OHLCV cache,
 heartbeat, and staleness state, but it does not run a new strategy decision.
 An optional local wall-clock timeout cancels an over-age order, preserves any
-confirmed partial fill, and halts dependent work for review. A non-terminal
-cancel acknowledgement remains `cancel_pending` and is reconciled without
-issuing duplicate cancel requests. Operational/error
+confirmed partial fill, and halts dependent work for review. A cancel the
+engine sent goes out at most once per cycle, and not again while the venue
+reports it `cancel_pending`; one the venue turns down, leaving the order
+working, is sent again. An order the venue reports `cancel_pending` on its own
+is polled until it ends, and is under its timeout again if it reverts to
+working. A status report that cannot be applied to its order (another order
+id, a cumulative fill that went backwards) leaves the order tracked and under
+its timeout, alerts once naming it, and lets the rest of the cycle run; at
+startup it still fails closed. While an operator flatten is pending, any
+status that cannot be read or applied is left to the flatten's own cancel.
+Operational/error
 halts cancel tracked strategy orders. A drawdown
 breach instead clears the pending strategy decision and keeps its emergency
 reduce/close queue active until broker reports reach a terminal state,
@@ -983,16 +991,22 @@ adapter at submission.
   [Reconciliation](#reconciliation-live-only)). See the recovery procedure in
   [the operational runbook](operational-runbook.md).
 - Halt durability: every halt applies in memory, writes its checkpoint, and
-  only then cancels, each cancel recording itself before it is sent; the alert
-  names a cancellation that fails. A broker answer that cannot be applied to
+  only then cancels, each cancel recording itself before it is sent. Every
+  tracked order the venue has not confirmed ended gets a cancel, whether its
+  last status was `cancel_pending` or could not be read at all; the alert
+  names a cancellation that fails and every order still awaiting the venue's
+  confirmation. A broker answer that cannot be applied to
   its order (another order id, a cumulative fill that went backwards, another
   quantity) fails the cancellation but never holds its cancel back, since the
   order may still be working, nor the cancels of the other tracked orders.
   Met while a running account finishes a cancel, such as a timeout's after a
-  restart, it then halts the account; an operator flatten retries its cancels
-  next cycle instead. Each later cycle retries that cancellation
-  before any order work and stops there while it fails; so does a repeated
-  `halt()`, which raises until it runs through. A **Halt Cancellation
+  restart, it then halts the account; an operator flatten instead resends that
+  cancel each cycle and waits for the order, since a halt would refuse it.
+  The cancellation stays owed until the venue confirms every tracked
+  order ended: each later cycle retries it before any order work, and a
+  failure stops the cycle there, except an answer that cannot be applied,
+  which alerts and lets reconciliation run; a repeated `halt()` raises until
+  it runs through. A **Halt Cancellation
   Completed** alert follows once no order is tracked. If the checkpoint write fails, nothing is
   cancelled yet, the halt alert still goes out naming the failure, the error
   propagates (to `halt()`'s caller, or as a poll-cycle error), and the run
