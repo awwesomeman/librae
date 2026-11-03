@@ -57,7 +57,8 @@ class TestFromMarket:
         market = get_market("tw_futures")
         cm = CostModel.from_market(market, multiplier=200.0, tick_size=1.0)
         assert np.isclose(cm.multiplier, 200.0)
-        assert np.isclose(cm.min_commission, 100.0)
+        assert np.isclose(cm.min_commission, 0.0)
+        assert cm.commission_per_contract == 0.0  # per-symbol only, never from the market
 
     def test_tick_size_omitted_falls_back_to_market_default(self) -> None:
         market = get_market("crypto")
@@ -373,9 +374,10 @@ class TestFromConfig:
         futures = CostModel.from_config(cfg, symbol="TXFR1")
         equity = CostModel.from_config(cfg, symbol="MU")
 
-        assert futures.min_commission == 100.0
+        assert futures.commission_per_contract == 40.0
         assert futures.long_margin_rate == 0.075
         assert equity.min_commission == 0.0
+        assert equity.commission_per_contract == 0.0
         assert equity.long_margin_rate == 1.0
         assert equity.short_margin_rate == 0.5
 
@@ -407,6 +409,105 @@ class TestFromConfig:
             symbol_cost_overrides={"MXFR1": {"multiplier": 222.0}},
         )
         assert CostModel.from_config(cfg, symbol="TXFR1").multiplier == 111.0
+
+
+class TestPerContractCommission:
+    """commission_per_contract scales with contracts; min_commission floors
+    the per-trade total; the fee comes from each symbol's registry entry."""
+
+    @staticmethod
+    def _cfg(symbol: str, **kwargs):
+        from librae.config.symbols import get_symbol
+        from librae.core.run_config import AccountConfig, RunConfig
+
+        info = get_symbol(symbol)
+        return RunConfig(
+            strategy_name="x",
+            symbols=[symbol],
+            timeframe="5m",
+            market=info.market,
+            data_source=info.data_source,
+            account=AccountConfig(currency=info.currency, initial_cash=1_000_000.0),
+            mode="backtest",
+            **kwargs,
+        )
+
+    def test_fee_and_rate_add_then_floor_applies_to_the_total(self) -> None:
+        cm = CostModel(
+            multiplier=1.0,
+            commission_rate=0.001,
+            min_commission=100.0,
+            commission_per_contract=40.0,
+            slippage_ticks=0.0,
+            tick_size=1.0,
+            tax_rate=0.0,
+        )
+        assert cm.calc_commission(1_000.0, 1.0) == pytest.approx(100.0)  # 40 + 1 < floor
+        assert cm.calc_commission(1_000.0, 10.0) == pytest.approx(410.0)  # 400 + 10
+
+    @pytest.mark.parametrize(
+        ("symbol", "fee"),
+        [
+            ("TXFR1", 40.0),
+            ("TXFR2", 40.0),
+            ("MXFR1", 30.0),
+            ("MXFR2", 30.0),
+            ("TMFR1", 20.0),
+            ("TMFR2", 20.0),
+        ],
+    )
+    def test_each_tw_future_charges_its_own_fee_per_contract(self, symbol: str, fee: float) -> None:
+        cm = CostModel.from_config(self._cfg(symbol))
+        assert cm.commission_per_contract == fee
+        assert cm.min_commission == 0.0
+        assert cm.calc_commission(22_000.0, 1.0) == pytest.approx(fee)
+        assert cm.calc_commission(22_000.0, 10.0) == pytest.approx(10 * fee)
+
+    @pytest.mark.parametrize("side", ["long", "short"])
+    def test_buy_and_sell_are_each_charged(self, side: str) -> None:
+        from librae.core.executor import calc_trade_pnl
+
+        cm = CostModel.from_config(self._cfg("TXFR1"))
+        entry_commission = cm.calc_commission(22_000.0, 10.0)
+        pnl = calc_trade_pnl(
+            entry_price=22_000.0,
+            exit_price=22_100.0,
+            quantity=10.0,
+            side=side,
+            cost_model=cm,
+            entry_commission=entry_commission,
+            entry_slippage=0.0,
+        )
+        assert entry_commission == pytest.approx(400.0)
+        assert pnl.commission == pytest.approx(800.0)  # 40 x 10 contracts x 2 sides
+
+    def test_symbol_cost_overrides_replaces_the_registry_fee(self) -> None:
+        cfg = self._cfg("TXFR1", symbol_cost_overrides={"TXFR1": {"commission_per_contract": 25.0}})
+        assert CostModel.from_config(cfg).calc_commission(22_000.0, 2.0) == pytest.approx(50.0)
+
+    def test_other_markets_are_unaffected(self) -> None:
+        btc = CostModel.from_config(self._cfg("BTCUSDT"))
+        btc_quarterly = CostModel.from_config(self._cfg("BTCUSDT_QUARTERLY"))
+        mu = CostModel.from_config(self._cfg("MU"))
+
+        assert btc.commission_per_contract == 0.0
+        assert btc_quarterly.commission_per_contract == 0.0
+        assert mu.commission_per_contract == 0.0
+        assert btc.calc_commission(50_000.0, 0.5) == pytest.approx(25.0)  # 0.1% of notional
+        assert btc_quarterly.calc_commission(50_000.0, 2.0) == pytest.approx(100.0)
+        assert mu.calc_commission(100.0, 10.0) == 0.0
+
+    def test_negative_fee_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="commission_per_contract"):
+            CostModel(
+                multiplier=1.0,
+                commission_rate=0.0,
+                min_commission=0.0,
+                commission_per_contract=-1.0,
+                slippage_ticks=0.0,
+                tick_size=1.0,
+                tax_rate=0.0,
+            )
 
 
 class TestDescribeSymbols:

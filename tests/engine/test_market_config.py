@@ -34,7 +34,7 @@ class TestLoadMarketConfigs:
 
     def test_tw_futures_fields(self, markets):
         tw = markets["tw_futures"]
-        assert tw.min_commission == 100.0
+        assert tw.min_commission == 0.0
         assert tw.tax_rate == 0.00002
         assert tw.long_margin_rate == 0.075
         assert tw.short_margin_rate == 0.075

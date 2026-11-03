@@ -1401,7 +1401,9 @@ def _size_position(
     )
     if linear < EPSILON:
         return 0.0
-    marginal_commission = notional_per_unit * cost_model.commission_rate
+    marginal_commission = (
+        notional_per_unit * cost_model.commission_rate + cost_model.commission_per_contract
+    )
 
     # Below breakeven_qty, commission is pinned at the flat floor; above it,
     # commission scales with quantity. Solve in whichever regime `cash`

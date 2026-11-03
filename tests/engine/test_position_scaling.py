@@ -724,8 +724,8 @@ class TestSizePosition:
         assert outlay == pytest.approx(100_000.0)
 
     def test_flat_only_commission_uses_full_cash(self):
-        """tw_futures-shaped model: commission_rate=0.0, so commission is
-        always exactly min_commission regardless of quantity."""
+        """commission_rate=0.0, so commission is always exactly
+        min_commission regardless of quantity."""
         cm = CostModel(
             multiplier=1.0,
             commission_rate=0.0,
@@ -744,3 +744,27 @@ class TestSizePosition:
         )
         outlay = cm.estimate_entry_outlay(50.0, positions["TEST"].quantity, side="long")
         assert outlay == pytest.approx(10_000.0)
+
+    def test_per_contract_fee_is_charged_on_every_unit_when_sizing(self):
+        """Above the floor, commission_per_contract is a per-unit cost, so
+        sizing must price it into every unit or the outlay overshoots cash."""
+        cm = CostModel(
+            multiplier=1.0,
+            commission_rate=0.0,
+            min_commission=100.0,
+            commission_per_contract=2.0,
+            slippage_ticks=0.0,
+            tick_size=1.0,
+            tax_rate=0.0,
+        )
+        positions: dict[str, PositionState] = {}
+        _run_actions(
+            [OrderIntent(action="long", symbol="TEST")],
+            positions,
+            cash=10_000.0,
+            prices={"TEST": 50.0},
+            cm=cm,
+        )
+        quantity = positions["TEST"].quantity
+        assert quantity == pytest.approx(10_000.0 / 52.0)
+        assert cm.estimate_entry_outlay(50.0, quantity, side="long") == pytest.approx(10_000.0)
