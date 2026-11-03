@@ -3,23 +3,33 @@
 Every halt alert records one ``halted`` event, so one stop can record several.
 Each event is offered to ``on_runtime_event`` after the action it records, so
 a slow or failing sink can neither delay it nor undo it: a sink that raises is
-logged, and the halt still happens and still raises its own error. A
-placement's error text reaches its ``broker_orders`` row; a definite refusal
-is ``rejected``, while an unknown outcome keeps its unresolved status because
-the order may still rest at the venue.
+logged, and the halt still happens and still raises its own error. A failed
+grouped leg also stops a target rebalance, which would otherwise send it
+again in the same cycle. A placement's error text reaches its
+``broker_orders`` row; a definite refusal is ``rejected``, while an unknown
+outcome keeps its unresolved status because the order may still rest at the
+venue.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import pytest
 from librae.core.run_config import RiskPolicy
-from librae.core.strategy import OrderIntent
+from librae.core.strategy import OrderIntent, PortfolioWeights
 from librae.live.executor import OrderRejectedError
 
 from tests.engine.live_factories import TEST_CLOCK_NOW, _HoldStrategy, _test_cfg, make_live_trader
-from tests.engine.test_live_flatten import _adapter, _bars, _titled, _trader
+from tests.engine.test_live_flatten import (
+    _adapter,
+    _bars,
+    _position,
+    _submitted,
+    _titled,
+    _trader,
+)
 from tests.engine.test_live_halt_durability import OUTAGE, _resting_adapter, _store_outage
 from tests.engine.test_live_runner import _broker_report, _mock_order_adapter
 
@@ -287,6 +297,51 @@ class TestGroupFailureIsRecorded:
         assert _of_type(events, "group_failed") == []
         [halted] = _of_type(events, "halted")
         assert halted.detail["reason"] == "Order Rejected"
+
+    @pytest.mark.parametrize("paused", [False, True])
+    @pytest.mark.parametrize("outcome", ["rejected", "cancelled"])
+    def test_a_failed_rebalance_leg_is_sent_once_and_stops_the_rebalance(self, outcome, paused):
+        """A target rebalance that kept going would replan the same leg and send it again."""
+        adapter = _adapter(below_minimum="")
+
+        def place_order(signal):
+            if adapter.place_order.call_count > 3:
+                raise RuntimeError("resubmitted within one cycle")
+            if signal["canonical_symbol"] != "AAA":
+                return _broker_report(
+                    order_id=signal["client_order_id"], quantity=signal["quantity"]
+                )
+            if outcome == "rejected":
+                raise OrderRejectedError("ReduceOnly Order is rejected.")
+            return _broker_report(
+                order_id=signal["client_order_id"],
+                status="canceled",
+                quantity=signal["quantity"],
+                filled=0.0,
+            )
+
+        adapter.place_order.side_effect = place_order
+        trader, events, alerts = _trader(adapter)
+        if paused:
+            trader.pause_entries("desk review")
+        trader._positions = {
+            symbol: replace(_position(symbol), group_id="pair") for symbol in ("AAA", "BBB")
+        }
+
+        complete = trader._execute_live_decision(
+            PortfolioWeights({"BBB": 0.0}), _bars(), TEST_CLOCK_NOW
+        )
+
+        assert _submitted(adapter) == ["AAA"]
+        assert complete is True
+        assert trader._halted is False
+        assert set(trader._positions) == {"AAA", "BBB"}
+        assert trader._live_rebalance is None
+        assert trader._state_store.load(trader._state_key).live_rebalance is None
+        [failed] = _of_type(events, "group_failed")
+        assert failed.detail["group_id"] == "pair"
+        [alert] = _titled(alerts, f"Order {outcome.title()}")
+        assert "target rebalance stopped" in alert["message"]
 
 
 class TestPlacementErrorReachesTheOrderRow:

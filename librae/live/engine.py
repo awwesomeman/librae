@@ -2176,7 +2176,9 @@ class LiveTrader:
         and so does an account fault, which every later order would repeat.
         A grouped leg's confirmed failure cancels
         only that group's other still-active legs and alerts — unrelated
-        groups and independent intents keep executing. Returns True if the
+        groups and independent intents keep executing. A target rebalance
+        stops instead, since replanning it would send the same leg again;
+        the next decision replans from the book. Returns True if the
         whole account was halted (caller should stop advancing this tick),
         False otherwise (caller should continue to the next active order).
         """
@@ -2201,11 +2203,16 @@ class LiveTrader:
             for sibling in list(self._active_orders):
                 if sibling.request.group_id == group_id:
                     self._cancel_tracked_order(sibling)
+        scope = "other groups unaffected"
+        if self._live_rebalance is not None:
+            self._live_rebalance = None
+            self._persist_state()
+            scope = "the target rebalance stopped"
         logger.error("%s: %s", title, message)
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}",
-            message=f"{message}; group {group_id!r} cancelled, other groups unaffected.",
+            message=f"{message}; group {group_id!r} cancelled, {scope}.",
         )
         self._record_runtime_event(
             "group_failed",
