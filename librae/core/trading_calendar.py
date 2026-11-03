@@ -59,16 +59,26 @@ def _exchange_calendar(calendar_id: str) -> ExchangeCalendar:
         raise ValueError(f"unknown calendar_id={calendar_id!r}") from exc
 
 
-# Typhoon closures TWSE and TAIFEX announced that exchange_calendars' XTAI
-# does not have. A date leaves this list once a release has it; a test fails
-# when that happens. Sources, TWSE then TAIFEX:
+# Closures TWSE and TAIFEX announced that exchange_calendars' XTAI does not
+# have. A date leaves this list once a release has it; a test fails when that
+# happens. Sources, TWSE then TAIFEX where TAIFEX published its own notice:
+# 2022-02-04 https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20220101&response=json
+#            (adjusted holiday, no trading and no settlement)
+# 2023-01-18 https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20230101&response=json
+#            (no trading, settlement only)
 # 2024-10-31 https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69236c2e30192dd5179bc0327.pdf
 #            https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=15446
 # 2026-07-10 https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69ef76943019f46cb86ae0110.pdf
 #            https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=17137
 # 2026-10-23 https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d6a0fa351b01a1638507940202.pdf
 #            https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=17441
-_XTAI_CLOSURES_MISSING_UPSTREAM = (date(2024, 10, 31), date(2026, 7, 10), date(2026, 10, 23))
+_XTAI_CLOSURES_MISSING_UPSTREAM = (
+    date(2022, 2, 4),
+    date(2023, 1, 18),
+    date(2024, 10, 31),
+    date(2026, 7, 10),
+    date(2026, 10, 23),
+)
 
 
 def _xtai_calendar() -> ExchangeCalendar:

@@ -399,10 +399,21 @@ def test_announced_closures_missing_upstream_are_still_missing(closure: date) ->
     assert xcals.get_calendar("XTAI").is_session(pd.Timestamp(closure))
 
 
-@pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR])
-def test_an_announced_typhoon_closure_is_not_a_session(calendar_id: str) -> None:
-    with pytest.raises(ValueError, match="outside"):
-        session_label(_taipei("2026-10-23 10:00"), calendar_id)
+_ANNOUNCED_CLOSURES = ["2022-02-04 10:00", "2023-01-18 10:00", "2026-10-23 10:00"]
+
+
+@pytest.mark.parametrize("instant", _ANNOUNCED_CLOSURES)
+@pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR])
+def test_an_announced_closure_is_not_a_session(calendar_id: str, instant: str) -> None:
+    with pytest.raises(ValueError):
+        session_label(_taipei(instant), calendar_id)
+
+
+@pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR])
+def test_a_closure_that_upstream_already_has_stays_closed(calendar_id: str) -> None:
+    # 2023-01-19 is marked like 01-18 on the exchange's table and needs no entry.
+    with pytest.raises(ValueError):
+        session_label(_taipei("2023-01-19 10:00"), calendar_id)
 
 
 def test_a_night_segment_before_a_closure_counts_toward_the_next_session() -> None:
@@ -411,3 +422,19 @@ def test_a_night_segment_before_a_closure_counts_toward_the_next_session() -> No
     assert next_segment_open_after(_taipei("2026-10-23 05:00"), TAIFEX_INDEX_CALENDAR) == _taipei(
         "2026-10-27 08:45"
     )
+
+
+@pytest.mark.parametrize("calendar_id", [TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR])
+@pytest.mark.parametrize(
+    ("night", "next_session"),
+    [
+        # 01-27 and 01-28 are closed upstream and 02-04 by this list: next is 02-07.
+        ("2022-01-26 20:00", date(2022, 2, 7)),
+        # 01-18 is closed by this list, 01-19 and the holidays upstream: next is 01-30.
+        ("2023-01-17 20:00", date(2023, 1, 30)),
+    ],
+)
+def test_the_night_before_a_lunar_new_year_closure_belongs_to_the_session_after_it(
+    calendar_id: str, night: str, next_session: date
+) -> None:
+    assert session_label(_taipei(night), calendar_id) == next_session
