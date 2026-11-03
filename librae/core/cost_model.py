@@ -39,8 +39,11 @@ class CostModel:
 
     Attributes:
         multiplier: Contract multiplier. Spot=1.0, futures=tick_value/tick_size.
-        commission_rate: Per-side rate (e.g. 0.001 = 10 bps).
-        min_commission: Minimum commission per trade (e.g. 100 TWD for TW futures).
+        commission_rate: Per-side rate on notional (e.g. 0.001 = 10 bps).
+        min_commission: Per-side minimum commission per trade.
+        commission_per_contract: Per-side fixed fee per unit of quantity
+            (per contract for futures). See calc_commission for how the three
+            commission fields combine.
         slippage_ticks: Number of ticks slippage per side.
         tick_size: Minimum price increment.
         tax_rate: Per-side tax rate (e.g. 0.00002 for TW futures). Applied symmetrically on both buy and sell.
@@ -77,6 +80,7 @@ class CostModel:
     maintenance_margin_rate: float = 0.0
     long_margin_mode: MarginMode = "unlevered"
     short_margin_mode: MarginMode = "unlevered"
+    commission_per_contract: float = 0.0
 
     def __post_init__(self) -> None:
         values = {
@@ -93,6 +97,7 @@ class CostModel:
         for name in (
             "commission_rate",
             "min_commission",
+            "commission_per_contract",
             "slippage_ticks",
             "tax_rate",
             "volume_impact_ticks",
@@ -133,6 +138,7 @@ class CostModel:
             maintenance_margin_rate=0.0,
             long_margin_mode="unlevered",
             short_margin_mode="unlevered",
+            commission_per_contract=0.0,
         )
 
     @classmethod
@@ -146,8 +152,9 @@ class CostModel:
         """Resolve cost model for one symbol, with standard priority:
         explicit override > config.symbol_cost_overrides[symbol] > config.cost_overrides
         (run-wide fallback) > the built-in symbol registry's per-symbol
-        multiplier (spot auto-1.0, contract_* required-explicit) and
-        tick_size (optional override) > market-level defaults for
+        multiplier (spot auto-1.0, contract_* required-explicit),
+        tick_size (optional override) and commission_per_contract
+        (default 0) > market-level defaults for
         everything else (see librae/config/symbols.py's module docstring).
 
         symbol: which symbol to resolve for — defaults to config.symbol
@@ -175,9 +182,11 @@ class CostModel:
         try:
             sym = get_symbol(symbol)
             multiplier, tick_size = sym.multiplier, sym.tick_size
+            commission_per_contract = sym.commission_per_contract
             symbol_market = sym.market
         except KeyError:
             multiplier, tick_size = None, None
+            commission_per_contract = 0.0
             symbol_market = config.market
 
         route = (config.instrument_overrides or {}).get(symbol, {})
@@ -203,7 +212,14 @@ class CostModel:
                 "contract_* instruments need it explicit)."
             )
 
-        base = asdict(cls.from_market(mc, multiplier=multiplier, tick_size=tick_size))
+        base = asdict(
+            cls.from_market(
+                mc,
+                multiplier=multiplier,
+                tick_size=tick_size,
+                commission_per_contract=commission_per_contract,
+            )
+        )
         base.update(overrides)
         return cls(**base)
 
@@ -214,10 +230,13 @@ class CostModel:
         *,
         multiplier: float,
         tick_size: float | None = None,
+        commission_per_contract: float = 0.0,
     ) -> CostModel:
         """Build CostModel from MarketConfig (librae/config/market_config.py) + a per-symbol
         multiplier (required — see librae/config/symbols.py). tick_size
-        defaults to the market's approximate value when not overridden."""
+        defaults to the market's approximate value when not overridden.
+        commission_per_contract is per-symbol only: contracts in one market
+        are charged different per-contract fees."""
         return cls(
             multiplier=multiplier,
             commission_rate=market.commission_rate,
@@ -231,6 +250,7 @@ class CostModel:
             maintenance_margin_rate=market.maintenance_margin_rate,
             long_margin_mode=market.long_margin_mode,
             short_margin_mode=market.short_margin_mode,
+            commission_per_contract=commission_per_contract,
         )
 
     def calc_pnl(self, entry_price: float, exit_price: float, quantity: float) -> float:
@@ -242,9 +262,20 @@ class CostModel:
         return (exit_price - entry_price) * quantity * self.multiplier
 
     def calc_commission(self, price: float, quantity: float) -> float:
-        """Single-side commission with minimum floor."""
+        """Single-side commission.
+
+        max(|quantity| * commission_per_contract + |notional| * commission_rate,
+            min_commission)
+
+        The per-contract fee and the rate add, and min_commission floors the
+        sum for the whole trade: a per-unit fee with a per-trade minimum, as
+        in zipline's PerShare, plus the rate term on top.
+        """
         notional = price * quantity * self.multiplier
-        return max(abs(notional) * self.commission_rate, self.min_commission)
+        return max(
+            abs(quantity) * self.commission_per_contract + abs(notional) * self.commission_rate,
+            self.min_commission,
+        )
 
     def calc_slippage(self, quantity: float, *, bar_volume: float | None = None) -> float:
         """Single-side slippage cost in quote currency.

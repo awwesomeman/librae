@@ -432,7 +432,7 @@ document scoped to layering, boundaries, and naming conventions.
 | `ExecutionReport` | normalized live state: submitted/accepted/partial/cancel_pending/filled/cancelled/rejected plus confirmed execution facts, or a placement refusal's reason; no slippage cost, since the fill price already embeds it |
 | `TradeResult` | completed trade: full entry/exit info + PnL + periods_held |
 | `TradePnL` | PnL breakdown: gross_pnl, net_pnl, commission, slippage, tax |
-| `CostModel` | cost model (frozen): multiplier, commission_rate, slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
+| `CostModel` | cost model (frozen): multiplier, commission (commission_per_contract × qty + commission_rate × notional, floored at min_commission per trade), slippage_ticks, tick_size, tax, long/short_margin_rate, volume_impact_ticks (extra ticks at 100% bar participation, default 0 = off), maintenance_margin_rate (default 0 = liquidation simulation off) |
 | `ExecutionPolicy` | run-wide default fill field, liquidity caps, validated warmup retention, and optional local live-order timeout |
 | `RiskPolicy` | optional engine-level position, exposure, drawdown, order-notional, and live limit-price controls |
 | `RuntimePolicy` | sim/live polling cadence, reconciliation cadence, and market-data worker count; excluded from execution identity |
@@ -521,7 +521,7 @@ cost_model = CostModel.from_config(config, markets=my_markets)
 
 #### Per-symbol overrides (`RunConfig.symbol_cost_overrides`)
 
-`CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_cost_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`spot` auto-`multiplier=1.0`, `contract_*` required-explicit) > market-level defaults. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
+`CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_cost_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`multiplier`: `spot` auto-1.0, `contract_*` required-explicit; optional `tick_size`; `commission_per_contract`, default 0) > market-level defaults. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
 
 `Backtest.__init__` calls this once per symbol in the run (not just `config.symbol`) whenever `config=` is used and no explicit `cost_model=` override is given — a multi-asset run mixing symbols with different multipliers (e.g. `tw_futures`: TXFR1=200 + MXFR1=50 in the same run) gets each symbol's own multiplier automatically, not just the first symbol's applied to everyone.
 

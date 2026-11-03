@@ -2,7 +2,8 @@
 
 A small built-in registry, one entry per market type (crypto, tw_futures,
 us_equity), each holding cost parameters shared across every instrument
-traded in that market — commission/tax/slippage/margin rate structure, plus
+traded in that market — commission rate and floor, tax, slippage, margin
+rate structure (the per-contract commission is per-symbol, in symbols.py), plus
 tick_size as a low-stakes approximate default (it only feeds a backtest
 slippage-cost estimate, not PnL/margin sizing, so a market-wide value is an
 acceptable default for large, homogeneous universes like equities/crypto
@@ -53,8 +54,8 @@ class MarketConfig:
     """Market-level configuration for backtesting.
 
     Used by CostModel.from_market() to build a cost model, along with the
-    per-symbol multiplier (always) and tick_size (when overridden) from
-    librae/config/symbols.py's SymbolInfo.
+    per-symbol multiplier (always), tick_size (when overridden) and
+    commission_per_contract from librae/config/symbols.py's SymbolInfo.
     """
 
     name: str
@@ -97,15 +98,13 @@ _BUILTIN_MARKETS: dict[str, MarketConfig] = {
     ),
     "tw_futures": MarketConfig(
         name="tw_futures",
-        # min_commission is NOT exchange-set — taifex.com.tw's feeSchedules
-        # page states the exchange only regulates its own clearing fee; the
-        # fee a broker (e.g. Shioaji/永豐期貨) actually charges retail
-        # clients is negotiated bilaterally, with no exchange-mandated
-        # floor. 100.0 here is a backtest assumption about a typical retail
-        # floor, not a verifiable exchange fact — check the specific
-        # broker's fee schedule if it matters.
+        # Broker commission is charged per contract and differs by contract,
+        # so it lives on each symbol (commission_per_contract in symbols.py),
+        # not here. TAIFEX does not set it: taifex.com.tw's feeSchedules page
+        # states the exchange only regulates its own clearing fee, and the
+        # broker fee is negotiated with no exchange-mandated floor.
         commission_rate=0.0,
-        min_commission=100.0,
+        min_commission=0.0,
         # tax_rate verified via taifex.com.tw: 股價指數期貨類 交易稅 =
         # 契約金額 x 十萬分之2, flat rate regardless of contract size — same
         # for TX/MXF/TMF.
