@@ -452,18 +452,6 @@ class TestResolveSymbol:
         assert info.venue_symbol == "BTC/USDT"
         assert info.currency == "USDT"
 
-    def test_registered_commission_per_contract_matches_the_cost_model(self):
-        cfg = self._cfg(symbols=["MXFR1"], market="tw_futures", data_source="shioaji")
-        assert resolve_symbol(cfg, "MXFR1").commission_per_contract == 30.0
-
-        overridden = self._cfg(
-            symbols=["MXFR1"],
-            market="tw_futures",
-            data_source="shioaji",
-            symbol_cost_overrides={"MXFR1": {"commission_per_contract": 12.0}},
-        )
-        assert resolve_symbol(overridden, "MXFR1").commission_per_contract == 12.0
-
     def test_unregistered_symbol_uses_explicit_route(self):
         info = resolve_symbol(
             self._cfg(

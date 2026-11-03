@@ -3,8 +3,8 @@
 Market-level cost params (commission rate and floor, tax, slippage, margin,
 plus an approximate default tick_size — see market_config.py) are genuinely
 shared across every instrument in a market and live there (MarketConfig).
-The per-contract commission differs by contract and lives here, on
-SymbolInfo.
+The per-contract commission differs by product and lives here, in
+default_commission_per_contract.
 
 multiplier does NOT get a market-level fallback: for 'spot' instruments
 it's a mathematical invariant (buying spot = 1 unit for 1 unit) and
@@ -30,6 +30,7 @@ from the registry and must be selected by the caller.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -361,9 +362,7 @@ class SymbolInfo:
     _build_registry). tick_size is optional; None means "use
     market_config.py's market-level default" (an acceptable approximation
     — see this module's docstring for why tick_size and multiplier have
-    different risk profiles). commission_per_contract is the per-side broker
-    fee per contract; it defaults to 0 and has no market-level fallback
-    because contracts in one market are charged differently.
+    different risk profiles).
     ``price_increment`` is separate, authoritative order metadata and is
     never inferred from the cost model. Quantity step, minimum quantity,
     and minimum notional are optional shared execution
@@ -389,7 +388,6 @@ class SymbolInfo:
     min_quantity: float | None = None
     price_increment: float | None = None
     min_notional: float | None = None
-    commission_per_contract: float = 0.0
 
     def __post_init__(self) -> None:
         validate_instrument_type(self.instrument_type, context=f"{self.symbol!r} instrument_type")
@@ -402,13 +400,6 @@ class SymbolInfo:
             or self.multiplier <= 0
         ):
             raise ValueError(f"{self.symbol!r} multiplier must be finite and positive")
-        if (
-            isinstance(self.commission_per_contract, bool)
-            or not isinstance(self.commission_per_contract, Real)
-            or not isfinite(self.commission_per_contract)
-            or self.commission_per_contract < 0
-        ):
-            raise ValueError(f"{self.symbol!r} commission_per_contract must be finite and >= 0")
         if not self.venue_symbol:
             raise ValueError(f"{self.symbol!r} venue_symbol must be non-empty")
         if not self.currency:
@@ -497,6 +488,38 @@ class SymbolInfo:
             )
 
 
+# Per-side broker fee per contract for each TAIFEX index-futures product,
+# shared by every contract of that product. The user's broker rate
+# (大台 40 / 小台 30 / 微台 20 TWD), not an exchange rule: TAIFEX does not set
+# broker commission.
+_TW_FUTURES_COMMISSION_BY_ROOT: dict[str, float] = {"TXF": 40.0, "MXF": 30.0, "TMF": 20.0}
+# Product root plus a continuous alias (R1/R2), a YYYYMM contract month, or
+# Shioaji's own month code (month letter A-L, last digit of the year).
+_TW_FUTURES_CODE = re.compile(r"(?P<root>[A-Z]{3})(?:R[12]|\d{6}|[A-L]\d)")
+
+
+def default_commission_per_contract(symbol: str, market: str) -> float:
+    """Per-contract commission for a symbol that does not set its own.
+
+    A tw_futures symbol pays its product's fee. One whose product has no
+    known fee raises instead of paying 0, because a silent 0 understates
+    every backtest and pre-trade cost estimate; set
+    ``commission_per_contract`` in ``symbol_cost_overrides`` to trade it.
+    Other markets charge by rate and floor only (market_config.py).
+    """
+    if market != "tw_futures":
+        return 0.0
+    match = _TW_FUTURES_CODE.fullmatch(symbol)
+    if match is None or match["root"] not in _TW_FUTURES_COMMISSION_BY_ROOT:
+        raise ValueError(
+            f"No per-contract commission for tw_futures symbol={symbol!r}: built-in fees "
+            f"cover {sorted(_TW_FUTURES_COMMISSION_BY_ROOT)} contracts coded as R1/R2, "
+            "YYYYMM, or a Shioaji month code; set "
+            "symbol_cost_overrides[symbol]['commission_per_contract']"
+        )
+    return _TW_FUTURES_COMMISSION_BY_ROOT[match["root"]]
+
+
 def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
     """Validate + construct a symbol registry from a plain raw dict.
 
@@ -551,7 +574,6 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             min_notional=(
                 float(data["min_notional"]) if data.get("min_notional") is not None else None
             ),
-            commission_per_contract=float(data.get("commission_per_contract", 0.0)),
         )
     return registry
 
@@ -599,10 +621,6 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
-            # Per-side broker fee per contract, charged on buy and sell alike.
-            # The user's broker rate (大台 40 / 小台 30 / 微台 20 TWD), not an
-            # exchange rule: TAIFEX does not set broker commission.
-            "commission_per_contract": 40.0,
         },
         "TXFR2": {
             "market": "tw_futures",
@@ -617,7 +635,6 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
-            "commission_per_contract": 40.0,  # user's broker rate, see TXFR1
         },
         "MXFR1": {
             "market": "tw_futures",
@@ -632,7 +649,6 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
-            "commission_per_contract": 30.0,  # user's broker rate, see TXFR1
         },
         "MXFR2": {
             "market": "tw_futures",
@@ -647,7 +663,6 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
-            "commission_per_contract": 30.0,  # user's broker rate, see TXFR1
         },
         "TMFR1": {
             "market": "tw_futures",
@@ -662,7 +677,6 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
-            "commission_per_contract": 20.0,  # user's broker rate, see TXFR1
         },
         "TMFR2": {
             "market": "tw_futures",
@@ -677,7 +691,6 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "price_increment": 1.0,
             "quantity_step": 1.0,
             "min_quantity": 1.0,
-            "commission_per_contract": 20.0,  # user's broker rate, see TXFR1
         },
         "MU": {
             "market": "us_equity",
@@ -871,10 +884,6 @@ def resolve_symbol(
             "instrument_overrides[symbol]['instrument_type']"
         )
     tick_size = costs.get("tick_size", registered.tick_size if registered else None)
-    commission_per_contract = costs.get(
-        "commission_per_contract",
-        registered.commission_per_contract if registered else 0.0,
-    )
     currency = route.get("currency") or (registered.currency if registered else "")
     if not currency:
         raise ValueError(
@@ -953,5 +962,4 @@ def resolve_symbol(
         min_quantity=float(min_quantity) if min_quantity is not None else None,
         price_increment=(float(price_increment) if price_increment is not None else None),
         min_notional=float(min_notional) if min_notional is not None else None,
-        commission_per_contract=float(commission_per_contract),
     )

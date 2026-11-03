@@ -159,7 +159,7 @@ def test_resampled_taifex_hours_run_through_a_real_backtest() -> None:
         data_source="test",
         session_mode="regular",
         account=AccountConfig(currency="TWD", initial_cash=1_000_000.0),
-        symbol_cost_overrides={SYMBOL: {"multiplier": 1.0}},
+        symbol_cost_overrides={SYMBOL: {"multiplier": 1.0, "commission_per_contract": 0.0}},
         instrument_overrides={
             SYMBOL: {
                 "data_adapter": "test",
