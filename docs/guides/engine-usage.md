@@ -442,8 +442,9 @@ Input timestamps must be timezone-aware and every adapter/ETL path must use
 the same convention: `ts` is the UTC bar-start instant. A bar becomes eligible
 only after its interval close; fixed-duration bars use `ts + timeframe`, while
 calendar-aligned bars use the actual segment/session close. Adapters drop a
-final still-forming interval. Keeping the vendor's bar start avoids shifting
-shortened or session-ending bars to an invented duration.
+final still-forming interval; Shioaji's also drops a leading intraday bucket
+its date-based request window cuts. Keeping the vendor's bar start avoids
+shifting shortened or session-ending bars to an invented duration.
 
 `SymbolInfo.calendar_id` is the SSOT for mapping an observed timestamp to its
 trading-session label. The built-ins use `24/7`, `XNYS`, and `XTAIFEX`;
@@ -451,7 +452,32 @@ unregistered instruments set `instrument_overrides[symbol]["calendar_id"]`.
 Standard IDs are resolved by `exchange_calendars`. `XTAIFEX` (15:00 night
 open) and `XTAIFEX_1725` (17:25 night open) are Librae extensions that label a
 Taiwan-futures night session with its following regular-session date.
-Shioaji's epoch correction remains adapter-specific and is not a calendar.
+Shioaji's clock correction remains adapter-specific and is not a calendar:
+`librae.brokers.shioaji_time.shioaji_kbar_starts` turns its raw kbar stamp, a
+Taipei wall clock posing as UTC that marks the minute's end, into the UTC
+minute start.
+
+Session bars follow the venue's attribution rule. Intraday buckets count from
+each segment's open (`XTAIFEX`: 15:00 night, 08:45 day), so a bucket the
+segment cannot fill stays as that segment's last, shorter bar. D1, W1 and MN
+bars are cut by trading-day label: a TAIFEX D1 bar is the previous night plus
+the day session, stamped at the night open and labelled with the day-session
+date. The basis is TAIFEX's
+[after-hours trading Q&A](https://www.taifex.com.tw/file/taifex/CHINESE/4/AHTradeQA_ch.pdf)
+(2025-06-23 edition): Q3 assigns night-session trades to the next regular
+session, and Q11 publishes each session's prices separately. TradingView's
+`TAIFEX:TXF1!` builds the same 60-minute bars, stamped at their start
+(observed for 2026-11-02).
+
+Segments are half-open: `XTAIFEX`'s are `[15:00, 05:00)` and `[08:45, 13:45)`,
+so the last day minute starts at 13:44. A print stamped at a close or later
+came after it and belongs to no bar of that session: resampling drops it with
+a warning rather than opening a one-minute stub bar.
+
+Mitake (三竹) charts differ (a user's observation, unconfirmed by any Mitake
+document): they stamp intraday bars at their end and align hourly bars to the
+clock, so day-session hourly bars split differently, and bars that do split
+alike carry labels one bar length apart.
 
 `MarketDataSubscription` is the immutable raw-data identity: `symbol`,
 canonical `timeframe`, resolved `calendar_id`, `session_mode`, `data_source`,
@@ -1263,13 +1289,12 @@ would be lost for the default configuration. The boundary is a deadline, not a
 prediction, so resolving a post-market bar to the next session is deliberately
 lenient: it cannot make a healthy feed look dead.
 
-The boundary is never inferred from an exception, because calendars disagree
-about it: XNYS treats a session close as exclusive, while TAIFEX treats it as
-inclusive and answers with the period that just ended. The invariant that holds
-everywhere is that the next close must be strictly later than the current one;
-when the first candidate is not, the session ended at that boundary. A
-boundary resolving to the observation's own close would make a healthy feed
-look permanently stale.
+Segments are half-open on every calendar, so a period ending at a segment
+close is followed by one in the next segment or session. The invariant that
+holds everywhere is that the next close must be strictly later than the
+current one; when the first candidate is not, the session ended at that
+boundary. A boundary resolving to the observation's own close would make a
+healthy feed look permanently stale.
 
 If the calendar cannot answer at all, freshness degrades to the bare interval
 rather than raising — staleness monitoring exists to catch a dead feed and must

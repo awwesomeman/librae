@@ -145,21 +145,20 @@ def test_daily_taifex_bar_starts_at_prior_exchange_sessions_night_open() -> None
     assert result.iloc[0]["volume"] == pytest.approx(30.0)
 
 
-def test_daily_taifex_close_is_the_closing_auction_print() -> None:
+def test_daily_taifex_bar_ends_with_the_last_day_minute() -> None:
     index = pd.DatetimeIndex(
         [
             _taipei("2026-04-10 15:00"),
             _taipei("2026-04-13 13:44"),
-            _taipei("2026-04-13 13:45"),
         ]
     )
     frame = pd.DataFrame(
         {
-            "open": [100.0, 101.0, 103.0],
-            "high": [102.0, 103.0, 103.0],
-            "low": [99.0, 100.0, 103.0],
-            "close": [101.0, 102.5, 103.0],
-            "volume": [10.0, 20.0, 900.0],
+            "open": [100.0, 101.0],
+            "high": [102.0, 103.0],
+            "low": [99.0, 100.0],
+            "close": [101.0, 103.0],
+            "volume": [10.0, 920.0],
         },
         index=index,
     )
@@ -179,54 +178,46 @@ def test_daily_taifex_bar_closes_after_following_regular_session() -> None:
     ) == _taipei("2026-04-13 13:45")
 
 
-def test_session_label_includes_night_session_close_instant() -> None:
-    assert session_label(
-        _taipei("2026-04-11 05:00"),
+@pytest.mark.parametrize("close", ["2026-04-11 05:00", "2026-04-13 13:45"])
+def test_session_label_excludes_a_segment_close_instant(close: str) -> None:
+    with pytest.raises(ValueError, match="outside"):
+        session_label(_taipei(close), TAIFEX_INDEX_CALENDAR)
+
+
+def test_last_minute_of_a_segment_closes_at_the_segment_close() -> None:
+    assert bar_close(
+        _taipei("2026-04-13 13:44"),
+        60,
         TAIFEX_INDEX_CALENDAR,
-    ) == date(2026, 4, 13)
+    ) == _taipei("2026-04-13 13:45")
 
 
-def test_session_label_includes_day_session_close_instant() -> None:
-    assert session_label(
-        _taipei("2026-04-13 13:45"),
-        TAIFEX_INDEX_CALENDAR,
-    ) == date(2026, 4, 13)
-
-
-def test_resample_keeps_closing_auction_print_as_final_bucket() -> None:
+def test_resample_drops_a_print_at_the_close_instead_of_a_stub_bar(caplog) -> None:
     index = pd.DatetimeIndex(
         [
+            _taipei("2026-04-13 12:44"),
             _taipei("2026-04-13 13:44"),
             _taipei("2026-04-13 13:45"),
         ]
     )
     frame = pd.DataFrame(
         {
-            "open": [100.0, 103.0],
-            "high": [101.0, 103.0],
-            "low": [99.0, 103.0],
-            "close": [100.5, 103.0],
-            "volume": [10.0, 900.0],
+            "open": [100.0, 102.0, 103.0],
+            "high": [101.0, 103.0, 103.0],
+            "low": [99.0, 101.0, 103.0],
+            "close": [100.5, 102.5, 103.0],
+            "volume": [10.0, 900.0, 1.0],
         },
         index=index,
     )
     frame.index.name = "ts"
 
-    result = resample_session_ohlcv(frame, 60, TAIFEX_INDEX_CALENDAR)
+    with caplog.at_level("WARNING"):
+        result = resample_session_ohlcv(frame, 60 * 60, TAIFEX_INDEX_CALENDAR)
 
-    assert list(result.index) == [
-        _taipei("2026-04-13 13:44"),
-        _taipei("2026-04-13 13:45"),
-    ]
-    assert result.loc[_taipei("2026-04-13 13:45")]["volume"] == pytest.approx(900.0)
-
-
-def test_bar_close_of_closing_auction_bucket_is_itself() -> None:
-    assert bar_close(
-        _taipei("2026-04-13 13:45"),
-        60,
-        TAIFEX_INDEX_CALENDAR,
-    ) == _taipei("2026-04-13 13:45")
+    assert list(result.index) == [_taipei("2026-04-13 11:45"), _taipei("2026-04-13 12:45")]
+    assert result.loc[_taipei("2026-04-13 12:45")]["close"] == pytest.approx(102.5)
+    assert "dropped 1 bar" in caplog.text
 
 
 def test_resample_drops_isolated_off_session_bar_instead_of_raising(caplog) -> None:
@@ -237,8 +228,8 @@ def test_resample_drops_isolated_off_session_bar_instead_of_raising(caplog) -> N
     resample."""
     index = pd.DatetimeIndex(
         [
+            _taipei("2026-04-13 13:43"),
             _taipei("2026-04-13 13:44"),
-            _taipei("2026-04-13 13:45"),
             _taipei("2026-04-18 22:40"),  # isolated: Saturday, no session covers this
         ]
     )
@@ -258,8 +249,8 @@ def test_resample_drops_isolated_off_session_bar_instead_of_raising(caplog) -> N
         result = resample_session_ohlcv(frame, 60, TAIFEX_INDEX_CALENDAR)
 
     assert list(result.index) == [
+        _taipei("2026-04-13 13:43"),
         _taipei("2026-04-13 13:44"),
-        _taipei("2026-04-13 13:45"),
     ]
     assert "dropped 1 bar" in caplog.text
 

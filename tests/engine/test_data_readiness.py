@@ -42,11 +42,11 @@ class TestNextExpectedClose:
             ("post_market", "2025-01-03T22:00Z", "H1", "XNYS", "2025-01-06T15:30Z"),
             # A period spanning many sessions must not resolve to its own close.
             ("multi_session_period", "2025-01-06T14:30Z", "W1", "XNYS", "2025-01-17T21:00Z"),
-            # TAIFEX treats a session close as inclusive, so the boundary
-            # cannot be detected by asking whether the close has a period.
-            ("inclusive_close_daily", "2025-01-02T05:00Z", "D1", "XTAIFEX", "2025-01-03T05:45Z"),
-            ("inclusive_close_hourly", "2025-01-02T05:00Z", "H1", "XTAIFEX", "2025-01-02T08:00Z"),
-            ("inclusive_close_mid", "2025-01-02T02:00Z", "H1", "XTAIFEX", "2025-01-02T03:45Z"),
+            # A TAIFEX period ending at a segment close resumes at the next
+            # segment's open, not at the close itself.
+            ("session_close_daily", "2025-01-02T05:00Z", "D1", "XTAIFEX", "2025-01-03T05:45Z"),
+            ("session_close_hourly", "2025-01-02T05:00Z", "H1", "XTAIFEX", "2025-01-02T08:00Z"),
+            ("session_close_mid", "2025-01-02T02:00Z", "H1", "XTAIFEX", "2025-01-02T03:45Z"),
         ],
     )
     def test_boundary_follows_the_calendar(

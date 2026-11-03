@@ -95,7 +95,7 @@ def _taifex_session_label(timestamp: pd.Timestamp, calendar_id: str) -> date:
 
     for label in candidates:
         for segment_open, segment_close in _session_segments(calendar_id, label):
-            if segment_open <= timestamp <= segment_close:
+            if segment_open <= timestamp < segment_close:
                 return label
     raise ValueError(f"{timestamp.isoformat()} is outside the {calendar_id} trading sessions")
 
@@ -316,10 +316,11 @@ def _segment_containing(
     timestamp: pd.Timestamp,
     calendar_id: str,
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
-    # Session close is inclusive: a closing-auction print shares its bar-start
-    # instant with the session's last regular minute bar.
+    # Segments are half-open, as exchange_calendars' trading minutes are: a bar
+    # stamped at its start never starts at a close, and a print stamped there
+    # came after the close, so it belongs to no bar of the session.
     for segment_open, segment_close in segments:
-        if segment_open <= timestamp <= segment_close:
+        if segment_open <= timestamp < segment_close:
             return segment_open, segment_close
     raise ValueError(f"{timestamp.isoformat()} is outside the {calendar_id} trading segments")
 
@@ -456,11 +457,9 @@ def segment_closes(index: pd.DatetimeIndex, timeframe: str, calendar_id: str) ->
             position += 1
             continue
         close_ns = _epoch_ns(segment_close)
-        # Only bars strictly inside the segment share this lookup: whether the
-        # closing instant itself is in session is a per-calendar answer that
-        # only session_label can give, so leave it to the next iteration. The
-        # current bar belongs here either way, which is what breaks the tie
-        # when it is that instant.
+        # Bars before the close share this lookup. Segments are half-open, so
+        # a bar at the closing instant is in the next segment or in none, and
+        # the next iteration decides which.
         stop = max(int(np.searchsorted(values, close_ns, side="left")), position + 1)
         closes[position:stop] = close_ns
         position = stop
@@ -499,8 +498,8 @@ def _bucket_starts_skipping_outliers(
     can't be assigned to any session's OHLC bucket by construction, so they
     are dropped with a logged warning instead of failing the whole
     resample. This is a distinct concern from _session_segments' own
-    boundary geometry (which decides what counts as in-session, including
-    the closing-auction instant) — that stays strict; this is just the
+    boundary geometry (which decides what counts as in-session, excluding
+    each segment's close) — that stays strict; this is just the
     caller's tolerance for isolated exceptions to it. A future grace
     window for near-boundary trailing prints (e.g. a closing-auction
     settlement tick a minute or two after nominal close) would extend
