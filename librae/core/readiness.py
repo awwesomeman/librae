@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from librae.core.trading_calendar import (
-    next_session_open_after,
+    next_segment_open_after,
     period_close,
     period_start,
 )
@@ -45,7 +45,7 @@ def next_expected_close(
     to the next segment or session. The invariant that holds everywhere is
     that the next close must be *strictly later* than this one; a candidate
     that is not, or that the calendar cannot place, falls through to the
-    next session open.
+    next segment open.
 
     Bar timestamps are assumed to be **session-anchored**: a period is stamped
     at the instant it opens, which is what librae's own adapters produce. A
@@ -56,15 +56,15 @@ def next_expected_close(
     does will be held to a slightly stricter deadline than it deserves.
 
     An observation outside every session — an extended-hours feed under the
-    default ``session_mode="extended"`` — anchors on the next session directly.
+    default ``session_mode="extended"`` — anchors on the next segment directly.
     The result is a deadline rather than a prediction, so resolving a
-    post-market bar to the next regular session is deliberately lenient: it
+    post-market bar to the next regular segment is deliberately lenient: it
     cannot make a healthy feed look dead.
     """
     try:
         current_close = period_close(last_ts, timeframe, calendar_id).to_pydatetime()
     except ValueError:
-        start = next_session_open_after(last_ts, calendar_id).to_pydatetime()
+        start = next_segment_open_after(last_ts, calendar_id).to_pydatetime()
         return _period_close_at_or_after(start, timeframe=timeframe, calendar_id=calendar_id)
 
     try:
@@ -78,7 +78,7 @@ def next_expected_close(
         if expected > current_close:
             return expected
 
-    start = next_session_open_after(current_close, calendar_id).to_pydatetime()
+    start = next_segment_open_after(current_close, calendar_id).to_pydatetime()
     return _period_close_at_or_after(start, timeframe=timeframe, calendar_id=calendar_id)
 
 

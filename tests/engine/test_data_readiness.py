@@ -61,6 +61,33 @@ class TestNextExpectedClose:
             _ts(last_ts), timeframe=timeframe, calendar_id=calendar_id
         ) == _ts(expected)
 
+    @pytest.mark.parametrize(
+        ("timeframe", "last_bar", "expected"),
+        [
+            # The last night bar resumes at the same session's day segment,
+            # so a stall in the day segment is still caught there.
+            ("H1", "2026-11-03 04:00", "2026-11-03 09:45"),
+            ("M1", "2026-11-03 04:59", "2026-11-03 08:46"),
+            ("M5", "2026-11-03 04:55", "2026-11-03 08:50"),
+            # Friday's night closes Saturday morning and resumes Monday.
+            ("H1", "2026-11-07 04:00", "2026-11-09 09:45"),
+        ],
+    )
+    def test_the_last_night_bar_waits_for_the_day_segment(
+        self, timeframe: str, last_bar: str, expected: str
+    ) -> None:
+        def taipei(value: str) -> datetime:
+            return datetime.fromisoformat(f"{value}+08:00").astimezone(UTC)
+
+        assert next_expected_close(
+            taipei(last_bar), timeframe=timeframe, calendar_id="XTAIFEX"
+        ) == taipei(expected)
+
+    def test_the_last_morning_bar_waits_for_the_afternoon(self) -> None:
+        assert next_expected_close(
+            _ts("2026-11-03T03:30Z"), timeframe="H1", calendar_id="XHKG"
+        ) == _ts("2026-11-03T06:00Z")
+
     @pytest.mark.parametrize("calendar_id", ["XNYS", "XTAIFEX", "24/7"])
     @pytest.mark.parametrize("timeframe", ["H1", "D1", "W1"])
     def test_the_deadline_always_moves_forward(self, calendar_id: str, timeframe: str) -> None:
@@ -138,6 +165,15 @@ class TestEvaluateObservation:
 
         assert not status.fresh
 
+    def test_the_last_night_bar_is_fresh_until_the_day_segment_is_late(self) -> None:
+        """2026-11-03 04:00 Taipei: fresh after the 05:00 close, stale once
+        the day segment's first hour plus grace passes without a bar."""
+        night_bar = "2026-11-02T20:00Z"
+        kwargs = {"timeframe": "H1", "calendar_id": "XTAIFEX"}
+
+        assert self._evaluate(night_bar, "2026-11-02T22:00Z", **kwargs).fresh
+        assert not self._evaluate(night_bar, "2026-11-03T04:00Z", **kwargs).fresh
+
     def test_never_observed_subscription_is_not_fresh(self) -> None:
         status = evaluate_observation(
             None,
@@ -189,7 +225,7 @@ class TestObservationsOutsideARegularSession:
             raise ValueError("calendar unavailable")
 
         monkeypatch.setattr(readiness, "period_close", unusable)
-        monkeypatch.setattr(readiness, "next_session_open_after", unusable)
+        monkeypatch.setattr(readiness, "next_segment_open_after", unusable)
 
         status = evaluate_observation(
             _ts("2025-01-01T05:00Z"),

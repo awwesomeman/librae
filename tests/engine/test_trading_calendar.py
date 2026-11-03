@@ -5,10 +5,12 @@ from datetime import date
 import pandas as pd
 import pytest
 from librae.core.trading_calendar import (
+    _XTAI_CLOSURES_MISSING_UPSTREAM,
     TAIFEX_INDEX_CALENDAR,
     TAIFEX_LATE_OPEN_CALENDAR,
     bar_close,
     execution_session_label,
+    next_segment_open_after,
     resample_session_ohlcv,
     session_label,
     session_lookback_days,
@@ -346,3 +348,66 @@ def test_resampling_rejects_intervals_longer_than_one_session() -> None:
 
     with pytest.raises(ValueError, match="up to D1"):
         resample_session_ohlcv(frame, 7 * 24 * 60 * 60, "24/7")
+
+
+@pytest.mark.parametrize(
+    ("instant", "calendar_id", "expected"),
+    [
+        # Around the night close: the day segment of the same session is next.
+        ("2026-11-03 04:59", TAIFEX_INDEX_CALENDAR, "2026-11-03 08:45"),
+        ("2026-11-03 05:00", TAIFEX_INDEX_CALENDAR, "2026-11-03 08:45"),
+        ("2026-11-03 05:01", TAIFEX_INDEX_CALENDAR, "2026-11-03 08:45"),
+        ("2026-11-03 08:44", TAIFEX_INDEX_CALENDAR, "2026-11-03 08:45"),
+        ("2026-11-03 08:45", TAIFEX_INDEX_CALENDAR, "2026-11-03 08:45"),
+        ("2026-11-03 13:45", TAIFEX_INDEX_CALENDAR, "2026-11-03 15:00"),
+        ("2026-11-03 15:00", TAIFEX_INDEX_CALENDAR, "2026-11-03 15:00"),
+        ("2026-11-03 13:45", TAIFEX_LATE_OPEN_CALENDAR, "2026-11-03 17:25"),
+        # Friday's night closes Saturday 05:00; Monday's day segment is next.
+        ("2026-11-07 05:00", TAIFEX_INDEX_CALENDAR, "2026-11-09 08:45"),
+        ("2026-11-08 12:00", TAIFEX_INDEX_CALENDAR, "2026-11-09 08:45"),
+        # 2026-01-01 is a holiday: the night before it closes into 01-02.
+        ("2026-01-01 05:00", TAIFEX_INDEX_CALENDAR, "2026-01-02 08:45"),
+        ("2026-01-01 12:00", TAIFEX_INDEX_CALENDAR, "2026-01-02 08:45"),
+        # Hong Kong resumes after lunch, not at the next session.
+        ("2026-11-03 12:00", "XHKG", "2026-11-03 13:00"),
+        ("2026-11-03 16:00", "XHKG", "2026-11-04 09:30"),
+    ],
+)
+def test_next_segment_open_after(instant: str, calendar_id: str, expected: str) -> None:
+    timezone = "Asia/Hong_Kong" if calendar_id == "XHKG" else "Asia/Taipei"
+
+    def local(value: str) -> pd.Timestamp:
+        return pd.Timestamp(value, tz=timezone).tz_convert("UTC")
+
+    assert next_segment_open_after(local(instant), calendar_id) == local(expected)
+
+
+@pytest.mark.parametrize(
+    "calendar_id",
+    [TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR, "XTAI", "XHKG", "XNYS", "24/7"],
+)
+def test_next_segment_open_is_never_before_its_input(calendar_id: str) -> None:
+    for instant in pd.date_range("2026-11-02", "2026-11-10", freq="7min", tz="UTC"):
+        assert next_segment_open_after(instant, calendar_id) >= instant
+
+
+@pytest.mark.parametrize("closure", _XTAI_CLOSURES_MISSING_UPSTREAM)
+def test_announced_closures_missing_upstream_are_still_missing(closure: date) -> None:
+    """Once an exchange_calendars release has the date, drop it from the list."""
+    import exchange_calendars as xcals
+
+    assert xcals.get_calendar("XTAI").is_session(pd.Timestamp(closure))
+
+
+@pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR])
+def test_an_announced_typhoon_closure_is_not_a_session(calendar_id: str) -> None:
+    with pytest.raises(ValueError, match="outside"):
+        session_label(_taipei("2026-10-23 10:00"), calendar_id)
+
+
+def test_a_night_segment_before_a_closure_counts_toward_the_next_session() -> None:
+    # TAIFEX ran the 10-22 night segment, then closed 10-23; 10-26 is a holiday.
+    assert session_label(_taipei("2026-10-22 20:00"), TAIFEX_INDEX_CALENDAR) == date(2026, 10, 27)
+    assert next_segment_open_after(_taipei("2026-10-23 05:00"), TAIFEX_INDEX_CALENDAR) == _taipei(
+        "2026-10-27 08:45"
+    )
