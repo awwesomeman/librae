@@ -39,9 +39,17 @@ from librae.config.symbols import (
 )
 from librae.core.trading_calendar import (
     TAIFEX_INDEX_CALENDAR,
+    next_segment_open_after,
+    period_close,
+    period_start,
     resample_session_ohlcv,
 )
-from librae.core.utils import floor_to_step, validate_contract_month, validate_futures_selector
+from librae.core.utils import (
+    floor_to_step,
+    interval_to_timedelta,
+    validate_contract_month,
+    validate_futures_selector,
+)
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import OrderBelowVenueMinimumError, PositionRequest
 
@@ -55,6 +63,8 @@ from .base import (
 from .shioaji_time import shioaji_kbar_starts
 
 logger = logging.getLogger(__name__)
+
+_TAIPEI = "Asia/Taipei"
 
 # TAIFEX order conditions are ROD, IOC and FOK: there is no multi-day resting
 # order, so "gtc" has no equivalent, and a market order cannot be ROD
@@ -327,8 +337,14 @@ class ShioajiAdapter:
             timeframe: Target candle interval, ccxt or canonical format
                 (e.g. ``"1m"``, ``"5m"``, ``"30m"``, ``"1h"``, ``"1d"``) —
                 same convention as CryptoAdapter.
-            start/end: Date range as datetime or ``"YYYY-MM-DD"`` string.
-                If omitted, fetches the most recent *limit* bars. A range
+            start/end: Taipei dates, as ``"YYYY-MM-DD"`` or a datetime (an
+                aware one counts by its Taipei date); ``end`` defaults to
+                today and needs ``start``.
+                Returns only whole bars: intraday bars starting on these
+                dates and daily bars of these trading days, with the minutes
+                fetched as far either side as those bars reach (a TAIFEX
+                daily bar opens the night before its trading day). If both
+                are omitted, fetches the most recent *limit* bars. A range
                 longer than Shioaji's 30-day kbars() query limit is fetched
                 in multiple chunked calls and concatenated transparently.
             limit: Max bars (used only when start/end are omitted).
@@ -350,10 +366,20 @@ class ShioajiAdapter:
             TAIFEX_INDEX_CALENDAR if getattr(contract, "security_type", None) == "FUT" else "XTAI"
         )
 
-        if start and end:
-            date_chunks = _kbar_date_chunks(_to_date(start), _to_date(end), _MAX_KBAR_QUERY_DAYS)
+        empty = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+        window = None
+        if start:
+            last_day = _to_date(end) if end else pd.Timestamp.now(tz=_TAIPEI).date()
+            window = _date_window(_to_date(start), last_day, timeframe, resolved_calendar)
+            bars_from, bars_before, first_query_day, last_query_day = window
+            # No minute stamped after today exists to fetch.
+            last_query_day = min(last_query_day, pd.Timestamp.now(tz=_TAIPEI).date())
+            if bars_from >= bars_before or first_query_day > last_query_day:
+                return empty
             frames = []
-            for chunk_start, chunk_end in date_chunks:
+            for chunk_start, chunk_end in _kbar_date_chunks(
+                first_query_day, last_query_day, _MAX_KBAR_QUERY_DAYS
+            ):
                 chunk_kbars = self._api.kbars(
                     contract=contract,
                     start=chunk_start.isoformat(),
@@ -363,19 +389,12 @@ class ShioajiAdapter:
                 if not chunk_df.empty:
                     frames.append(chunk_df)
             df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        elif end:
+            raise ValueError("a date window needs start; end alone has no first date")
         else:
-            kbar_kwargs: dict = {}
-            if start:
-                kbar_kwargs["start"] = _to_date_str(start)
-            if end:
-                kbar_kwargs["end"] = _to_date_str(end)
-            kbars = self._api.kbars(
-                contract=contract,
-                **kbar_kwargs,
-            )
-            df = pd.DataFrame({**kbars})
+            df = pd.DataFrame({**self._api.kbars(contract=contract)})
         if df.empty:
-            return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+            return empty
 
         # Normalise column names (Shioaji may return capitalised names)
         df.columns = df.columns.str.lower()
@@ -383,27 +402,24 @@ class ShioajiAdapter:
 
         # Resample if requested timeframe is coarser than 1-min
         if timeframe != "1m":
-            from librae.core.utils import interval_to_timedelta
-
             target_seconds = int(interval_to_timedelta(timeframe).total_seconds())
-            # kbars() is requested by date, so take the window to open at the
-            # Taipei midnight of the first raw stamp (the first minute's end),
-            # not at the first minute: a thin contract may not trade at once.
-            window_open = (
-                (df["ts"].min() + pd.Timedelta(minutes=1)).tz_convert("Asia/Taipei").normalize()
-            )
+            # kbars() answers by whole stamp dates (see _date_window), so take
+            # a poll's window to open at the Taipei midnight of the first raw
+            # stamp (the first minute's end), not at the first minute: a thin
+            # contract may not trade at once.
+            window_open = (df["ts"].min() + pd.Timedelta(minutes=1)).tz_convert(_TAIPEI).normalize()
             df = resample_session_ohlcv(
                 df.set_index("ts"),
                 target_seconds,
                 resolved_calendar,
             ).reset_index()
-            # An intraday bucket that opened before the window, mid night
-            # session, lacks its head: drop it rather than return it as a
-            # whole bar. A TAIFEX daily bar always opens before a date window
-            # and is kept without the night before it, since dropping it would
-            # leave a one-day request empty.
-            if target_seconds < 24 * 60 * 60:
+            # An intraday bucket that opened before the poll's first date,
+            # mid night session, lacks its head: drop it rather than return it
+            # as a whole bar.
+            if window is None and target_seconds < 24 * 60 * 60:
                 df = df.loc[df["ts"] >= window_open].reset_index(drop=True)
+        if window is not None:
+            df = df.loc[(df["ts"] >= bars_from) & (df["ts"] < bars_before)].reset_index(drop=True)
 
         if drop_incomplete:
             df = drop_incomplete_ohlcv(
@@ -839,17 +855,57 @@ class ShioajiAdapter:
         return codes
 
 
-def _to_date_str(dt: datetime | str) -> str:
-    """Convert datetime or string to 'YYYY-MM-DD' format."""
-    if isinstance(dt, str):
-        return dt[:10]
-    return dt.strftime("%Y-%m-%d")
-
-
 def _to_date(dt: datetime | str) -> date:
+    """The Taipei date of ``dt``; a naive datetime is read as Taipei time."""
     if isinstance(dt, str):
         return datetime.strptime(dt[:10], "%Y-%m-%d").date()
+    if dt.tzinfo is not None:
+        return pd.Timestamp(dt).tz_convert(_TAIPEI).date()
     return dt.date()
+
+
+def _taipei_midnight(day: date) -> pd.Timestamp:
+    return pd.Timestamp(day, tz=_TAIPEI).tz_convert(UTC)
+
+
+def _date_window(
+    first_day: date, last_day: date, timeframe: str, calendar_id: str
+) -> tuple[pd.Timestamp, pd.Timestamp, date, date]:
+    """Bar starts ``[from, before)`` of the bars dated ``first_day`` to
+    ``last_day``, and the first and last kbars dates holding their minutes.
+
+    A daily bar is dated by its trading day and an intraday bar by the Taipei
+    date it starts on. So a TAIFEX daily bar starts at the previous trading
+    day's night open, and an intraday bar starting late on ``last_day`` runs
+    into the next date. kbars() dates a minute by its raw stamp, the minute's
+    end, so the minute ending at midnight belongs to the next date. Observed
+    on 2026-11-04: TXFR1 kbars for 2026-10-31 to 2026-11-03 ran from stamp
+    10-31 00:00 to 11-03 23:59, Saturday's night minutes included, and were
+    the very rows a 2026-10-21 to 2026-11-04 query held on those dates.
+    """
+    if interval_to_timedelta(timeframe) >= timedelta(days=1):
+
+        def first_open(day: date) -> pd.Timestamp:
+            """Open of the first trading day on or after ``day``."""
+            segment_open = next_segment_open_after(_taipei_midnight(day), calendar_id)
+            return period_start(segment_open, "D1", calendar_id)
+
+        bars_from = first_open(first_day)
+        bars_before = first_open(last_day + timedelta(days=1))
+        # A trading day closes on its own date.
+        last_stamp_day = last_day
+    else:
+        bars_from = _taipei_midnight(first_day)
+        bars_before = _taipei_midnight(last_day + timedelta(days=1))
+        last_minute = bars_before - pd.Timedelta(minutes=1)
+        try:
+            bar_start = period_start(last_minute, timeframe, calendar_id)
+            last_stamp = period_close(bar_start, timeframe, calendar_id)
+        except ValueError:  # no session at the window's last minute
+            last_stamp = last_minute
+        last_stamp_day = last_stamp.tz_convert(_TAIPEI).date()
+    first_stamp_day = (bars_from + pd.Timedelta(minutes=1)).tz_convert(_TAIPEI).date()
+    return bars_from, bars_before, first_stamp_day, last_stamp_day
 
 
 # Shioaji rejects a single kbars() query spanning more than this many days:

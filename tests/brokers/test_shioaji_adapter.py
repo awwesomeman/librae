@@ -14,9 +14,11 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 from librae.brokers.shioaji_adapter import _require_shioaji
+from librae.brokers.shioaji_time import shioaji_kbar_starts
 from librae.core.cost_model import CostModel
 from librae.core.market_data import MarketDataSubscription, normalize_bar_times
 from librae.core.readiness import next_expected_close
+from librae.core.trading_calendar import resample_session_ohlcv
 from librae.live.executor import (
     LiveExecutor,
     OrderBelowVenueMinimumError,
@@ -140,16 +142,16 @@ def _make_adapter(*, ca_activated: bool = False):
     return adapter
 
 
-def _make_kbars_response():
+def _make_kbars_response(day: str = "2026-04-01"):
     """Simulate Shioaji kbars() return value (dict of lists).
 
     ``ts`` is raw nanoseconds, encoding Taipei wall-clock time as if it were
     a UTC epoch and marking the minute's end (see shioaji_time.py) — these
-    raw stamps read Taipei 09:00/09:05/09:10 on 2026-04-01, i.e. minutes
-    starting at true UTC 00:59/01:04/01:09.
+    raw stamps read Taipei 09:00/09:05/09:10 on ``day``, i.e. on 2026-04-01
+    minutes starting at true UTC 00:59/01:04/01:09.
     """
     taipei_wall_clock = pd.to_datetime(
-        ["2026-04-01 09:00", "2026-04-01 09:05", "2026-04-01 09:10"],
+        [f"{day} 09:00", f"{day} 09:05", f"{day} 09:10"],
         utc=True,
     )
     return {
@@ -168,30 +170,25 @@ def _taipei(value: str) -> pd.Timestamp:
     return pd.Timestamp(value, tz="Asia/Taipei").tz_convert("UTC")
 
 
-def _txfr1_kbars(
+def _raw_kbars(
+    stamps: pd.DatetimeIndex,
     *,
-    since: str | None = None,
     through: str | None = None,
     untraded: str | None = None,
     extra: dict | None = None,
 ) -> dict:
-    """Synthetic minutes for the TAIFEX trading day 2026-11-02, shaped as
-    Shioaji's kbars() returns them.
+    """Synthetic raw minutes, shaped as Shioaji's kbars() returns them.
 
-    The stamps have the real shape: the night session reads 15:01-05:00 and
-    the day session 08:46-13:45, each raw stamp the minute's end. Prices
-    follow a fixed rule so expectations can be worked by hand: the i-th
-    minute (0 at 15:01) opens at 10000 + i, reaches 5 points either side,
-    closes 1 point up and trades one lot.
+    ``stamps`` are the raw stamps: Taipei wall clock, each the minute's end.
+    Prices follow a fixed rule so expectations can be worked by hand: the
+    i-th minute opens at 10000 + i, reaches 5 points either side, closes 1
+    point up and trades one lot, so a bar's volume counts its minutes.
 
-    ``since`` and ``through`` cut the feed at raw stamps (Taipei wall clock),
-    as a window starting at a date or a fetch during the session would see
-    it; ``untraded`` removes the raw minutes from ``since`` up to it, as a
-    thin contract would show them; ``extra`` appends one raw minute.
+    ``through`` cuts the feed at a raw stamp, as a fetch during the session
+    would see it; ``untraded`` removes every raw minute up to it, as a thin
+    or newly listed contract would show them; ``extra`` appends one raw
+    minute.
     """
-    stamps = pd.date_range("2026-10-30 15:01", "2026-10-31 05:00", freq="min").append(
-        pd.date_range("2026-11-02 08:46", "2026-11-02 13:45", freq="min")
-    )
     minute = pd.RangeIndex(len(stamps))
     frame = pd.DataFrame(
         {
@@ -203,8 +200,6 @@ def _txfr1_kbars(
             "Volume": 1,
         }
     )
-    if since is not None:
-        frame = frame.loc[frame["ts"] >= since]
     if untraded is not None:
         frame = frame.loc[frame["ts"] > untraded]
     if through is not None:
@@ -217,15 +212,46 @@ def _txfr1_kbars(
     return raw
 
 
-def _fetch_txfr1(timeframe: str, kbars: dict | None = None, **kwargs) -> pd.DataFrame:
+def _kbars_by_date(raw: dict):
+    """A kbars() stand-in answering with the raw minutes stamped on the
+    requested Taipei dates, both ends included."""
+    stamp_dates = pd.to_datetime(raw["ts"], unit="ns").strftime("%Y-%m-%d")
+
+    def kbars(*, contract, start, end):
+        keep = (stamp_dates >= start) & (stamp_dates <= end)
+        return {
+            column: [v for v, k in zip(values, keep, strict=True) if k]
+            for column, values in raw.items()
+        }
+
+    return kbars
+
+
+def _txfr1_kbars(**cuts) -> dict:
+    """The TAIFEX trading day 2026-11-02: the night session reads 15:01-05:00
+    and the day session 08:46-13:45, so minute 0 starts at 15:00."""
+    stamps = pd.date_range("2026-10-30 15:01", "2026-10-31 05:00", freq="min").append(
+        pd.date_range("2026-11-02 08:46", "2026-11-02 13:45", freq="min")
+    )
+    return _raw_kbars(stamps, **cuts)
+
+
+def _fetch_txfr1(
+    timeframe: str,
+    kbars: dict | None = None,
+    *,
+    start: str = "2026-10-30",
+    end: str = "2026-11-02",
+    **kwargs,
+) -> pd.DataFrame:
     adapter = _make_adapter()
-    adapter._api.kbars.return_value = _txfr1_kbars() if kbars is None else kbars
+    adapter._api.kbars.side_effect = _kbars_by_date(_txfr1_kbars() if kbars is None else kbars)
     adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
     return adapter.fetch_ohlcv(
         "TXFR1",
         timeframe,
-        start="2026-10-30",
-        end="2026-11-02",
+        start=start,
+        end=end,
         continuous_alias=True,
         **kwargs,
     ).set_index("ts")
@@ -361,7 +387,9 @@ class TestFetchOhlcv:
         single query spanning more than 30 days; a 74-day request must be
         split into 30/30/14-day windows and concatenated transparently."""
         adapter = _make_adapter()
-        adapter._api.kbars.side_effect = [_make_kbars_response() for _ in range(3)]
+        adapter._api.kbars.side_effect = [
+            _make_kbars_response(day) for day in ("2026-01-02", "2026-02-02", "2026-03-03")
+        ]
         adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
 
         df = adapter.fetch_ohlcv(
@@ -384,6 +412,14 @@ class TestFetchOhlcv:
             "2026-03-15",
         ]
         assert len(df) == 9
+
+    def test_an_end_without_a_start_is_refused(self):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+
+        with pytest.raises(ValueError, match="needs start"):
+            adapter.fetch_ohlcv("TXFR1", "1h", end="2026-04-05", continuous_alias=True)
+        adapter._api.kbars.assert_not_called()
 
     def test_short_range_issues_a_single_kbars_call(self):
         adapter = _make_adapter()
@@ -482,31 +518,189 @@ class TestTaifexSessionBars:
     def test_a_window_from_midnight_drops_the_bucket_it_cuts(self, timeframe, first_bar):
         """The raw 00:00 minute starts at 23:59, the last minute of a bucket
         that opened before the window did."""
-        bars = _fetch_txfr1(timeframe, _txfr1_kbars(since="2026-10-31 00:00"))
+        bars = _fetch_txfr1(timeframe, start="2026-10-31")
 
         assert bars.index[0] == _taipei(f"2026-10-31 {first_bar}")
 
     @pytest.mark.parametrize(
-        ("since", "untraded", "first_bar"),
+        ("start", "untraded", "first_bar"),
         [
-            ("2026-10-31 00:00", "2026-10-31 00:05", "2026-10-31 00:00"),
-            ("2026-11-02 00:00", "2026-11-02 08:46", "2026-11-02 08:45"),
+            ("2026-10-31", "2026-10-31 00:05", "2026-10-31 00:00"),
+            ("2026-11-02", "2026-11-02 08:46", "2026-11-02 08:45"),
         ],
     )
     @pytest.mark.parametrize("timeframe", ["15m", "1h"])
     def test_a_quiet_window_start_keeps_the_whole_first_bucket(
-        self, since, untraded, first_bar, timeframe
+        self, start, untraded, first_bar, timeframe
     ):
         """A thin contract that does not trade in a bucket's first minutes
         still has that bucket inside the window."""
-        bars = _fetch_txfr1(timeframe, _txfr1_kbars(since=since, untraded=untraded))
+        bars = _fetch_txfr1(timeframe, _txfr1_kbars(untraded=untraded), start=start)
 
         assert bars.index[0] == _taipei(first_bar)
 
-    def test_a_window_from_midnight_keeps_the_daily_bar(self):
-        days = _fetch_txfr1("1d", _txfr1_kbars(since="2026-10-31 00:00"))
+    def test_a_daily_window_reaches_back_to_the_night_before(self):
+        """A window from Saturday still returns Monday's whole bar, night
+        session included: minutes 0-1139."""
+        days = _fetch_txfr1("1d", start="2026-10-31")
 
         assert list(days.index) == [_taipei("2026-10-30 15:00")]
+        assert days.iloc[0]["open"] == 10000
+        assert days.iloc[0]["volume"] == 1140
+
+
+# TAIFEX trading days around a weekend and the 2026-10-23 typhoon closure, as
+# (date the night session opens, day-session date). 2026-10-26 was a holiday,
+# so the night of 10-22 belongs to 10-27.
+_TRADING_DAYS = (
+    ("2026-10-21", "2026-10-22"),
+    ("2026-10-22", "2026-10-27"),
+    ("2026-10-27", "2026-10-28"),
+    ("2026-10-28", "2026-10-29"),
+    ("2026-10-29", "2026-10-30"),
+    ("2026-10-30", "2026-11-02"),
+    ("2026-11-02", "2026-11-03"),
+    ("2026-11-03", "2026-11-04"),
+)
+
+
+def _trading_day_stamps() -> pd.DatetimeIndex:
+    """Raw stamps of every minute of ``_TRADING_DAYS``: 840 night minutes
+    stamped from 15:01 and 300 day minutes stamped from 08:46 each."""
+    stamps = pd.DatetimeIndex([])
+    for night, day in _TRADING_DAYS:
+        stamps = stamps.append(pd.date_range(f"{night} 15:01", periods=840, freq="min"))
+        stamps = stamps.append(pd.date_range(f"{day} 08:46", periods=300, freq="min"))
+    return stamps
+
+
+class TestDateWindow:
+    """A date window returns whole buckets only: intraday buckets that start
+    on its Taipei dates and daily bars labelled with them, each holding every
+    minute it would hold in an uncut history."""
+
+    @staticmethod
+    def _fetch(
+        timeframe: str, start: str, end: str, *, untraded: str | None = None
+    ) -> tuple[pd.DataFrame, list[tuple[str, str]]]:
+        adapter = _make_adapter()
+        raw = _raw_kbars(_trading_day_stamps(), untraded=untraded)
+        adapter._api.kbars.side_effect = _kbars_by_date(raw)
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+        bars = adapter.fetch_ohlcv(
+            "TXFR1", timeframe, start=start, end=end, continuous_alias=True
+        ).set_index("ts")
+        queries = [(c.kwargs["start"], c.kwargs["end"]) for c in adapter._api.kbars.call_args_list]
+        return bars, queries
+
+    def test_an_aware_datetime_counts_by_its_taipei_date(self):
+        """16:00 and 23:00 UTC on 2026-11-03 are 00:00 and 07:00 on
+        2026-11-04 in Taipei, so the window is 2026-11-04 alone."""
+        adapter = _make_adapter()
+        adapter._api.kbars.side_effect = _kbars_by_date(_raw_kbars(_trading_day_stamps()))
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+
+        bars = adapter.fetch_ohlcv(
+            "TXFR1",
+            "4h",
+            start=datetime(2026, 11, 3, 16, tzinfo=UTC),
+            end=datetime(2026, 11, 3, 23, tzinfo=UTC),
+            continuous_alias=True,
+        ).set_index("ts")
+
+        assert list(bars.index) == [
+            _taipei("2026-11-04 03:00"),
+            _taipei("2026-11-04 08:45"),
+            _taipei("2026-11-04 12:45"),
+        ]
+
+    def test_a_one_day_daily_window_returns_that_trading_day_whole(self):
+        """Without the night before, the bar held 600 of its 1140 minutes;
+        the next trading day's night, 540 minutes, is not a bar of this day."""
+        days, queries = self._fetch("1d", "2026-11-03", "2026-11-03")
+
+        assert list(days.index) == [_taipei("2026-11-02 15:00")]
+        assert days.iloc[0]["volume"] == 1140
+        assert queries == [("2026-11-02", "2026-11-03")]
+
+    @pytest.mark.parametrize(("timeframe", "minutes"), [("4h", 240), ("2h", 120)])
+    def test_the_last_intraday_bucket_is_filled_past_midnight(self, timeframe, minutes):
+        """The 23:00 bucket runs into the next date; cut at midnight it held
+        60 minutes."""
+        bars, queries = self._fetch(timeframe, "2026-11-03", "2026-11-03")
+
+        assert bars.index[-1] == _taipei("2026-11-03 23:00")
+        assert bars.iloc[-1]["volume"] == minutes
+        assert queries == [("2026-11-03", "2026-11-04")]
+
+    def test_a_monday_bar_holds_fridays_night(self):
+        days, _ = self._fetch("1d", "2026-11-02", "2026-11-02")
+
+        assert list(days.index) == [_taipei("2026-10-30 15:00")]
+        assert days.iloc[0]["volume"] == 1140
+
+    def test_a_fridays_last_bucket_is_filled_from_saturday(self):
+        bars, _ = self._fetch("4h", "2026-10-30", "2026-10-30")
+
+        assert bars.index[-1] == _taipei("2026-10-30 23:00")
+        assert bars.iloc[-1]["volume"] == 240
+
+    def test_the_day_after_a_closure_holds_the_night_before_it(self):
+        """No session on 10-23 or 10-26: the night opened on 10-22 is
+        traded toward 10-27."""
+        days, queries = self._fetch("1d", "2026-10-27", "2026-10-27")
+
+        assert list(days.index) == [_taipei("2026-10-22 15:00")]
+        assert days.iloc[0]["volume"] == 1140
+        assert queries == [("2026-10-22", "2026-10-27")]
+
+    def test_the_night_before_a_closure_fills_its_last_bucket(self):
+        bars, _ = self._fetch("4h", "2026-10-22", "2026-10-22")
+
+        assert bars.index[-1] == _taipei("2026-10-22 23:00")
+        assert bars.iloc[-1]["volume"] == 240
+
+    @pytest.mark.parametrize(
+        ("start", "end"), [("2026-10-31", "2026-11-01"), ("2026-10-23", "2026-10-26")]
+    )
+    def test_a_daily_window_without_a_trading_day_does_not_query(self, start, end):
+        days, queries = self._fetch("1d", start, end)
+
+        assert days.empty
+        assert queries == []
+
+    @pytest.mark.parametrize(
+        ("timeframe", "first_bar", "minutes"),
+        [("4h", "2026-11-02 23:00", 103), ("1d", "2026-11-02 15:00", 103 + 120 + 300)],
+    )
+    def test_a_first_trade_inside_a_bucket_keeps_that_bucket(self, timeframe, first_bar, minutes):
+        """A contract that first trades at 01:17 has its first H4 bucket open
+        at 23:00 the date before, and that bucket is whole: nothing traded
+        earlier."""
+        bars, _ = self._fetch(timeframe, "2026-11-02", "2026-11-03", untraded="2026-11-03 01:17")
+
+        assert bars.index[0] == _taipei(first_bar)
+        assert bars.iloc[0]["volume"] == minutes
+
+    @pytest.mark.parametrize("timeframe", ["1m", "15m", "1h", "4h", "1d"])
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [("2026-10-22", "2026-10-27"), ("2026-10-28", "2026-10-30"), ("2026-11-02", "2026-11-03")],
+    )
+    def test_every_bar_matches_the_uncut_history(self, timeframe, start, end):
+        """A caller that trims the result to its own range keeps the bars a
+        fetch of the whole history would give it."""
+        bars, _ = self._fetch(timeframe, start, end)
+
+        minutes = pd.DataFrame(_raw_kbars(_trading_day_stamps()))
+        minutes.columns = minutes.columns.str.lower()
+        minutes.index = shioaji_kbar_starts(minutes.pop("ts"))
+        seconds = int(pd.Timedelta(timeframe.replace("m", "min")).total_seconds())
+        uncut = resample_session_ohlcv(minutes, seconds, "XTAIFEX")
+        assert not bars.empty
+        pd.testing.assert_frame_equal(
+            bars, uncut.loc[bars.index], check_dtype=False, check_index_type=False
+        )
 
 
 class TestLiveBarClock:

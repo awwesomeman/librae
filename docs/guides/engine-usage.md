@@ -442,9 +442,11 @@ Input timestamps must be timezone-aware and every adapter/ETL path must use
 the same convention: `ts` is the UTC bar-start instant. A bar becomes eligible
 only after its interval close; fixed-duration bars use `ts + timeframe`, while
 calendar-aligned bars use the actual segment/session close. Adapters drop a
-final still-forming interval; Shioaji's also drops a leading intraday bucket
-its date-based request window cuts. Keeping the vendor's bar start avoids
-shifting shortened or session-ending bars to an invented duration.
+final still-forming interval. A Shioaji date window returns whole bars only:
+intraday bars that start on its dates and daily bars of its trading days, with
+the minutes fetched as far either side as those bars reach. Keeping the
+vendor's bar start avoids shifting shortened or session-ending bars to an
+invented duration.
 
 `SymbolInfo.calendar_id` is the SSOT for mapping an observed timestamp to its
 trading-session label. The built-ins use `24/7`, `XNYS`, and `XTAIFEX`;
