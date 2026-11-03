@@ -41,13 +41,11 @@ def next_expected_close(
     next one begins where the calendar says trading resumes. That is what keeps
     a Friday daily bar from looking late all weekend.
 
-    The boundary is never inferred from an exception, because calendars
-    disagree about it: XNYS treats a session close as exclusive, so asking for
-    its period raises, while TAIFEX treats it as inclusive and answers with the
-    period that just ended. The invariant that actually holds everywhere is
-    that the next close must be *strictly later* than this one; when the first
-    candidate is not, the session ended at this boundary and the next
-    observation belongs to the following session.
+    Segments are half-open, so the observation after a segment close belongs
+    to the next segment or session. The invariant that holds everywhere is
+    that the next close must be *strictly later* than this one; a candidate
+    that is not, or that the calendar cannot place, falls through to the
+    next session open.
 
     Bar timestamps are assumed to be **session-anchored**: a period is stamped
     at the instant it opens, which is what librae's own adapters produce. A

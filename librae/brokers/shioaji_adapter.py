@@ -52,7 +52,7 @@ from .base import (
     validate_order_signal,
     validate_time_in_force,
 )
-from .shioaji_time import shioaji_ts_ns_to_epoch
+from .shioaji_time import shioaji_kbar_starts
 
 logger = logging.getLogger(__name__)
 
@@ -318,9 +318,9 @@ class ShioajiAdapter:
         Futures default to ``XTAIFEX`` and stocks to ``XTAI``; callers must
         override ``calendar_id`` for products with a different session.
 
-        Shioaji's raw kbar ``ts`` encodes Taipei wall-clock time as if it
-        were a UTC epoch; this is corrected to a true UTC epoch before
-        returning (``shioaji_time.shioaji_ts_ns_to_epoch``).
+        Shioaji's raw kbar ``ts`` is a Taipei wall clock posing as UTC and
+        marks the minute's end; ``shioaji_time.shioaji_kbar_starts`` turns
+        it into the UTC minute start before any resampling.
 
         Args:
             symbol: Contract code (e.g. ``"TXFR1"``, ``"2330"``).
@@ -379,18 +379,31 @@ class ShioajiAdapter:
 
         # Normalise column names (Shioaji may return capitalised names)
         df.columns = df.columns.str.lower()
-        df["ts"] = pd.to_datetime(df["ts"].map(shioaji_ts_ns_to_epoch), unit="s", utc=True)
+        df["ts"] = shioaji_kbar_starts(df["ts"])
 
         # Resample if requested timeframe is coarser than 1-min
         if timeframe != "1m":
             from librae.core.utils import interval_to_timedelta
 
             target_seconds = int(interval_to_timedelta(timeframe).total_seconds())
+            # kbars() is requested by date, so take the window to open at the
+            # Taipei midnight of the first raw stamp (the first minute's end),
+            # not at the first minute: a thin contract may not trade at once.
+            window_open = (
+                (df["ts"].min() + pd.Timedelta(minutes=1)).tz_convert("Asia/Taipei").normalize()
+            )
             df = resample_session_ohlcv(
                 df.set_index("ts"),
                 target_seconds,
                 resolved_calendar,
             ).reset_index()
+            # An intraday bucket that opened before the window, mid night
+            # session, lacks its head: drop it rather than return it as a
+            # whole bar. A TAIFEX daily bar always opens before a date window
+            # and is kept without the night before it, since dropping it would
+            # leave a one-day request empty.
+            if target_seconds < 24 * 60 * 60:
+                df = df.loc[df["ts"] >= window_open].reset_index(drop=True)
 
         if drop_incomplete:
             df = drop_incomplete_ohlcv(
