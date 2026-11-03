@@ -3,7 +3,7 @@
 A small built-in registry, one entry per market type (crypto, tw_futures,
 us_equity), each holding cost parameters shared across every instrument
 traded in that market — commission rate and floor, tax, slippage, margin
-rate structure (the per-contract commission is per-symbol, in symbols.py), plus
+rate structure (the per-contract commission is per-product, in symbols.py), plus
 tick_size as a low-stakes approximate default (it only feeds a backtest
 slippage-cost estimate, not PnL/margin sizing, so a market-wide value is an
 acceptable default for large, homogeneous universes like equities/crypto
@@ -54,8 +54,9 @@ class MarketConfig:
     """Market-level configuration for backtesting.
 
     Used by CostModel.from_market() to build a cost model, along with the
-    per-symbol multiplier (always), tick_size (when overridden) and
-    commission_per_contract from librae/config/symbols.py's SymbolInfo.
+    per-symbol multiplier (always) and tick_size (when overridden) from
+    librae/config/symbols.py's SymbolInfo, and the per-product
+    commission_per_contract from default_commission_per_contract there.
     """
 
     name: str
@@ -98,9 +99,9 @@ _BUILTIN_MARKETS: dict[str, MarketConfig] = {
     ),
     "tw_futures": MarketConfig(
         name="tw_futures",
-        # Broker commission is charged per contract and differs by contract,
-        # so it lives on each symbol (commission_per_contract in symbols.py),
-        # not here. TAIFEX does not set it: taifex.com.tw's feeSchedules page
+        # Broker commission is charged per contract and differs by product,
+        # so it lives in symbols.py (default_commission_per_contract), not
+        # here. TAIFEX does not set it: taifex.com.tw's feeSchedules page
         # states the exchange only regulates its own clearing fee, and the
         # broker fee is negotiated with no exchange-mandated floor.
         commission_rate=0.0,

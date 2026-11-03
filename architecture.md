@@ -525,7 +525,7 @@ cost_model = CostModel.from_config(config, markets=my_markets)
 
 #### Per-symbol overrides (`RunConfig.symbol_cost_overrides`)
 
-`CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_cost_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`multiplier`: `spot` auto-1.0, `contract_*` required-explicit; optional `tick_size`; `commission_per_contract`, default 0) > market-level defaults. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
+`CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_cost_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`multiplier`: `spot` auto-1.0, `contract_*` required-explicit; optional `tick_size`) and the per-product `commission_per_contract` > market-level defaults. `commission_per_contract` has no market-level value: a `tw_futures` symbol, registered or not, pays its product's fee (TXF/MXF/TMF, by code root), and an unrecognized one raises until an override sets the fee; other markets default to 0. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
 
 `Backtest.__init__` calls this once per symbol in the run (not just `config.symbol`) whenever `config=` is used and no explicit `cost_model=` override is given — a multi-asset run mixing symbols with different multipliers (e.g. `tw_futures`: TXFR1=200 + MXFR1=50 in the same run) gets each symbol's own multiplier automatically, not just the first symbol's applied to everyone.
 

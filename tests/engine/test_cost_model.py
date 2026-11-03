@@ -316,7 +316,7 @@ class TestFromConfig:
         """tick_size isn't required even for an unregistered symbol — it
         falls back to the market default."""
         cm = CostModel.from_config(
-            self._cfg("SOME_UNREGISTERED_SYMBOL", cost_overrides={"multiplier": 10.0}),
+            self._cfg("TXF202612", cost_overrides={"multiplier": 10.0}),
         )
         assert cm.multiplier == 10.0
         assert cm.tick_size == 1.0  # tw_futures market default
@@ -497,6 +497,102 @@ class TestPerContractCommission:
         assert btc_quarterly.calc_commission(50_000.0, 2.0) == pytest.approx(100.0)
         assert mu.calc_commission(100.0, 10.0) == 0.0
 
+    @staticmethod
+    def _unregistered_cfg(symbol: str, *, market: str = "tw_futures", **costs):
+        """A contract with no registry entry, routed the way a caller must."""
+        from librae.core.run_config import AccountConfig, RunConfig
+
+        return RunConfig(
+            strategy_name="x",
+            symbols=[symbol],
+            timeframe="5m",
+            market=market,
+            data_source="shioaji",
+            account=AccountConfig(currency="TWD", initial_cash=1_000_000.0),
+            mode="backtest",
+            symbol_cost_overrides={symbol: {"multiplier": 200.0, **costs}},
+            instrument_overrides={
+                symbol: {
+                    "instrument_type": "contract_monthly",
+                    "currency": "TWD",
+                    "contract_month": "202612",
+                    "calendar_id": "XTAIFEX",
+                }
+            },
+        )
+
+    @pytest.mark.parametrize(
+        ("symbol", "fee"),
+        [
+            ("TXF202612", 40.0),
+            ("MXF202611", 30.0),
+            ("TMF202612", 20.0),
+            ("TXFL6", 40.0),  # Shioaji's own month code: L = December, 6 = 2026
+            ("MXFA7", 30.0),
+            ("TMFH6", 20.0),
+        ],
+    )
+    def test_contract_months_charge_their_product_fee(self, symbol: str, fee: float) -> None:
+        cm = CostModel.from_config(self._unregistered_cfg(symbol), symbol=symbol)
+        assert cm.commission_per_contract == fee
+        assert cm.calc_commission(22_000.0, 10.0) == pytest.approx(10 * fee)
+
+    @pytest.mark.parametrize(
+        ("month", "alias"), [("TXF202612", "TXFR1"), ("MXF202611", "MXFR2"), ("TMFH6", "TMFR1")]
+    )
+    def test_contract_month_and_continuous_alias_share_one_fee(
+        self, month: str, alias: str
+    ) -> None:
+        month_cm = CostModel.from_config(self._unregistered_cfg(month), symbol=month)
+        alias_cm = CostModel.from_config(self._cfg(alias))
+        assert month_cm.commission_per_contract == alias_cm.commission_per_contract
+
+    @pytest.mark.parametrize("symbol", ["ZEF202612", "TXO202612", "TXF", "TXF2026", "TXFR3"])
+    def test_unrecognized_tw_future_refuses_to_resolve_without_a_fee(self, symbol: str) -> None:
+        with pytest.raises(ValueError, match="commission_per_contract"):
+            CostModel.from_config(self._unregistered_cfg(symbol), symbol=symbol)
+
+    def test_unrecognized_tw_future_runs_with_an_explicit_cost_model(self) -> None:
+        """An explicit cost model wins over every resolved cost, the fee included."""
+        import pandas as pd
+        from librae.backtest.engine import Backtest
+        from librae.core.strategy import Strategy
+
+        class DoNothing(Strategy):
+            def on_bar(self, ctx):
+                return []
+
+        ts = pd.date_range("2026-11-02 01:00", periods=3, freq="5min", tz="UTC")
+        bars = pd.DataFrame(
+            {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+            index=pd.MultiIndex.from_arrays(
+                [["ZEF202612"] * len(ts), ts], names=["symbol", "datetime"]
+            ),
+        )
+        cfg = self._unregistered_cfg("ZEF202612")
+        Backtest(bars, DoNothing(), config=cfg, cost_model=CostModel.zero())
+
+    @pytest.mark.parametrize("fee", [15.0, 0.0])
+    def test_explicit_fee_resolves_an_unrecognized_tw_future(self, fee: float) -> None:
+        cfg = self._unregistered_cfg("ZEF202612", commission_per_contract=fee)
+        assert CostModel.from_config(cfg, symbol="ZEF202612").commission_per_contract == fee
+
+    def test_explicit_fee_replaces_the_product_fee(self) -> None:
+        cfg = self._unregistered_cfg("TXF202612", commission_per_contract=25.0)
+        assert CostModel.from_config(cfg, symbol="TXF202612").commission_per_contract == 25.0
+
+    @pytest.mark.parametrize(
+        ("symbol", "market"), [("TXF202612", "us_equity"), ("ETHUSDT", "crypto")]
+    )
+    def test_unregistered_symbols_in_other_markets_still_pay_no_fixed_fee(
+        self, symbol: str, market: str
+    ) -> None:
+        cm = CostModel.from_config(self._unregistered_cfg(symbol, market=market), symbol=symbol)
+        market_cm = CostModel.from_market(get_market(market), multiplier=200.0)
+        assert cm.commission_per_contract == 0.0
+        assert cm.commission_rate == market_cm.commission_rate
+        assert cm.min_commission == market_cm.min_commission
+
     def test_negative_fee_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="commission_per_contract"):
             CostModel(
@@ -562,7 +658,7 @@ class TestDescribeSymbols:
     def test_run_wide_cost_override_reported_as_source(self) -> None:
         from librae.core.cost_model import describe_symbols
 
-        cfg = self._cfg(["UNREGISTERED"], cost_overrides={"multiplier": 10.0})
+        cfg = self._cfg(["TXF202612"], cost_overrides={"multiplier": 10.0})
         results = describe_symbols(cfg)
 
         assert results[0].multiplier == 10.0

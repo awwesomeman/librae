@@ -153,8 +153,9 @@ class CostModel:
         explicit override > config.symbol_cost_overrides[symbol] > config.cost_overrides
         (run-wide fallback) > the built-in symbol registry's per-symbol
         multiplier (spot auto-1.0, contract_* required-explicit),
-        tick_size (optional override) and commission_per_contract
-        (default 0) > market-level defaults for
+        tick_size (optional override), and commission_per_contract from the
+        symbol's product (default_commission_per_contract, registered or
+        not) > market-level defaults for
         everything else (see librae/config/symbols.py's module docstring).
 
         symbol: which symbol to resolve for — defaults to config.symbol
@@ -171,22 +172,22 @@ class CostModel:
                 multiplier can be resolved at all — not even the spot
                 auto-default, since we don't know the instrument_type) and
                 neither config.symbol_cost_overrides[symbol] nor config.cost_overrides
-                supplies multiplier either.
+                supplies multiplier either; or it is a tw_futures symbol
+                with no known product fee and no commission_per_contract
+                override.
         """
         if override is not None:
             return override
         symbol = symbol if symbol is not None else config.symbol
 
-        from librae.config.symbols import get_symbol
+        from librae.config.symbols import default_commission_per_contract, get_symbol
 
         try:
             sym = get_symbol(symbol)
             multiplier, tick_size = sym.multiplier, sym.tick_size
-            commission_per_contract = sym.commission_per_contract
             symbol_market = sym.market
         except KeyError:
             multiplier, tick_size = None, None
-            commission_per_contract = 0.0
             symbol_market = config.market
 
         route = (config.instrument_overrides or {}).get(symbol, {})
@@ -211,6 +212,11 @@ class CostModel:
                 "built-in registry (spot instruments default to 1.0 automatically; "
                 "contract_* instruments need it explicit)."
             )
+        commission_per_contract = (
+            overrides["commission_per_contract"]
+            if "commission_per_contract" in overrides
+            else default_commission_per_contract(symbol, symbol_market)
+        )
 
         base = asdict(
             cls.from_market(
@@ -235,7 +241,7 @@ class CostModel:
         """Build CostModel from MarketConfig (librae/config/market_config.py) + a per-symbol
         multiplier (required — see librae/config/symbols.py). tick_size
         defaults to the market's approximate value when not overridden.
-        commission_per_contract is per-symbol only: contracts in one market
+        commission_per_contract is per-product only: products in one market
         are charged different per-contract fees."""
         return cls(
             multiplier=multiplier,
