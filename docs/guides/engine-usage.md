@@ -539,7 +539,9 @@ bars with the calendar-aware period boundaries instead.
 Calendars own session labeling and resampling boundaries only. The engine
 still does not manufacture bars or infer suspensions, vendor outages,
 settlement days, or missing observations. The current TAIFEX implementation
-uses XTAI trading dates as its holiday-session source; users requiring a
+uses XTAI trading dates as its holiday-session source, including the announced
+closures Librae adds ahead of an `exchange_calendars` release (see
+[Layout](../../architecture.md#layout)); users requiring a
 product-specific exceptional closure must provide already filtered data.
 Cross-market baskets must provide coherent event labels; broker submissions
 remain sequential reductions-then-additions, not exchange-level atomic.
@@ -1308,17 +1310,20 @@ on the same fixture.
 
 `session_mode` defaults to `extended`, so an observation outside the regular
 session is the common case rather than an edge case. It anchors on the next
-regular session, not on a bare interval — otherwise the weekend behaviour above
+regular segment, not on a bare interval — otherwise the weekend behaviour above
 would be lost for the default configuration. The boundary is a deadline, not a
-prediction, so resolving a post-market bar to the next session is deliberately
+prediction, so resolving a post-market bar to the next segment is deliberately
 lenient: it cannot make a healthy feed look dead.
 
 Segments are half-open on every calendar, so a period ending at a segment
 close is followed by one in the next segment or session. The invariant that
 holds everywhere is that the next close must be strictly later than the
-current one; when the first candidate is not, the session ended at that
-boundary. A boundary resolving to the observation's own close would make a
-healthy feed look permanently stale.
+current one; when the first candidate is not, the segment ended at that
+boundary and the next observation completes in the next segment: the TAIFEX
+day segment after the 05:00 night close, the afternoon after a lunch break.
+Resuming at the next session instead would leave a stall in the rest of this
+one unnoticed. A boundary resolving to the observation's own close would make
+a healthy feed look permanently stale.
 
 If the calendar cannot answer at all, freshness degrades to the bare interval
 rather than raising — staleness monitoring exists to catch a dead feed and must

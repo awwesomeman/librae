@@ -51,10 +51,36 @@ def _exchange_calendar(calendar_id: str) -> ExchangeCalendar:
         ) from exc
 
     exchange_id = "XTAI" if calendar_id in _TAIFEX_CALENDARS else calendar_id
+    if exchange_id == "XTAI":
+        return _xtai_calendar()
     try:
         return xcals.get_calendar(exchange_id)
     except InvalidCalendarName as exc:
         raise ValueError(f"unknown calendar_id={calendar_id!r}") from exc
+
+
+# Typhoon closures TWSE and TAIFEX announced that exchange_calendars' XTAI
+# does not have. A date leaves this list once a release has it; a test fails
+# when that happens. Sources, TWSE then TAIFEX:
+# 2024-10-31 https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69236c2e30192dd5179bc0327.pdf
+#            https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=15446
+# 2026-07-10 https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69ef76943019f46cb86ae0110.pdf
+#            https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=17137
+# 2026-10-23 https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d6a0fa351b01a1638507940202.pdf
+#            https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=17441
+_XTAI_CLOSURES_MISSING_UPSTREAM = (date(2024, 10, 31), date(2026, 7, 10), date(2026, 10, 23))
+
+
+def _xtai_calendar() -> ExchangeCalendar:
+    from exchange_calendars.exchange_calendar_xtai import XTAIExchangeCalendar
+
+    class _XTAI(XTAIExchangeCalendar):
+        @property
+        def adhoc_holidays(self) -> list[pd.Timestamp]:
+            missing = [pd.Timestamp(day) for day in _XTAI_CLOSURES_MISSING_UPSTREAM]
+            return [*super().adhoc_holidays, *missing]
+
+    return _XTAI()
 
 
 try:
@@ -330,20 +356,31 @@ def next_session_open(value: date, calendar_id: str) -> pd.Timestamp:
     return _session_segments(calendar_id, next_label)[0][0]
 
 
-def next_session_open_after(value: object, calendar_id: str) -> pd.Timestamp:
-    """Open of the first trading session that begins at or after ``value``.
+def next_segment_open_after(value: object, calendar_id: str) -> pd.Timestamp:
+    """Open of the first trading segment that begins at or after ``value``.
 
-    Answers "when can the next observation arrive" for an instant that is not
-    inside a session — after a close, before an open, or on a non-session day.
-    A pre-market instant resolves to that same session's open; anything from
-    the open onward resolves to the following session.
+    Answers "when can the next observation arrive" for an instant at a close,
+    between segments, or on a non-session day. A segment rather than a
+    session, because a TAIFEX night and day segment, or the two halves around
+    a lunch break, belong to one session: resuming at the next session's open
+    would skip the rest of this one, and a stall there would go unnoticed.
     """
     timestamp = _timestamp(value)
-    session = _first_session_on_or_after(timestamp.date(), calendar_id)
-    session_open, _ = session_bounds(session, calendar_id)
-    if session_open >= timestamp:
-        return session_open
-    return next_session_open(session, calendar_id)
+    if calendar_id == ALWAYS_OPEN_CALENDAR:
+        midnight = timestamp.normalize()
+        return midnight if midnight == timestamp else midnight + pd.Timedelta(days=1)
+    calendar = _exchange_calendar(calendar_id)
+    # A session can open on the calendar day before its label (a TAIFEX night
+    # segment, or an Asia-Pacific open in UTC); every session labelled earlier
+    # than that day has closed before ``timestamp``'s UTC date began.
+    label = calendar.date_to_session(
+        pd.Timestamp(timestamp.date() - timedelta(days=1)), direction="next"
+    )
+    while True:
+        for segment_open, _ in _session_segments(calendar_id, label.date()):
+            if segment_open >= timestamp:
+                return segment_open
+        label = calendar.next_session(label)
 
 
 def _segment_containing(
