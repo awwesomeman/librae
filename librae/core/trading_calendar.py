@@ -413,6 +413,48 @@ def period_start(value: object, timeframe: str, calendar_id: str) -> pd.Timestam
     return _session_segments(calendar_id, first_label)[0][0]
 
 
+def bar_start_problem(
+    value: object, timeframe: str, calendar_id: str, *, session_mode: str
+) -> str | None:
+    """Why ``value`` cannot be the start of one of this feed's bars, else None.
+
+    Where the calendar describes the feed's geometry, a bar starts exactly at
+    its ``period_start``. An extended intraday feed on a calendar that knows
+    only regular hours has no such geometry (see ``bucket_geometry_is_known``),
+    so all that can be checked is that the bar lies on a session day in the
+    exchange's time zone and on the timeframe's wall-clock grid there; a
+    shifted stamp that stays inside such a day passes. Calendar-sized bars use
+    the regular sessions in either mode, as their completion does.
+    """
+    from librae.core.utils import interval_to_timedelta, to_canonical
+
+    timestamp = _timestamp(value)
+    canonical = to_canonical(timeframe)
+    intraday = canonical.startswith(("M", "H")) and not canonical.startswith("MN")
+    if intraday and not bucket_geometry_is_known(
+        calendar_id=calendar_id, session_mode=session_mode
+    ):
+        calendar = _exchange_calendar(calendar_id)
+        wall_clock = timestamp.tz_convert(calendar.tz).tz_localize(None)
+        try:
+            on_session_day = calendar.is_session(wall_clock.normalize())
+        except ValueError:  # outside the calendar's date range
+            on_session_day = False
+        if not on_session_day:
+            return f"{wall_clock.date().isoformat()} is not a {calendar_id} trading day"
+        if (wall_clock - wall_clock.normalize()) % interval_to_timedelta(canonical):
+            return f"not on the {canonical} grid of {calendar.tz} wall-clock time"
+        return None
+
+    try:
+        expected = period_start(timestamp, canonical, calendar_id)
+    except ValueError:
+        return f"outside the {calendar_id} trading sessions"
+    if expected != timestamp:
+        return f"its {canonical} bar starts at {expected.isoformat()}"
+    return None
+
+
 def period_close(value: object, timeframe: str, calendar_id: str) -> pd.Timestamp:
     """Return the real close boundary for one session-aligned bar period."""
     from librae.core.utils import interval_to_timedelta, to_canonical

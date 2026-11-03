@@ -37,6 +37,7 @@ from librae.core.market_data import (
     MarketDataSubscription,
     normalize_bar_times,
     subscription_from_instrument,
+    validate_bar_starts,
     validate_ohlcv_values,
 )
 from librae.core.utils import to_canonical
@@ -661,6 +662,11 @@ def write_ohlcv(
     row: only a strictly later availability may replace stored OHLCV values;
     equal or older versions are idempotent no-ops.
 
+    The whole batch is refused, with ``BarTimestampError``, if any ``ts`` is
+    not a bar start on the subscription's calendar (``validate_bar_starts``).
+    A misstamped feed otherwise stores cleanly and is only noticed by whoever
+    reads the bars months later.
+
     Returns the number of inserted or strictly newer row versions accepted.
     """
     if not isinstance(subscription, MarketDataSubscription):
@@ -686,6 +692,13 @@ def write_ohlcv(
         index_name = df.index.name or "index"
         df = df.reset_index().rename(columns={index_name: "ts"})
     ts_col = "ts" if "ts" in df.columns else "timestamp"
+    validate_bar_starts(
+        df[ts_col],
+        subscription.timeframe,
+        subscription.calendar_id,
+        session_mode=subscription.session_mode,
+        context=f"OHLCV write for {subscription.symbol!r} {subscription.data_source!r}",
+    )
     df = df.sort_values(ts_col, kind="stable").reset_index(drop=True)
     timestamps, available_at = normalize_bar_times(
         df[ts_col],

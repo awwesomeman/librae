@@ -996,6 +996,39 @@ def test_live_ohlcv_analytics_write_records_and_propagates() -> None:
     assert callbacks._failures["write_ohlcv"] == 1
 
 
+def test_live_ohlcv_bar_with_a_rejected_timestamp_is_alerted_and_acknowledged() -> None:
+    """No retry fixes a timestamp, and the delivery queue is ordered: a row
+    the writer refuses for its timestamp must not hold back the rows behind
+    it, so the sink alerts and returns instead of propagating."""
+    from librae.core.market_data import BarTimestampError
+
+    config = make_test_cfg(mode="sim")
+    notifier = MagicMock(enabled=True)
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        notifier,
+    )
+
+    with patch(
+        "librae.db.timescale_writer.write_ohlcv",
+        autospec=True,
+        side_effect=BarTimestampError("1 of 1 timestamps are not H1 bar starts"),
+    ):
+        callbacks.on_ohlcv(
+            "BTCUSDT",
+            "H1",
+            {"open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 10.0},
+            datetime(2025, 1, 1, 0, 30, tzinfo=UTC),
+        )
+
+    notifier.send_alert.assert_called_once()
+    assert "OHLCV Bar Rejected" in notifier.send_alert.call_args.kwargs["title"]
+    assert "not H1 bar starts" in notifier.send_alert.call_args.kwargs["message"]
+    # The database did not fail, so this must not build toward "DB Write Failing".
+    assert callbacks._failures.get("write_ohlcv", 0) == 0
+
+
 def test_timescale_callbacks_writes_runtime_event() -> None:
     config = make_test_cfg(mode="sim")
     callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)

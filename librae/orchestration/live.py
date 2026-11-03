@@ -15,6 +15,7 @@ import pandas as pd
 
 from librae.config.symbols import resolve_symbol
 from librae.core.cost_model import CostModel
+from librae.core.market_data import BarTimestampError
 from librae.core.utils import make_event_id
 from librae.integrations import AdapterFactory
 from librae.live.engine import (
@@ -245,6 +246,9 @@ class _TimescaleCallbacks:
         try:
             callback(*args, **kwargs)
             self._failures[name] = 0
+        except BarTimestampError:
+            # Refused input, not a failing database: the caller handles it.
+            raise
         except Exception as exc:
             failures = self._failures.get(name, 0) + 1
             self._failures[name] = failures
@@ -473,15 +477,25 @@ class _TimescaleCallbacks:
             timeframe=timeframe,
             session_mode=self._config.session_mode,
         )
-        # Propagates on purpose: this sink declares durable delivery, and the
-        # engine reads a normal return as acknowledgement. Swallowing here
-        # would drop the row the queue exists to protect.
-        self._write(
-            write_ohlcv,
-            frame,
-            subscription,
-            propagate=True,
-        )
+        # A failed write propagates: this sink declares durable delivery, and
+        # the engine reads a normal return as acknowledgement, so swallowing it
+        # would drop the row the queue exists to protect. A bar whose timestamp
+        # the writer refuses is the exception: no retry fixes it, and the queue
+        # is ordered, so holding it back would hold back every row behind it.
+        # It is acknowledged after alerting, and does not count as the database
+        # failing. Trading does not depend on the stored copy.
+        try:
+            self._write(
+                write_ohlcv,
+                frame,
+                subscription,
+                propagate=True,
+            )
+        except BarTimestampError as exc:
+            self._alert(
+                title=f"[{self._config.strategy_name}] OHLCV Bar Rejected",
+                message=f"{exc}. The bar was not stored; trading continues.",
+            )
 
     def on_heartbeat(self, run_id: str) -> None:
         from librae.db.timescale_writer import update_heartbeat
