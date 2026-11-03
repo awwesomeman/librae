@@ -318,8 +318,8 @@ class TestAReportThatCannotBeAppliedStillCancels:
         assert trader._active_orders == [], "AAA's cancel was confirmed and BBB never sent"
         adapter.place_order.assert_called_once()
 
-    def test_a_flatten_sends_the_cancel_and_goes_ahead_next_cycle(self):
-        """Its cancels are retried next cycle rather than halting the account it closes."""
+    def test_a_flatten_sends_the_cancel_and_goes_ahead_once_it_is_confirmed(self):
+        """The cancel's own answer ends the order, so the flatten goes ahead, never halting first."""
         adapter = _resting_adapter()
         trader, _, alerts = _trader(adapter)
         _buy_two(trader)
@@ -333,21 +333,17 @@ class TestAReportThatCannotBeAppliedStillCancels:
         adapter.get_order.side_effect = get_order
         trader.request_flatten("desk asked to close")
 
-        with pytest.raises(Exception, match="order id changed"):
-            trader._poll_cycle()
-
-        adapter.cancel_order.assert_called_once()
-        assert trader._halted is False
-        assert trader._active_orders == [], "BBB was dropped in the same pass, never sent"
-        adapter.place_order.assert_called_once()
-
         trader._poll_cycle()
 
+        adapter.cancel_order.assert_called_once()
         assert trader._halted is True
-        assert len(_submitted(adapter)) == 2, "the flatten sent its first exit"
+        assert len(_submitted(adapter)) == 2, "BBB was dropped, never sent; the first exit went"
         assert len(_titled(alerts, "Operator Flatten")) == 1
         assert _titled(alerts, "Refused") == []
         assert _titled(alerts, "Order Reconciliation Failed") == []
+        [mismatch] = _titled(alerts, "Order Report Not Applied")
+        assert "order id changed" in mismatch["message"]
+        assert "cancel sent" in mismatch["message"]
 
 
 def _answer_about_another_order(adapter):
@@ -381,8 +377,15 @@ class TestHaltCancellationFailure:
 
         with pytest.raises(RuntimeError, match="order id changed"):
             trader.halt("desk asked to stop")
-        with pytest.raises(RuntimeError, match="order id changed"):
+        if retry_by == "poll_cycle":
+            # The cycle goes on, and an alert names the order instead.
             retry()
+            [mismatch] = _titled(alerts, "Order Report Not Applied")
+            assert "order id changed" in mismatch["message"]
+            assert "the halt's cancellation stays owed" in mismatch["message"]
+        else:
+            with pytest.raises(RuntimeError, match="order id changed"):
+                retry()
         assert _titled(alerts, "Halt Cancellation Completed") == []
 
         undo()
@@ -407,10 +410,10 @@ class TestHaltCancellationFailure:
         outage["down"] = False
         answers = adapter.get_order.side_effect
         adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
-        with pytest.raises(RuntimeError, match="order id changed"):
-            trader._poll_cycle()
+        trader._poll_cycle()
         [persisted] = _titled(alerts, "Halt Persisted")
         assert "cancelling tracked orders failed" in persisted["message"]
+        assert "order id changed" in persisted["message"]
         assert _titled(alerts, "Halt Cancellation Completed") == []
 
         adapter.get_order.side_effect = answers

@@ -553,6 +553,17 @@ def _is_recovery_exit(request: OrderRequest) -> bool:
 class ReportNotAppliedError(RuntimeError):
     """A venue answer about a tracked order did not reconcile with it; its cancel went ahead."""
 
+    def __init__(self, message: str, order: TrackedOrder) -> None:
+        super().__init__(message)
+        self.order = order
+
+
+def _report_failure(request: OrderRequest, order_id: str, error: Exception) -> str:
+    return (
+        f"{request.symbol} order_id={order_id or 'unassigned'} broker report not applied "
+        f"({type(error).__name__}: {error})"
+    )
+
 
 def _timeout_message(request: OrderRequest, order_id: str, report: ExecutionReport) -> str:
     return (
@@ -874,8 +885,22 @@ class LiveTrader:
         self._entries_paused: bool = False
         # A halt the store has not recorded: a restart would resume unhalted.
         self._halt_unpersisted = False
-        # Whether a halt still owes the live cancellation it skipped or that failed.
+        # Whether a halt still owes the live cancellation it skipped, that failed,
+        # or that the venue has not yet confirmed for every tracked order.
         self._halt_cancels_pending = False
+        # Each poll cycle and each synchronous operator halt is one pass over
+        # the tracked orders, and a cancel goes out at most once per order in
+        # a pass: a status read just after it may not show it yet.
+        self._order_pass = 0
+        # The pass that last sent a cancel the venue answered, by client order
+        # id. Beyond that pass, a cancel is held back only while the venue
+        # reports it pending; a pending state the venue set itself was never
+        # ours. Not checkpointed, so after a restart a pending cancel goes out
+        # once more.
+        self._cancels_sent: dict[str, int] = {}
+        # Alerts about orders the venue has not answered or confirmed, by title
+        # and message: each goes out once instead of every cycle.
+        self._once_alerts: set[tuple[str, str]] = set()
         # What a failed checkpoint left unwritten, keyed by client order id, and
         # the fills it left unpublished; the next checkpoint that lands carries both.
         self._unpersisted_orders: dict[str, TrackedOrder] = {}
@@ -2110,22 +2135,59 @@ class LiveTrader:
         return None, ""
 
     def _cancel_for_halt(self) -> tuple[Exception | None, str]:
-        """Cancel every tracked order, or keep the cancellation owed and name its failure."""
+        """Cancel every tracked order, keeping the cancellation owed until the venue confirms.
+
+        Returns the pass's first failure, if any, and a note naming it and
+        every order still tracked: a cancel the venue has not confirmed may
+        still fill.
+        """
+        failure: Exception | None = None
+        note = ""
         try:
             self._cancel_active_orders()
         except Exception as exc:
-            self._halt_cancels_pending = True
-            return exc, f"; cancelling tracked orders failed ({type(exc).__name__}: {exc})"
-        self._halt_cancels_pending = False
-        return None, ""
+            failure = exc
+            note = f"; cancelling tracked orders failed ({type(exc).__name__}: {exc})"
+        self._halt_cancels_pending = failure is not None or bool(self._active_orders)
+        if self._active_orders:
+            note += f"; awaiting cancel confirmation for {self._tracked_orders_summary()}"
+        return failure, note
+
+    def _tracked_orders_summary(self) -> str:
+        """Each tracked order with the status the venue last reported for it."""
+        return ", ".join(
+            f"{tracked.request.symbol} order_id={tracked.order_id or 'unassigned'} "
+            f"({tracked.status})"
+            for tracked in self._active_orders
+        )
+
+    def _alert_once(self, title: str, message: str) -> None:
+        """Alert, unless this exact alert went out already: it would otherwise repeat every cycle."""
+        logger.error("%s: %s", title, message)
+        if (title, message) in self._once_alerts:
+            return
+        self._once_alerts.add((title, message))
+        self._notify(
+            "send_alert",
+            title=f"[{self._executor.strategy_name}] {title}",
+            message=message,
+        )
+
+    def _alert_report_not_applied(self, message: str) -> None:
+        self._alert_once("Order Report Not Applied", message)
+
+    def _alert_unapplied_while_halted(self, exc: ReportNotAppliedError) -> None:
+        """Alert, without failing the cycle: a halted account does no order work to protect."""
+        owed = "; the halt's cancellation stays owed" if exc.order in self._active_orders else ""
+        self._alert_report_not_applied(f"{exc}{owed}")
 
     def _retry_halt(self) -> bool:
         """Finish a halt's checkpoint, then its owed cancellation, before any other work.
 
-        A failure of either propagates and stops the cycle, so no order work
-        runs on a state the store never saw or ahead of the cancellation, and
-        the next cycle tries again. Returns whether it sent the cancellation
-        pass, which already polled and cancelled every tracked order.
+        A failure of either propagates, so no order work runs on a state the
+        store never saw or ahead of the cancellation, and the next cycle tries
+        again. Returns whether it sent the cancellation pass, which already
+        polled and cancelled every tracked order.
         """
         if self._halt_unpersisted:
             self._persist_state()
@@ -2144,18 +2206,17 @@ class LiveTrader:
                 raise failure
             return cancelled
         if self._halt_cancels_pending:
-            # A recorded halt owes a cancellation only after one failed, and
-            # an alert named that failure. It stays owed while any order is
-            # tracked: a cancel the venue has not confirmed may still fill.
+            # Owed while any order is tracked, since a cancel the venue has not
+            # confirmed may still fill; the halt alert named what was left.
             self._cancel_active_orders()
             if self._active_orders:
                 return True
             self._halt_cancels_pending = False
-            logger.warning("Halt cancellation completed after an earlier failure")
+            logger.warning("Halt cancellation completed")
             self._notify(
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] Halt Cancellation Completed",
-                message="The cancellation that failed earlier is done; no order is tracked.",
+                message="The venue confirmed every cancel the halt owed; no order is tracked.",
             )
             return True
         return False
@@ -2257,12 +2318,23 @@ class LiveTrader:
         if self._halt_unpersisted or self._halt_cancels_pending:
             # Answer with the finished halt, its error, or what it still owes.
             logger.warning("Manual Halt: %s; already halted, not yet finished", reason)
-            cancelled = self._retry_halt()
+            try:
+                cancelled = self._retry_halt()
+            except ReportNotAppliedError as exc:
+                # A signalled halt gets no other answer: the cycle goes on.
+                self._notify(
+                    "send_alert",
+                    title=f"[{self._executor.strategy_name}] Manual Halt",
+                    message=f"{reason}; already halted; cancellation owed: {exc}",
+                )
+                raise
             if self._halt_cancels_pending:
                 message = (
                     f"{reason}; already halted; cancellation owed, "
                     f"{len(self._active_orders)} tracked"
                 )
+                if self._active_orders:
+                    message += f": {self._tracked_orders_summary()}"
                 logger.warning("Manual Halt: %s", message)
                 self._notify(
                     "send_alert",
@@ -2301,6 +2373,7 @@ class LiveTrader:
             try:
                 if self._halted and not self._has_active_recovery_orders():
                     self._cancel_active_orders()
+                    self._halt_cancels_pending = bool(self._active_orders)
                 else:
                     self._advance_live_orders(submit_planned=False)
                 self._reconcile_open_orders()
@@ -2557,6 +2630,7 @@ class LiveTrader:
                 raise RuntimeError(
                     f"{exc}; the halt stays queued for the first cycle of run()"
                 ) from None
+            self._order_pass += 1
             self._run_requested_halt()
 
     def request_halt(self, reason: str = "operator requested halt") -> None:
@@ -2661,6 +2735,7 @@ class LiveTrader:
             self._reconciliation_degraded = False
             self._skipped_close_alerts.clear()
             self._unfunded_entry_alerts.clear()
+            self._once_alerts.clear()
             self._equity_peak = equity
             self._prev_equity = equity
             self._status_window_equity = equity
@@ -2741,11 +2816,22 @@ class LiveTrader:
 
     def _poll_cycle(self) -> None:
         """Process completed market-data events without live catch-up orders."""
-        cancelled = self._run_requested_halt()
+        self._order_pass += 1
+        # A halt's cancel pass that meets an answer it cannot apply alerts
+        # instead of failing the cycle, so reconciliation still runs. A
+        # requested halt has already alerted it, naming the order.
+        try:
+            cancelled = self._run_requested_halt()
+        except ReportNotAppliedError:
+            logger.exception("Requested halt left its cancellation owed")
+            cancelled = True
         try:
             # An owed halt cancellation has already polled and cancelled every
             # tracked order once this cycle; advancing would repeat the head's.
             cancelled = cancelled or self._retry_halt()
+        except ReportNotAppliedError as exc:
+            self._alert_unapplied_while_halted(exc)
+            cancelled = True
         finally:
             # After the retry, so a failing reset cannot skip a halt's owed
             # work; even after a failed one, so a reset is answered in the
@@ -4478,14 +4564,16 @@ class LiveTrader:
                 and tracked.status == "cancel_pending"
                 and not _is_recovery_exit(request)
             ):
+                if submit_planned and self._flatten_cancels_this_cycle():
+                    return
                 try:
                     report = self._cancel_tracked_order(tracked)
                 except ReportNotAppliedError as exc:
                     # The cancel went out regardless. A halt has stopped
-                    # trading already and a flatten retries its cancels next
-                    # cycle; otherwise what the venue holds is unknown.
-                    if self._halted or self._flatten_request is not None:
-                        raise
+                    # trading already; otherwise what the venue holds is unknown.
+                    if self._halted:
+                        self._alert_unapplied_while_halted(exc)
+                        return
                     self._halt_live(title="Order Reconciliation Failed", message=str(exc))
                     return
                 # Over age, the order fails as its timeout would have failed
@@ -4511,7 +4599,8 @@ class LiveTrader:
                 ):
                     return
                 continue
-            if not tracked.placement_attempted:
+            polled = tracked.placement_attempted
+            if not polled:
                 if not submit_planned:
                     return
                 if self._drop_paused_entry(tracked) or self._drop_unfunded_entry(tracked):
@@ -4569,6 +4658,13 @@ class LiveTrader:
                             lambda request=request: self._executor.find_order(request)
                         )
                 except Exception as exc:
+                    if submit_planned and self._flatten_cancels_this_cycle():
+                        # Its pass reads the order again and cancels it by id.
+                        logger.exception(
+                            "Order status unavailable; left to the operator flatten: %s",
+                            request.client_order_id,
+                        )
+                        return
                     if not self._live_order_timed_out(tracked):
                         raise
                     logger.exception(
@@ -4589,18 +4685,39 @@ class LiveTrader:
                     )
                     return
 
-            cancellation_was_pending = tracked.status == "cancel_pending"
             prior_filled_quantity = tracked.filled_quantity
-            self._apply_order_report(tracked, report)
-            if (
-                cancellation_was_pending or report.status == "cancel_pending"
-            ) and report.status not in (
-                "filled",
-                "cancelled",
-                "rejected",
-            ):
-                tracked.status = "cancel_pending"
-                self._persist_state(tracked)
+            try:
+                self._apply_order_report(tracked, report)
+            except ValueError as exc:
+                # A placement's answer still raises, before anything changed,
+                # and the next poll retries it here.
+                if not polled:
+                    raise
+                failure = _report_failure(request, tracked.order_id or report.order_id, exc)
+                if not submit_planned:
+                    # A restore at startup fails closed, naming the order.
+                    raise ValueError(failure) from exc
+                # The venue answered with something that does not match the
+                # order, which may still be working: it stays tracked, under
+                # its timeout, and the rest of the cycle goes on.
+                if self._flatten_cancels_this_cycle():
+                    logger.error("%s; left to the operator flatten", failure)
+                    return
+                timed_out = self._live_order_timed_out(tracked)
+                self._alert_report_not_applied(
+                    f"{failure}; "
+                    + (
+                        "cancelling it at its timeout"
+                        if timed_out
+                        else "the order stays tracked and is polled again next cycle"
+                    )
+                )
+                if timed_out:
+                    self._cancel_timed_out_order(tracked, None, status_error=exc)
+                return
+            if report.status == "cancel_pending":
+                # The venue is cancelling it on its own; its outcome is polled,
+                # and one that reverts to working is under its timeout again.
                 return
             if report.status in ("cancelled", "rejected"):
                 message = (
@@ -4914,11 +5031,7 @@ class LiveTrader:
         tracked.cancel_requested = True
         self._persist_state(tracked)
         try:
-            cancel_report = self._timed_order_call(
-                lambda: self._executor.cancel_order(request, order_id)
-            )
-            if cancel_report is None:
-                raise RuntimeError("broker cancellation returned no execution report")
+            cancel_report = self._send_cancel(tracked, order_id)
             self._apply_order_report(tracked, cancel_report)
         except Exception as exc:
             # The cancel attempt itself failed — still unknown broker state.
@@ -5018,6 +5131,7 @@ class LiveTrader:
         tracked.error = report.rejection_reason or tracked.error
         if report.status in ("filled", "cancelled", "rejected"):
             self._active_orders.remove(tracked)
+            self._cancels_sent.pop(request.client_order_id, None)
         if result is not None:
             self._trade_count += len(result.trades)
             self._unpublished_results.append(result)
@@ -5028,11 +5142,18 @@ class LiveTrader:
         """Reconcile and cancel one tracked order without resubmitting it.
 
         Returns the applied report that ended the order, or None while it may
-        still be working. A ValueError from a broker call or from applying its
-        report is a venue answer that does not reconcile with the tracked
-        order, raised by ``_cancel_unreconciled`` once the cancel is out; any
-        other broker error is the venue not answering, logged and left to the
-        next pass.
+        still be working. The cancel goes out unless one this process sent
+        still stands (``_cancel_outcome_so_far``): neither a pending state the
+        venue set itself nor a failed status read holds it back, and in a
+        later pass one the venue turned down, leaving the order working, is
+        sent again. NautilusTrader and LEAN likewise hold back a second
+        cancel only while their own is pending.
+
+        A ValueError from a broker call or from applying its report is a venue
+        answer that does not reconcile with the tracked order, raised by
+        ``_cancel_unreconciled`` once the cancel is out; any other broker error
+        is the venue not answering, logged, and the cancel goes out by order id
+        all the same.
         """
         if not tracked.placement_attempted:
             tracked.status = "cancelled"
@@ -5040,13 +5161,13 @@ class LiveTrader:
             self._persist_state(tracked)
             return None
 
-        cancel_sent = tracked.status == "cancel_pending"
         if not tracked.cancel_requested:
             tracked.cancel_requested = True
             self._persist_state(tracked)
 
         request = tracked.request
         order_id = tracked.order_id
+        cancel_sent = False
         try:
             try:
                 report = self._timed_order_call(
@@ -5063,27 +5184,22 @@ class LiveTrader:
                     "Failed to reconcile tracked order before cancellation %s",
                     request.client_order_id,
                 )
-                return None
-            if report is None:
-                logger.error("Cannot cancel unresolved order %s", request.client_order_id)
-                return None
-            order_id = order_id or report.order_id
-            self._apply_order_report(tracked, report)
-            if report.status in ("filled", "cancelled", "rejected"):
-                return report
-            if cancel_sent or report.status == "cancel_pending":
-                if report.status != "cancel_pending":
-                    tracked.status = "cancel_pending"
-                    self._persist_state(tracked)
+                if not order_id:
+                    return None
+            else:
+                if report is None:
+                    logger.error("Cannot cancel unresolved order %s", request.client_order_id)
+                    return None
+                order_id = order_id or report.order_id
+                self._apply_order_report(tracked, report)
+                if report.status in ("filled", "cancelled", "rejected"):
+                    return report
+            if self._cancel_outcome_so_far(tracked) is not None:
                 return None
 
             cancel_sent = True
             try:
-                cancel_report = self._timed_order_call(
-                    lambda: self._executor.cancel_order(request, order_id)
-                )
-                if cancel_report is None:
-                    raise RuntimeError("broker cancellation returned no execution report")
+                cancel_report = self._send_cancel(tracked, order_id)
             except ValueError:
                 raise
             except Exception:
@@ -5096,6 +5212,35 @@ class LiveTrader:
             self._cancel_unreconciled(tracked, order_id, exc, cancel_sent=cancel_sent)
             return None
 
+    def _cancel_outcome_so_far(self, tracked: TrackedOrder) -> str | None:
+        """What became of a cancel this process sent that still stands, or None if none does.
+
+        One stands while the venue's latest applied answer reports it
+        pending, and through the rest of the pass that sent it.
+        """
+        sent_in = self._cancels_sent.get(tracked.request.client_order_id)
+        if sent_in is None:
+            return None
+        if tracked.status == "cancel_pending":
+            return "cancel already pending"
+        return "cancel already sent" if sent_in == self._order_pass else None
+
+    def _send_cancel(self, tracked: TrackedOrder, order_id: str) -> ExecutionReport:
+        """Cancel ``tracked`` by order id, recording the cancel once the venue answers.
+
+        A ValueError is an answer too. The caller applies the report.
+        """
+        request = tracked.request
+        try:
+            report = self._timed_order_call(lambda: self._executor.cancel_order(request, order_id))
+        except ValueError:
+            self._cancels_sent[request.client_order_id] = self._order_pass
+            raise
+        if report is None:
+            raise RuntimeError("broker cancellation returned no execution report")
+        self._cancels_sent[request.client_order_id] = self._order_pass
+        return report
+
     def _cancel_unreconciled(
         self, tracked: TrackedOrder, order_id: str, error: ValueError, *, cancel_sent: bool
     ) -> None:
@@ -5104,32 +5249,27 @@ class LiveTrader:
         The order may still be working at the venue, and the answer may carry
         fills the ledger lacks, so the error names the order and what became
         of its cancel. The order stays tracked until a report that applies
-        ends it.
+        ends it. A cancel this process sent that still stands is not sent again.
         """
         request = tracked.request
-        failure = (
-            f"{request.symbol} order_id={order_id or 'unassigned'} broker report not applied "
-            f"({type(error).__name__}: {error})"
-        )
+        failure = _report_failure(request, order_id, error)
+        standing = self._cancel_outcome_so_far(tracked)
         if cancel_sent:
-            pending = tracked.status == "cancel_pending"
-            outcome = "cancel already pending" if pending else "cancel sent"
+            outcome = "cancel sent"
+        elif standing is not None:
+            outcome = standing
         elif not order_id:
             outcome = "no order id to cancel"
         else:
             try:
-                cancel_report = self._timed_order_call(
-                    lambda: self._executor.cancel_order(request, order_id)
-                )
-                if cancel_report is None:
-                    raise RuntimeError("broker cancellation returned no execution report")
+                cancel_report = self._send_cancel(tracked, order_id)
                 self._apply_order_report(tracked, cancel_report)
             except Exception as exc:
                 logger.exception("Cancel not confirmed for %s", request.client_order_id)
                 outcome = f"cancel not confirmed ({type(exc).__name__}: {exc})"
             else:
                 outcome = "cancel sent"
-        raise ReportNotAppliedError(f"{failure}; {outcome}") from error
+        raise ReportNotAppliedError(f"{failure}; {outcome}", tracked) from error
 
     def _cancel_active_orders(self) -> None:
         """Cancel every tracked order, then raise the first failure, if any.
@@ -6076,8 +6216,25 @@ class LiveTrader:
         if not self._executor.simulation and self._active_orders:
             # Exits queue behind working orders, so those are cancelled first;
             # a cancellation the venue has not confirmed retries next cycle.
-            self._cancel_active_orders()
+            try:
+                self._cancel_active_orders()
+            except ReportNotAppliedError as exc:
+                # Not a halt: one transient answer would then refuse the
+                # flatten, and the cancel goes out again each cycle anyway.
+                if exc.order not in self._active_orders:
+                    # Its cancel's own answer applied and ended it.
+                    self._alert_report_not_applied(str(exc))
+                else:
+                    self._alert_report_not_applied(f"{exc}; the operator flatten waits for it")
+                    return
             if self._active_orders:
+                # Neither a cycle error nor a timeout will speak for it: the
+                # venue may be down, or never confirm a cancel it answered.
+                self._alert_once(
+                    "Operator Flatten Waiting",
+                    f"account_id={self._account_id} {reason} — no exit goes out until the "
+                    f"venue confirms these orders ended: {self._tracked_orders_summary()}",
+                )
                 return
         self._clear_flatten_request(request)
         self._flatten_account_and_halt(
@@ -6086,6 +6243,16 @@ class LiveTrader:
             title="Operator Flatten",
             detail=reason,
         )
+
+    def _flatten_cancels_this_cycle(self) -> bool:
+        """Whether a requested flatten will poll and cancel every tracked order this cycle.
+
+        Order work it is about to do is left to it, so an order is not
+        cancelled twice in one cycle nor reported twice.
+        """
+        with self._flatten_request_lock:
+            requested = self._flatten_request is not None
+        return requested and not self._halted and not self._resume_unverified
 
     def _clear_flatten_request(self, handled: tuple[int, str]) -> None:
         # A request that arrived after ``handled`` was read stays pending.
