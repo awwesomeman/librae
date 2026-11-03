@@ -324,7 +324,10 @@ currently exposes a venue-native combo order, so live execution submits each
 leg of a group serially. If any leg in a group is rejected, cancelled, or
 times out, the engine cancels that group's remaining legs and alerts —
 unrelated groups and independent intents keep executing; it does not attempt
-to unwind legs that already filled. If a broker adds native combo support in
+to unwind legs that already filled. A `PortfolioWeights` rebalance whose
+grouped leg fails that way stops whole without halting, because replanning
+it would send the same leg again; the next decision replans from the
+current book. If a broker adds native combo support in
 the future, use that adapter-specific capability instead. Before anything is
 submitted, live planning preflights each group as a whole: a grouped `close`
 for a symbol with no open position, or a grouped leg with no reference
