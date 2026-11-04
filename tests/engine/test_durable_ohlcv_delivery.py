@@ -183,6 +183,16 @@ class _DurableSink:
         self.accepted.append((symbol, timeframe, ts))
 
 
+class _CountingDurableSink(_DurableSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def __call__(self, symbol, timeframe, bar, ts) -> None:
+        self.attempts += 1
+        super().__call__(symbol, timeframe, bar, ts)
+
+
 class _BestEffortSink:
     """A plain user callback, which must keep its existing semantics."""
 
@@ -1062,3 +1072,22 @@ class TestABurstOfCorrectionsIsNotDropped:
         assert len(restamped) == 5
         assert runner._pending_ohlcv == []
         assert dropped == []
+
+    def test_a_refusing_sink_is_not_asked_again_for_every_correction(self, monkeypatch) -> None:
+        """With the queue full and the database down, one write attempt per
+        correction would only repeat the failure."""
+        down = _CountingDurableSink()
+        down.fail = True
+
+        def refuse_with_a_full_queue(runner):
+            runner._pending_ohlcv[:] = _pending_sequence(self.BOUND)
+            runner._on_ohlcv = down
+
+        _runner, _restamped, dropped = self._restamp_every_cached_bar(
+            monkeypatch, before_second_poll=refuse_with_a_full_queue
+        )
+
+        assert len(dropped) == 5
+        # The cycle's own retry, the one flush the burst triggers, and the
+        # flush after the fetch; not one more per correction.
+        assert down.attempts == 3

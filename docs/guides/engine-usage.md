@@ -1429,7 +1429,8 @@ start, bars that arrived while warmup was short, catch-up bars a live run
 stepped over. It does so after the decision's orders go out, so recording
 never delays one. After a restart, the fetch offers the window the last
 decision before it read, to backfill rows a crash kept from the table; older
-bars it fetched are left out, since no decision may have read them. Neither is
+bars it fetched are left out, since a fetch can reach further back than any
+decision read and a crash can lose only that last window. Neither is
 queued, since either can run to thousands of rows; they go to `on_ohlcv_batch`
 as one call per symbol when the sink provides it. A refusal is logged, the
 rest is skipped, and the cycle still decides its new bar. A later version of a
