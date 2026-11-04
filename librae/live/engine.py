@@ -561,8 +561,9 @@ class ReportNotAppliedError(RuntimeError):
     def __init__(self, message: str, order: TrackedOrder, *, content: str) -> None:
         super().__init__(message)
         self.order = order
-        # The message less a venue error's own text, which can differ on every
-        # attempt: what makes a later failure the same problem to alert on.
+        # What makes a later failure the same problem to alert on: the
+        # mismatch, without what became of its cancel, which can carry a
+        # venue's error text that differs on every attempt.
         self.content = content
 
 
@@ -5524,7 +5525,6 @@ class LiveTrader:
         request = tracked.request
         failure = _report_failure(request, order_id, error)
         standing = self._cancel_outcome_so_far(tracked)
-        stable_outcome: str | None = None
         if cancel_sent:
             outcome = "cancel sent"
         elif standing is not None:
@@ -5538,12 +5538,9 @@ class LiveTrader:
             except Exception as exc:
                 logger.exception("Cancel not confirmed for %s", request.client_order_id)
                 outcome = f"cancel not confirmed ({type(exc).__name__}: {exc})"
-                stable_outcome = f"cancel not confirmed ({type(exc).__name__})"
             else:
                 outcome = "cancel sent"
-        raise ReportNotAppliedError(
-            f"{failure}; {outcome}", tracked, content=f"{failure}; {stable_outcome or outcome}"
-        ) from error
+        raise ReportNotAppliedError(f"{failure}; {outcome}", tracked, content=failure) from error
 
     def _cancel_active_orders(self) -> None:
         """Cancel every tracked order, then raise the first failure, if any.
