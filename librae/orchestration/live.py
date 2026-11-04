@@ -27,6 +27,7 @@ from librae.live.engine import (
 )
 from librae.live.execution_identity import ExecutionIdentity, resolve_execution_identity
 from librae.live.interfaces import Notifier
+from librae.live.persistent_alerts import PersistentAlerts
 from librae.live.state import normalize_runtime_revision
 
 if TYPE_CHECKING:
@@ -221,6 +222,13 @@ class _TimescaleCallbacks:
         self._execution_identity = execution_identity
         self._run_id = ""
         self._failures: dict[str, int] = {}
+        # A feed stamped wrong is wrong for every bar: one problem per subscription.
+        self._bar_rejections = PersistentAlerts(
+            lambda title, message: self._alert(
+                title=f"[{config.strategy_name}] {title}", message=message
+            ),
+            lambda: datetime.now(tz=UTC),
+        )
 
     def _write(
         self,
@@ -492,10 +500,15 @@ class _TimescaleCallbacks:
                 propagate=True,
             )
         except BarTimestampError as exc:
-            self._alert(
-                title=f"[{self._config.strategy_name}] OHLCV Bar Rejected",
-                message=f"{exc}. The bar was not stored; trading continues.",
+            self._bar_rejections.fire(
+                subscription,
+                "OHLCV Bar Rejected",
+                f"{exc}. The bar was not stored; trading continues.",
+                # Each error names its own bar; the problem is the feed's.
+                content="",
             )
+            return
+        self._bar_rejections.clear(subscription)
 
     def on_heartbeat(self, run_id: str) -> None:
         from librae.db.timescale_writer import update_heartbeat

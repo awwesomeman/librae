@@ -92,8 +92,32 @@ Order placement alerts (rules in
 |---|---|---|
 | Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled, and a target rebalance stopped until the next decision. A failed flatten or drawdown exit alerts as Close Rejected or Close Cancelled instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted |
 | Ambiguous Order Placement | Placement failed with an error the adapter could not classify and the client-id lookup found nothing: the order may still exist at the venue; halted. The error is in the order's `broker_orders.error` | Check the broker's order history for the client order id. `reset_halt()` refuses (`unresolved_broker_orders`) until the engine resolves the order |
-| Order Report Not Applied | The venue's status answer for the named order does not match what the engine tracks (the message says how). The order stays tracked and under its timeout, which cancels it; not halted. Sent once per distinct message; the cases met while cancelling are under [Halt not persisted](#halt-not-persisted) | Compare that order and its position at the broker with the ledger, and fix the adapter or venue cause |
+| Order Report Not Applied | The venue's status answer for the named order does not match what the engine tracks (the message says how). The order stays tracked and under its timeout, if one is set, which cancels it; without one the strategy stays blocked behind it. Not halted. Repeats as a [lasting problem](#lasting-problems); the cases met while cancelling are under [Halt not persisted](#halt-not-persisted) | Compare that order and its position at the broker with the ledger, and fix the adapter or venue cause |
 | Insufficient Free Balance, Free Balance Unavailable, Unpriced Entry | An entry, or a whole group with an entry leg, was not submitted: the broker's free balance was below its requirement, could not be read, or the requirement could not be priced (the alert names the amounts or the error). The other queued orders still went out, and a target rebalance stopped until the next decision; not halted. The alert repeats for a cause and symbol only after a check for that symbol passes or `reset_halt()`; every refusal is still a `decision_skipped` event | Restore the balance, or stop flat and start from the broker balance (see the `reset_halt()` step of [Kill-switch rehearsal](#kill-switch-rehearsal)); for an unreadable balance or price, fix what the error names. A rotation refused for want of cash its own exit would free must list that exit first |
+
+### Lasting problems
+
+**Order Report Not Applied**, **Operator Flatten Waiting** and **OHLCV Bar
+Rejected** report a problem met again every cycle or bar. Each alerts when
+the problem appears or changes, a return to an earlier state included; then
+once per `REPEAT_INTERVAL` (`librae/live/persistent_alerts.py`) while it
+lasts, adding how long and how many times it was seen; then once as
+**Resolved**, its message starting with the problem's title, when it ends. A
+problem that clears and comes back within `REPEAT_INTERVAL` is the same one,
+so one that comes and goes alerts no faster than one that stays:
+
+- Order Report Not Applied: the same while its message is. It ends once
+  every answer about that order has applied for `REPEAT_INTERVAL`, or when
+  the order ends after its answers applied again. An answer that applies in
+  the cycle another failed, such as the cancel a timeout or a halt sends
+  after an unappliable read, does not count: an order that ends that way is
+  not resolved, since fills that read carried may be missing.
+- Operator Flatten Waiting: the same while the orders and statuses it lists
+  are. It ends when the flatten goes ahead; a refused flatten says so
+  instead.
+- OHLCV Bar Rejected: one problem per subscription, whichever bar was
+  refused. It ends once that subscription's bars have been stored for
+  `REPEAT_INTERVAL`.
 
 ## Kill-switch rehearsal
 
@@ -312,10 +336,11 @@ the ledger: compare that order and its position at the broker with the
 ledger. Met while a running account finishes a cancel, such as a timeout's
 after a restart, the same answer then halts it, as **Order Reconciliation
 Failed**. Met by an operator flatten cancelling working orders, it alerts
-**Order Report Not Applied** once; the flatten sends the cancel again each
-cycle and goes ahead once the venue confirms the order ended. It never halts
-for it, since a halt would refuse the flatten: if the answer stays
-unappliable, cancel the order at the venue and fix the cause.
+**Order Report Not Applied** as a [lasting problem](#lasting-problems); the
+flatten sends the cancel again each cycle and goes ahead once the venue
+confirms the order ended. It never halts for it, since a halt would refuse
+the flatten: if the answer stays unappliable, cancel the order at the venue
+and fix the cause.
 
 A process that exits before **Halt Persisted** restarts from the last written
 checkpoint, unhalted: nothing in the engine can recover a halt the store never
@@ -330,9 +355,11 @@ instead of halting and closing at the venue, which desynchronises the
 checkpoint. The loop cancels working orders, submits the exits, halts, and
 sends an **Operator Flatten** alert naming anything that remains open. While
 the venue has not confirmed every cancelled order ended, it resends their
-cancels each cycle and sends one **Operator Flatten Waiting** alert listing
-them with the status the venue last gave; if that persists, check the venue
-and cancel them there. Exits still resting keep being polled while halted. Once
+cancels each cycle. A venue that confirms a cancel one cycle later makes one
+cycle's wait normal, so from the second cycle it sends **Operator Flatten
+Waiting**, a [lasting problem](#lasting-problems), listing them with the
+status the venue last gave; if that persists, check the venue and cancel them
+there. Exits still resting keep being polled while halted. Once
 `trader.halt_reset_readiness()` is ready, `trader.reset_halt()` resumes. A
 request on a halted account is refused with an **Operator Flatten Refused**
 alert; right after `reset_halt()` it waits until reconciliation has verified
