@@ -75,7 +75,7 @@ FROM generate_series(0, 14 * 24 - 1) AS i,
      (VALUES ('BTCUSDT', 60000.0, 150.0),
              ('ETHUSDT', 3000.0, 500.0),
              ('SOLUSDT', 130.0, 900.0)) AS sym(symbol, base, base_vol)
-ON CONFLICT (run_id, symbol, ts, available_at) DO NOTHING;
+ON CONFLICT (run_id, symbol, ts, available_at, open, high, low, close, volume) DO NOTHING;
 
 -- Hourly equity_curve over the same window — mild uptrend with one
 -- drawdown dip, so Equity Curve/Drawdown/Sharpe-type panels have something

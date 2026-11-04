@@ -511,20 +511,25 @@ jobs:
               first = version(101.0, "2026-08-01T01:00:00Z", "2026-08-01T01:00:05Z")
               replay = version(101.0, "2026-08-01T01:00:00Z", "2026-08-01T04:00:00Z")
               correction = version(103.0, "2026-08-01T03:00:00Z", "2026-08-01T03:00:02Z")
+              # Revised values under the calendar-derived available_at, as a
+              # restarted run re-reads them.
+              revised = version(102.0, "2026-08-01T01:00:00Z", "2026-08-01T06:00:00Z")
               assert write_run_bars(run_id, subscription, first) == 1
               assert write_run_bars(run_id, subscription, replay) == 0
               assert write_run_bars(run_id, subscription, correction) == 1
+              assert write_run_bars(run_id, subscription, revised) == 1
 
               cursor.execute(
-                  "SELECT close, observed_at FROM run_bars WHERE run_id = %s ORDER BY available_at",
+                  "SELECT close, observed_at FROM run_bars WHERE run_id = %s ORDER BY observed_at",
                   (run_id,),
               )
               stored = [(close, pd.Timestamp(observed_at)) for close, observed_at in cursor.fetchall()]
               assert stored == [
                   (101.0, pd.Timestamp("2026-08-01T01:00:05Z")),
                   (103.0, pd.Timestamp("2026-08-01T03:00:02Z")),
+                  (102.0, pd.Timestamp("2026-08-01T06:00:00Z")),
               ], stored
-              assert load_run_bars(run_id)["close"].tolist() == [103.0]
+              assert load_run_bars(run_id)["close"].tolist() == [102.0]
           finally:
               connection.rollback()
               cursor.execute("DELETE FROM backtest_runs WHERE run_id = %s", (run_id,))

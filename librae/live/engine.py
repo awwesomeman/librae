@@ -3449,6 +3449,42 @@ class LiveTrader:
         )
         return self._utc_now()
 
+    def _commit_cycle_bars(
+        self,
+        audit_bars: Mapping[str, dict[str, object]],
+        audit_histories: Mapping[str, pd.DataFrame],
+        ts: datetime,
+    ) -> None:
+        """Checkpoint the cycle with its decided bars queued, then record them.
+
+        Every return after a decision comes through here, a halt included: the
+        caller advances the watermark past these bars, and nothing records a
+        bar behind the watermark again. The window behind them is collected
+        only now, after any order went out, so audit work never delays one.
+        """
+        try:
+            self._queue_ohlcv(audit_bars, ts)
+        except Exception:
+            # A full queue reports each dropped row through the runtime-event
+            # callback, which may raise; audit work must never stand between
+            # a cycle, a halt included, and its checkpoint.
+            logger.warning(
+                "Queueing this cycle's bars failed; the checkpoint goes ahead without them",
+                exc_info=True,
+            )
+        self._persist_state()
+        try:
+            self._deliver_ohlcv(audit_bars, ts)
+            window_rows: list[tuple[str, datetime, dict[str, object]]] = []
+            for symbol, history in audit_histories.items():
+                window_rows.extend(self._unrecorded_window(symbol, history))
+            self._offer_decision_window(window_rows)
+        except Exception:
+            # The checkpoint above holds the decided bars; a failure past it
+            # (the flush's own checkpoint, or collecting the window) must not
+            # turn a finished cycle, or a halt, into a failed one.
+            logger.warning("Recording this cycle's bars failed after its checkpoint", exc_info=True)
+
     def _unrecorded_window(
         self, symbol: str, history: pd.DataFrame
     ) -> list[tuple[str, datetime, dict[str, object]]]:
@@ -5664,7 +5700,7 @@ class LiveTrader:
         histories: dict[str, pd.DataFrame] = {}
         raw_bars: dict[str, dict[str, float]] = {}
         audit_bars: dict[str, dict[str, object]] = {}
-        window_rows: list[tuple[str, datetime, dict[str, object]]] = []
+        audit_histories: dict[str, pd.DataFrame] = {}
         previous_volumes: dict[str, float] = {}
         lagged_adv_by_symbol: dict[str, float] = {}
         for symbol in resolved_active_symbols:
@@ -5681,12 +5717,7 @@ class LiveTrader:
                 symbol, ts, audit_bar.get(AVAILABLE_AT_COLUMN)
             )
             audit_bars[symbol] = audit_bar
-            try:
-                window_rows.extend(self._unrecorded_window(symbol, audit_history))
-            except Exception:
-                # Audit context only: it must never stand between a bar and
-                # its decision.
-                logger.warning("Could not collect %s's decision window", symbol, exc_info=True)
+            audit_histories[symbol] = audit_history
             close = float(raw_bar.get("close", float("nan")))
             if not isfinite(close) or close <= 0:
                 raise ValueError(f"{symbol} has invalid close at {ts}: {close}")
@@ -5824,7 +5855,7 @@ class LiveTrader:
             ts,
             lagged_adv_by_symbol=lagged_adv_by_symbol,
         ):
-            self._persist_state()
+            self._commit_cycle_bars(audit_bars, audit_histories, ts)
             return None
         if not execution_already_committed:
             for symbol in resolved_active_symbols:
@@ -5874,20 +5905,14 @@ class LiveTrader:
                 if symbol in raw_bars:
                     position.periods_held += 1
             # Equity is still marked on this bar, so the bar is recorded too.
-            self._queue_ohlcv(audit_bars, ts)
-            self._persist_state()
-            self._deliver_ohlcv(audit_bars, ts)
-            self._offer_decision_window(window_rows)
+            self._commit_cycle_bars(audit_bars, audit_histories, ts)
             return feature_batch.as_of if feature_batch is not None else None
 
         if live_rebalance_blocks_decisions:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
                     position.periods_held += 1
-            self._queue_ohlcv(audit_bars, ts)
-            self._persist_state()
-            self._deliver_ohlcv(audit_bars, ts)
-            self._offer_decision_window(window_rows)
+            self._commit_cycle_bars(audit_bars, audit_histories, ts)
             return feature_batch.as_of if feature_batch is not None else None
 
         # A declared auxiliary input is read through ctx.market_data, which
@@ -6020,18 +6045,14 @@ class LiveTrader:
                     lagged_adv_by_symbol=lagged_adv_by_symbol,
                 )
                 if not execution_complete and self._halted:
-                    self._persist_state()
+                    self._commit_cycle_bars(audit_bars, audit_histories, ts)
                     return None
 
         for symbol, position in self._positions.items():
             if symbol in raw_bars:
                 position.periods_held += 1
-        self._queue_ohlcv(audit_bars, ts)
-        self._persist_state()
-
         # Record OHLCV after processing (equity already recorded in Step 1.5)
-        self._deliver_ohlcv(audit_bars, ts)
-        self._offer_decision_window(window_rows)
+        self._commit_cycle_bars(audit_bars, audit_histories, ts)
         return feature_batch.as_of if feature_batch is not None else None
 
     def _post_fill_risk_violation(self, *, include_net: bool = True) -> str | None:

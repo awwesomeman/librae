@@ -674,7 +674,8 @@ _RUN_BARS_INSERT_SQL = """INSERT INTO run_bars (
            data_source, instrument_type, available_at, observed_at,
            open, high, low, close, volume)
        VALUES %s
-       ON CONFLICT (run_id, symbol, ts, available_at) DO NOTHING
+       ON CONFLICT (run_id, symbol, ts, available_at, open, high, low, close, volume)
+           DO NOTHING
        RETURNING 1"""
 
 
@@ -691,9 +692,13 @@ def write_run_bars(
     ``bars`` has a DatetimeIndex or a ``ts`` column, the OHLCV columns, and
     optionally ``available_at`` (derived only when the calendar proves the
     bar's close) and ``observed_at`` (stored NULL when absent, as for a
-    backtest's inputs). Each ``(ts, available_at)`` version is stored once: a
-    repeat is a no-op that keeps the first ``observed_at``, so a replayed
-    delivery cannot move when a version was received.
+    backtest's inputs). Each version, ``(ts, available_at)`` with the bar's
+    values, is stored once: a repeat is a no-op that keeps the first
+    ``observed_at``, so a replayed delivery cannot move when a version was
+    received, while revised values under an unchanged ``available_at`` are a
+    version of their own. Readers order a bar's versions by ``observed_at``,
+    then ``available_at``, so two value sets written with both equal cannot be
+    told apart; the engine never writes such a pair.
 
     The whole batch is refused, with ``BarTimestampError``, if any ``ts`` is
     not a bar start on the subscription's calendar (``validate_bar_starts``).

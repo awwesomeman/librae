@@ -2362,6 +2362,118 @@ class TestLiveTrader:
             for timestamp in timestamps
         ]
 
+    @staticmethod
+    def _live_runner_recording_bars(strategy=None):
+        frame = _make_ohlcv_df(n=4)
+        runner = make_live_runner(
+            strategy=strategy,
+            fetcher=lambda *_args, **_kwargs: frame,
+            config=_test_cfg(mode="live", warmup_periods=3),
+            order_adapter=_mock_order_adapter(),
+            clock=lambda: datetime(2025, 1, 1, 10, tzinfo=UTC),
+        )
+        recorded: list[datetime] = []
+        runner._on_ohlcv = lambda _symbol, _timeframe, _bar, ts: recorded.append(ts)
+        return runner, runner._eligible_runtime_rows("BTCUSDT", frame), recorded
+
+    def _halting_execution(self, runner):
+        def execute(*_args, **_kwargs):
+            runner._halted = True
+            return False
+
+        return execute
+
+    def test_a_pending_order_that_halts_still_records_the_bars_it_was_decided_on(self):
+        """The caller advances the watermark past this bar either way, and
+        nothing records a bar behind the watermark again."""
+        runner, eligible, recorded = self._live_runner_recording_bars()
+        runner._pending_decision = [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)]
+        decided = datetime(2025, 1, 1, 3, tzinfo=UTC)
+
+        with patch.object(
+            runner, "_execute_live_decision", side_effect=self._halting_execution(runner)
+        ):
+            assert runner._process_cycle({"BTCUSDT": eligible}, decided) is None
+
+        assert sorted(recorded) == [
+            decided - timedelta(hours=2),
+            decided - timedelta(hours=1),
+            decided,
+        ]
+
+    def test_a_decision_that_halts_still_records_the_bars_it_read(self):
+        class Enter(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                return [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)]
+
+        runner, eligible, recorded = self._live_runner_recording_bars(Enter())
+        decided = datetime(2025, 1, 1, 3, tzinfo=UTC)
+
+        with patch.object(
+            runner, "_execute_live_decision", side_effect=self._halting_execution(runner)
+        ) as execute:
+            assert runner._process_cycle({"BTCUSDT": eligible}, decided) is None
+
+        execute.assert_called_once()
+        assert runner._halted
+        assert sorted(recorded) == [
+            decided - timedelta(hours=2),
+            decided - timedelta(hours=1),
+            decided,
+        ]
+
+    def test_a_failing_audit_queue_does_not_skip_the_halts_checkpoint(self):
+        """The halt must land even when recording its bars fails first."""
+
+        class Enter(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                return [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)]
+
+        runner, eligible, _recorded = self._live_runner_recording_bars(Enter())
+
+        with (
+            patch.object(
+                runner, "_execute_live_decision", side_effect=self._halting_execution(runner)
+            ),
+            patch.object(runner, "_queue_ohlcv", side_effect=RuntimeError("event sink down")),
+            patch.object(runner, "_persist_state", wraps=runner._persist_state) as persist,
+        ):
+            assert (
+                runner._process_cycle({"BTCUSDT": eligible}, datetime(2025, 1, 1, 3, tzinfo=UTC))
+                is None
+            )
+
+        assert runner._halted
+        persist.assert_called()
+
+    def test_the_decision_window_is_collected_after_orders_go_out(self):
+        """Collecting a start's window costs time per bar and per symbol; done
+        before execution, it would hold the first orders back."""
+
+        class Enter(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                return [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)]
+
+        runner, eligible, _recorded = self._live_runner_recording_bars(Enter())
+        order: list[str] = []
+        collect = runner._unrecorded_window
+
+        def collecting(*args, **kwargs):
+            order.append("collect window")
+            return collect(*args, **kwargs)
+
+        def execute(*_args, **_kwargs):
+            order.append("execute")
+            return True
+
+        with (
+            patch.object(runner, "_unrecorded_window", side_effect=collecting),
+            patch.object(runner, "_execute_live_decision", side_effect=execute),
+        ):
+            runner._process_cycle({"BTCUSDT": eligible}, datetime(2025, 1, 1, 3, tzinfo=UTC))
+
+        assert order == ["execute", "collect window"]
+
     def test_restart_audit_delivery_failure_is_logged_not_raised_or_retried(self, caplog):
         """An audit write is observability: its refusal must not abort the
         fetch the cycle's decision depends on (architecture.md, failure

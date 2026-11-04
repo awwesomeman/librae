@@ -200,7 +200,13 @@ class TestRenderUnifiedDashboard:
             uses = sql.count("FROM run_bars b")
             assert uses, title
             assert sql.count("b.run_id = '${run_id}'") == uses, title
-            assert sql.count("newer.available_at > b.available_at") == uses, title
+            assert (
+                sql.count(
+                    "(COALESCE(newer.observed_at, '-infinity'), newer.available_at)"
+                    " > (COALESCE(b.observed_at, '-infinity'), b.available_at)"
+                )
+                == uses
+            ), title
 
     def test_price_dashboards_say_a_backtest_stores_bars_only_when_asked(self):
         for dashboard in (render_unified_dashboard(), render_signal_monitor()):
@@ -215,7 +221,7 @@ class TestRenderUnifiedDashboard:
 
         pnl_sql = pnl["targets"][0]["rawSql"]
         assert "WHEN NOT EXISTS (SELECT 1 FROM positions WHERE remaining_quantity > 0)" in pnl_sql
-        assert "COALESCE" not in pnl_sql
+        assert "COALESCE(\n  ROUND(pnl.value" not in pnl_sql
         assert "positions p LEFT JOIN marks mk" in snapshot["targets"][0]["rawSql"]
 
     def test_position_snapshot_reconstructs_state_as_of_time_range_end(self):

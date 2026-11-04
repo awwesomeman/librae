@@ -124,22 +124,26 @@ def _account_metric_sql(column: str) -> str:
 
 
 def _latest_run_bar(alias: str) -> str:
-    """Select the run's bars, one row per bar: the latest version it received.
+    """Select the run's bars, one row per bar: the version it received last.
 
     run_bars keeps each version of a bar it stores, so a query without the second
     condition counts a corrected bar twice and shifts every OFFSET after it.
+    Receipt time orders versions, since revised values can keep their
+    available_at; bars a backtest stored have none and fall back to it.
     """
     return (
         f"{alias}.run_id = '${{run_id}}'"
         " AND NOT EXISTS (SELECT 1 FROM run_bars newer"
         f" WHERE newer.run_id = {alias}.run_id AND newer.symbol = {alias}.symbol"
-        f" AND newer.ts = {alias}.ts AND newer.available_at > {alias}.available_at)"
+        f" AND newer.ts = {alias}.ts"
+        " AND (COALESCE(newer.observed_at, '-infinity'), newer.available_at)"
+        f" > (COALESCE({alias}.observed_at, '-infinity'), {alias}.available_at))"
     )
 
 
 _STORED_BARS_NOTICE = (
-    "Price panels read the bars the run stored: a sim or live run stores the bars its "
-    "decisions read, a backtest only when saved with store_bars=True, so a backtest's "
+    "Price panels read the bars the run stored: a sim or live run stores the bars behind "
+    "its decisions, a backtest only when saved with store_bars=True, so a backtest's "
     "price panels are otherwise empty."
 )
 

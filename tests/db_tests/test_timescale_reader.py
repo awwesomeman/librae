@@ -86,7 +86,8 @@ class TestLoadRunBars:
     def test_reads_one_run_and_keeps_the_latest_version_of_each_bar(
         self, mock_conn_ctx, mock_read_sql
     ):
-        """The table keeps each version of a bar; a chart wants one per bar."""
+        """The table keeps each version of a bar; a chart wants one per bar, the
+        one received last, since revised values can keep their available_at."""
         mock_conn_ctx.return_value = _mock_conn(MagicMock())
         mock_read_sql.return_value = pd.DataFrame(
             {
@@ -101,7 +102,7 @@ class TestLoadRunBars:
         sql = " ".join(mock_read_sql.call_args.args[0].split())
         assert "FROM run_bars WHERE run_id = %s" in sql
         assert "DISTINCT ON (symbol, ts)" in sql
-        assert "ORDER BY symbol, ts, available_at DESC" in sql
+        assert "ORDER BY symbol, ts, observed_at DESC NULLS LAST, available_at DESC" in sql
         assert mock_read_sql.call_args.kwargs["params"] == ["run-1"]
         for column in ("_time", "available_at", "observed_at"):
             assert str(result[column].dt.tz) == "UTC"

@@ -1423,9 +1423,11 @@ when the database came back. The first-party TimescaleDB path declares this
 and writes `run_bars`; a retry never re-runs a strategy decision or a broker
 order, because it is a persistence concern only.
 
-Each decision also offers the bars of its window that no earlier decision
-read: the whole window at a start, bars that arrived while warmup was short,
-catch-up bars a live run stepped over. After a restart, the fetch offers the
+Each decision also offers, for each symbol it advances, the bars of its
+window that no earlier decision of that symbol read: the whole window at a
+start, bars that arrived while warmup was short, catch-up bars a live run
+stepped over. It does so after the decision's orders go out, so recording
+never delays one. After a restart, the fetch offers the
 bars already decided, to backfill rows a crash kept from the table. Neither is
 queued, since either can run to thousands of rows; they go to `on_ohlcv_batch`
 as one call per symbol when the sink provides it. A refusal is logged, the

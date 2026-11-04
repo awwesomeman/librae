@@ -196,7 +196,8 @@ positions are reconstructed at each run's own equity timestamp rather than at
 [the dashboard-scope ADR](../decisions/2026-09-07-account-overview-is-a-separate-dashboard.md).
 
 Price panels read the bars the selected run stored in `run_bars`, the latest
-version of each. A sim or live run stores the bars its decisions read; a backtest stores
+version of each. A sim or live run stores the bars behind its decisions (see
+[architecture.md](../../architecture.md#data-acquisition-and-ownership-boundary)); a backtest stores
 its inputs only when saved with `store_bars=True`. A backtest saved without it
 is expected to show empty price panels, no mark for its open positions, and
 no forward-return statistics on the signal dashboard.

@@ -451,7 +451,9 @@ def test_write_run_bars_keys_rows_by_run_and_keeps_the_first_receipt(
     mock_conn_ctx, mock_exec_values
 ) -> None:
     """A version already stored is left alone: overwriting it would let a
-    replayed delivery move when the run received that bar."""
+    replayed delivery move when the run received that bar. The values are part
+    of the version: a source can revise a closed bar without moving its
+    available_at, and a restarted run then reads the revised values."""
     mock_exec_values.return_value = [(1,)]
     mock_conn = MagicMock()
     mock_conn.__enter__.return_value = mock_conn
@@ -477,7 +479,11 @@ def test_write_run_bars_keys_rows_by_run_and_keeps_the_first_receipt(
 
     sql = mock_exec_values.call_args[0][1]
     row = mock_exec_values.call_args[0][2][0]
-    assert "ON CONFLICT (run_id, symbol, ts, available_at) DO NOTHING" in sql
+    assert (
+        "ON CONFLICT (run_id, symbol, ts, available_at, open, high, low, close, volume)"
+        in " ".join(sql.split())
+    )
+    assert "DO NOTHING" in sql
     assert "DO UPDATE" not in sql
     assert mock_exec_values.call_args.kwargs["fetch"] is True
     assert inserted == 1

@@ -369,11 +369,11 @@ END $$;
 -- Run evidence, not a market-data store: collected market data is the
 -- caller's. symbol is the run's own code for the instrument; the other
 -- identity columns name the series it stood for in this run.
--- One row per bar version: every bar a sim/live decision read, and any later
--- version of a decided bar. A correction carries a later available_at and is
--- stored beside the version it corrects, so what a decision saw is never
--- overwritten; a repeat of a stored version is ignored and keeps the time it
--- was first received.
+-- One row per bar version, a version being available_at plus the bar's
+-- values. A correction is stored beside the version it corrects, so what a
+-- decision saw is never overwritten; a repeat of a stored version is ignored
+-- and keeps the time it was first received. Which bars are stored is in
+-- architecture.md ("Data acquisition and ownership boundary").
 -- observed_at is when a sim/live engine received the version; NULL for bars a
 -- backtest stored, which it replayed rather than observed.
 CREATE TABLE IF NOT EXISTS run_bars (
@@ -397,9 +397,12 @@ CREATE TABLE IF NOT EXISTS run_bars (
 );
 SELECT create_hypertable('run_bars', 'ts', if_not_exists => TRUE);
 -- A run maps each symbol to exactly one subscription (primary_subscriptions),
--- so the symbol stands for the whole identity within the run.
+-- so the symbol stands for the whole identity within the run. The values are
+-- in the key because a source can revise a closed bar without moving its
+-- available_at, which the calendar derives; a restarted run reads the revised
+-- values, and keying on available_at alone would keep only the old ones.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_bars_unique
-    ON run_bars (run_id, symbol, ts, available_at);
+    ON run_bars (run_id, symbol, ts, available_at, open, high, low, close, volume);
 
 -- ============================================================
 -- signal_events — 訊號品質監控 (hypertable, 獨立)

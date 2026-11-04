@@ -1303,7 +1303,9 @@ def test_market_data_schema_keeps_complete_subscriptions_distinct() -> None:
     assert "jsonb_array_length(primary_subscriptions) = jsonb_array_length(symbols)" in schema
     assert "data_source_by_symbol JSONB NOT NULL" in schema
     assert "jsonb_typeof(data_source_by_symbol) = 'object'" in schema
-    assert "ON run_bars (run_id, symbol, ts, available_at)" in schema
+    assert (
+        "ON run_bars (run_id, symbol, ts, available_at, open, high, low, close, volume)" in schema
+    )
     assert "available_at    TIMESTAMPTZ NOT NULL" in schema
     assert "chk_run_bars_available_at CHECK (available_at >= ts)" in schema
     assert "CREATE TABLE IF NOT EXISTS ohlcv" not in schema
@@ -1314,7 +1316,8 @@ def test_market_data_schema_keeps_complete_subscriptions_distinct() -> None:
     workflow = (ROOT / ".github/workflows/trade-image.yml").read_text(encoding="utf-8")
     assert "Verify run bars keep each version once" in workflow
     assert "assert write_run_bars(run_id, subscription, replay) == 0" in workflow
-    assert 'assert load_run_bars(run_id)["close"].tolist() == [103.0]' in workflow
+    assert "assert write_run_bars(run_id, subscription, revised) == 1" in workflow
+    assert 'assert load_run_bars(run_id)["close"].tolist() == [102.0]' in workflow
 
 
 def test_backtest_cache_identity_is_separate_from_config_hash() -> None:

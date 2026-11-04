@@ -161,8 +161,13 @@ nothing rather than reaching order-capable startup with no recovery state.
 
 The bars a run saw are evidence of that run, not market data, and the engine
 never reads them back to decide. Sim and live store in `run_bars`, keyed by
-run, every bar a decision read and every later version of a bar already
-decided, with when the engine received it. A backtest
+run and with when the engine received each version: for each symbol a
+decision advances, its primary-subscription bar and the part of the window
+behind it that no earlier decision of that symbol read; every later version
+of a bar already decided; and, after a restart, the bars already decided as
+re-read. Auxiliary subscriptions are not stored, and the bars a batch feature
+reads for a symbol the event does not advance are stored only once a decision
+of that symbol reads them. A backtest
 records the exact subscriptions and range it used in `backtest_runs`; it
 copies its input bars only when saved with `store_bars=True`, for charts.
 Collected market data — its table (`ohlcv` by convention), its revisions, and
@@ -823,7 +828,7 @@ flowchart TD
 | `financing_cash_flows` | applied financing (perpetual funding or short borrow) rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, kind, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `runtime_events` | operational audit trail (restarts, skipped decisions, halts, halt resets, group failures) — not a fill; `event_type` is a small, deliberately closed set (`RuntimeEventType` in `librae/core/executor.py`), with the specific skip reason as a free string in `detail` | unique `(run_id, ts, event_type, COALESCE(symbol, ''))`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
-| `run_bars` | the bars one run saw, under the run's six-field subscription identity: for sim/live every bar a decision read and later versions of decided bars; a backtest's inputs only when saved with `store_bars=True` | unique `(run_id, symbol, ts, available_at)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
+| `run_bars` | the bars one run saw, under the run's six-field subscription identity: for sim/live the primary bars behind each decision and later versions of decided bars (see [Data acquisition and ownership boundary](#data-acquisition-and-ownership-boundary)); a backtest's inputs only when saved with `store_bars=True` | unique `(run_id, symbol, ts, available_at, open, high, low, close, volume)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
 | `librae_schema_revision` | authoritative reference-schema revision; writable only by the table owner | singleton PK | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
@@ -890,12 +895,14 @@ cache reuse is disabled and does not serialize otherwise equal configurations.
 
 `write_run_bars()` stores rows under one run and one complete
 `MarketDataSubscription`, and validates bar starts and `available_at` against
-the provable completion floor. Each `(ts, available_at)` version is stored
-once, and a repeat keeps the first `observed_at`, so a replayed delivery cannot
-move when a version was received. A correction is a new row beside the version
-it corrects: the version a decision used is the earliest stored for its bar,
-since later ones are corrections or a restart's re-read. Readers that want one
-row per bar take the latest version (`load_run_bars()`, the dashboards).
+the provable completion floor. A version is `(ts, available_at)` with the
+bar's values, since a source can revise a closed bar without moving its
+`available_at`. Each is stored once, and a repeat keeps the first
+`observed_at`, so a replayed delivery cannot move when a version was received.
+A correction is a new row beside the version it corrects. Each row says when
+the engine received that version, so the versions a decision read are, per
+bar, the latest received before it; readers that want one row per bar take the
+one received last (`load_run_bars()`, the dashboards).
 
 ## Maintenance rules
 

@@ -321,10 +321,12 @@ def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
 def load_run_bars(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     """Load the bars one run stored, the latest version of each.
 
-    A sim or live run stores the bars its decisions read; a backtest stores its inputs
+    A sim or live run stores the bars behind its decisions; a backtest stores its inputs
     only when saved with ``store_bars=True``, so an empty frame is the normal
-    answer for one that was not. Earlier versions of a corrected bar stay in
-    ``run_bars`` for audit; this returns the one the run ended with.
+    answer for one that was not. Earlier versions of a bar stay in
+    ``run_bars`` for audit; this returns the one the run received last, which
+    is the one it ended up using (bars a backtest stored have no receipt time
+    and fall back to the latest ``available_at``).
     """
     sql = """
         SELECT DISTINCT ON (symbol, ts)
@@ -333,7 +335,7 @@ def load_run_bars(run_id: str, dsn: str | None = None) -> pd.DataFrame:
                open, high, low, close, volume
         FROM run_bars
         WHERE run_id = %s
-        ORDER BY symbol, ts, available_at DESC
+        ORDER BY symbol, ts, observed_at DESC NULLS LAST, available_at DESC
     """
     with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=[run_id])
