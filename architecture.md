@@ -164,8 +164,8 @@ never reads them back to decide. Sim and live store in `run_bars`, keyed by
 run and with when the engine received each version: for each symbol a
 decision advances, its primary-subscription bar and the part of the window
 behind it that no earlier decision of that symbol read; every later version
-of a bar already decided; and, after a restart, the bars already decided as
-re-read. Auxiliary subscriptions are not stored, and the bars a batch feature
+of a bar already decided; and, after a restart, the window the last decision
+before it read, as re-read. Auxiliary subscriptions are not stored, and the bars a batch feature
 reads for a symbol the event does not advance are stored only once a decision
 of that symbol reads them. A backtest
 records the exact subscriptions and range it used in `backtest_runs`; it

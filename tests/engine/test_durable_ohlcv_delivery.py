@@ -962,3 +962,103 @@ class TestTheAuditRowSaysWhenTheBarWasReceived:
         head = pd.Timestamp(runner._ohlcv_cache["BTCUSDT"]["ts"].iloc[0]).value
         assert runner._bar_observed_at["BTCUSDT"]
         assert all(ts >= head for ts, _available in runner._bar_observed_at["BTCUSDT"])
+
+
+class TestARestartReReadsOnlyWhatADecisionRead:
+    """A row in run_bars reads as a bar a decision of the run read. A restart
+    can fetch further back than any window; those bars stay out."""
+
+    def test_bars_older_than_the_last_window_are_not_recorded(self) -> None:
+        from librae.live.state import MemoryLiveStateStore
+
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+
+        store = MemoryLiveStateStore()
+        frame = {"bars": _frame(6)}
+
+        def runner(sink):
+            # Returns more than it is asked for, as a database-backed warmup
+            # or a venue's whole page can.
+            return make_live_runner(
+                config=_test_cfg(mode="sim", warmup_periods=2),
+                state_store=store,
+                fetcher=lambda *a, **k: frame["bars"],
+                on_ohlcv=sink,
+            )
+
+        runner(_RecordingDurableSink())._poll_cycle()
+        decided = datetime(2025, 1, 1, 5, tzinfo=UTC)
+
+        frame["bars"] = _frame(7)
+        recovered = _RecordingDurableSink()
+        runner(recovered)._poll_cycle()
+
+        assert sorted({ts for ts, _bar in recovered.bars}) == [
+            decided - timedelta(hours=1),
+            decided,
+            decided + timedelta(hours=1),
+        ]
+
+
+class TestABurstOfCorrectionsIsNotDropped:
+    BOUND = 2
+    RECEIVED = datetime(2025, 1, 1, 10, tzinfo=UTC)
+    RESTAMPED_AT = RECEIVED + timedelta(minutes=15)
+
+    def _restamp_every_cached_bar(self, monkeypatch, *, before_second_poll=None):
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+
+        monkeypatch.setattr("librae.live.engine.MAX_PENDING_OHLCV", self.BOUND)
+        monkeypatch.setattr("librae.live.ohlcv_audit.MAX_PENDING_OHLCV", self.BOUND)
+        sink = _RecordingDurableSink()
+        clock = {"now": self.RECEIVED}
+        frame = {"bars": _frame(6)}
+        runner = make_live_runner(
+            config=_test_cfg(mode="sim", warmup_periods=5),
+            fetcher=lambda *a, **k: frame["bars"],
+            on_ohlcv=sink,
+            clock=lambda: clock["now"],
+        )
+        events: list = []
+        runner._on_runtime_event = events.append
+        runner._poll_cycle()
+
+        frame["bars"] = _frame(6).assign(close=100.5, available_at=self.RESTAMPED_AT)
+        clock["now"] = self.RECEIVED + timedelta(minutes=30)
+        if before_second_poll is not None:
+            before_second_poll(runner)
+        runner._poll_cycle()
+        restamped = [ts for ts, bar in sink.bars if bar["available_at"] == self.RESTAMPED_AT]
+        dropped = [e for e in events if e.detail.get("reason") == "ohlcv_audit_delivery_failed"]
+        return runner, restamped, dropped
+
+    def test_a_healthy_sink_takes_more_corrections_than_the_queue_holds(self, monkeypatch) -> None:
+        runner, restamped, dropped = self._restamp_every_cached_bar(monkeypatch)
+
+        assert len(restamped) == 5 > self.BOUND
+        assert runner._pending_ohlcv == []
+        assert dropped == []
+
+    def test_a_failed_checkpoint_mid_burst_still_queues_the_rest(self, monkeypatch) -> None:
+        """The cache already holds the new versions, so a correction left
+        unqueued is never offered again."""
+
+        def fail_one_checkpoint(runner):
+            persist = runner._persist_state
+            calls = {"n": 0}
+
+            def flaky(*orders):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("checkpoint store blinked")
+                persist(*orders)
+
+            runner._persist_state = flaky
+
+        runner, restamped, dropped = self._restamp_every_cached_bar(
+            monkeypatch, before_second_poll=fail_one_checkpoint
+        )
+
+        assert len(restamped) == 5
+        assert runner._pending_ohlcv == []
+        assert dropped == []
