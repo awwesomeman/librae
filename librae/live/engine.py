@@ -127,6 +127,7 @@ from .interfaces import (
 )
 from .persistent_alerts import PersistentAlerts
 from .state import (
+    MAX_PENDING_OHLCV,
     HaltResetReadiness,
     LiveRebalance,
     LiveRuntimeState,
@@ -1635,6 +1636,7 @@ class LiveTrader:
             return [unique[version] for version in sorted(unique)]
 
         corrections_queued = False
+        sink_took_burst = True
         reread: list[tuple[str, datetime, dict[str, object]]] = []
         for symbol, result in results.items():
             self._cycle_fetch_seconds[symbol] = result.elapsed_seconds
@@ -1649,6 +1651,26 @@ class LiveTrader:
             # exists to keep, and rare, so it rides the same queue as a
             # decided bar.
             for event_ts, audit_bar in by_version(result.corrections):
+                if (
+                    self._durable_ohlcv_delivery
+                    and sink_took_burst
+                    and len(self._pending_ohlcv) >= MAX_PENDING_OHLCV
+                ):
+                    # A burst (a source restamping a whole window) must not
+                    # reach the bound and drop rows a healthy sink would take.
+                    # The cache already holds these versions, so one not
+                    # queued now is never offered again: a failed checkpoint
+                    # is left to the flush below, after every row is queued.
+                    # A flush that leaves the queue full is not repeated for
+                    # the rest of this fetch.
+                    try:
+                        self._flush_pending_ohlcv()
+                    except Exception:
+                        logger.warning(
+                            "Checkpoint after flushing a burst of corrections failed",
+                            exc_info=True,
+                        )
+                    sink_took_burst = len(self._pending_ohlcv) < MAX_PENDING_OHLCV
                 self._queue_ohlcv({symbol: audit_bar}, event_ts)
                 corrections_queued = True
                 if not self._durable_ohlcv_delivery:
@@ -3359,9 +3381,12 @@ class LiveTrader:
         """Merge causal row versions, then validate the whole cache cadence.
 
         ``first_fill`` marks a fetch into an empty cache. After a restart it
-        offers the bars at or before the watermark to ``audit_sink``, a
+        offers ``audit_sink`` the window the last decision before it read, a
         best-effort backfill for rows a crash kept from the table; a decision
         records the bars it reads after that (``_offer_decision_window``).
+        Older fetched bars are left out: a fetch can reach further back than
+        any decision read, a row in the table reads as one a decision read,
+        and a crash can keep only the last decision's window from the table.
         """
         fetched = self._normalize_runtime_rows(symbol, fetched)
         observed_at = self._record_observed_at(symbol, fetched)
@@ -3379,7 +3404,8 @@ class LiveTrader:
         accepted_audit_rows: list[_OhlcvAuditRow] = []
         accepted_corrections: list[_OhlcvAuditRow] = []
         if audit_sink is not None and first_fill and watermark is not None:
-            accepted_audit_rows = audit_rows(fetched.loc[fetched["ts"] <= pd.Timestamp(watermark)])
+            decided = fetched.loc[fetched["ts"] <= pd.Timestamp(watermark)]
+            accepted_audit_rows = audit_rows(decided.iloc[-self._warmup_periods :])
         if cached is None or cached.empty:
             merged = fetched
         else:
