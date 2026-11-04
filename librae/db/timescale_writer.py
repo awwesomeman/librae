@@ -190,9 +190,10 @@ def write_run_metadata(
 ) -> None:
     """Write a single run record to backtest_runs (upsert).
 
-    A run's mode, symbols, subscriptions and execution identity are fixed:
-    an upsert that would change them is refused, so a backtest save cannot
-    take over a sim or live run and clear the rows its engine recorded.
+    The fields in the upsert's WHERE clause, mode included, are a run's
+    fixed identity: an upsert that would change them is refused, so a
+    backtest save cannot take over a sim or live run and clear the rows its
+    engine recorded.
 
     If ``cur`` is provided, executes on that cursor (caller owns the
     transaction).  Otherwise opens its own connection and commits.
