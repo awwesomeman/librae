@@ -715,6 +715,18 @@ class TestDescribeSymbols:
             "symbol_cost_overrides",
         )
 
+    def test_empty_fee_override_is_reported_as_an_error(self) -> None:
+        """An empty YAML value is None, which the engine cannot charge."""
+        from librae.core.cost_model import describe_symbols
+
+        cfg = self._cfg(
+            ["TXFR1"], symbol_cost_overrides={"TXFR1": {"commission_per_contract": None}}
+        )
+        [result] = describe_symbols(cfg)
+
+        assert result.error is not None
+        assert result.commission_per_contract_source == "unresolved"
+
     def test_unknown_product_fee_keeps_the_fields_that_resolved(self) -> None:
         from librae.core.cost_model import describe_symbols
 

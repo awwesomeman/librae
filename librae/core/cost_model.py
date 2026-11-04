@@ -440,11 +440,12 @@ def describe_symbols(
                     )
                 except ValueError as e:
                     fee_error = str(e)
-            fee = fields.get("commission_per_contract")
-            # A fee that failed has no value; 0.0 stands in only so the other
-            # fields still go through CostModel's validation.
-            cm = CostModel(**{**fields, "commission_per_contract": fee or 0.0})
-        except (KeyError, ValueError) as e:
+                    # The failed fee has no value; 0.0 stands in only so the
+                    # other fields still go through CostModel's validation.
+                    fields["commission_per_contract"] = 0.0
+            cm = CostModel(**fields)
+            fee = None if fee_error else cm.commission_per_contract
+        except (KeyError, TypeError, ValueError) as e:
             results.append(
                 SymbolDescription(
                     symbol=sym,
