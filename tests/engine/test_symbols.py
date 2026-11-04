@@ -713,6 +713,126 @@ class TestResolveSymbol:
             )
 
 
+class TestDataSourceRoute:
+    """A registered symbol keeps its registered order market unless the run
+    says otherwise, so a source that disagrees with it must not pass quietly:
+    a perpetual feed over spot routing trades spot and cannot short."""
+
+    @staticmethod
+    def _cfg(symbols=("BTCUSDT",), *, data_source, overrides=None, **extra) -> RunConfig:
+        return RunConfig(
+            strategy_name="x",
+            symbols=list(symbols),
+            timeframe="1h",
+            market="crypto",
+            data_source=data_source,
+            mode="live",
+            broker="binance",
+            account=AccountConfig(currency="USDT", initial_cash=10_000.0),
+            instrument_overrides=overrides,
+            **extra,
+        )
+
+    def test_run_source_that_disagrees_with_the_registry_is_refused(self):
+        with pytest.raises(ValueError, match=r"binance_perp.*BTCUSDT.*binance_spot"):
+            self._cfg(data_source="binance_perp")
+
+    def test_source_override_alone_is_refused_naming_the_routing_fields(self):
+        with pytest.raises(ValueError, match=r"instrument_type.*venue_symbol"):
+            self._cfg(
+                data_source="binance_perp",
+                overrides={"BTCUSDT": {"data_source": "binance_perp"}},
+            )
+
+    @pytest.mark.parametrize(
+        ("supplied", "missing"),
+        [
+            ({"instrument_type": "contract_perpetual"}, "venue_symbol"),
+            ({"venue_symbol": "BTC/USDT:USDT"}, "instrument_type"),
+        ],
+    )
+    def test_source_override_needs_both_routing_fields(self, supplied, missing):
+        with pytest.raises(ValueError, match=rf"\['{missing}'\]"):
+            self._cfg(
+                data_source="binance_perp",
+                overrides={"BTCUSDT": {"data_source": "binance_perp", **supplied}},
+            )
+
+    def test_full_route_override_trades_the_perpetual(self):
+        config = self._cfg(
+            data_source="binance_perp",
+            overrides={
+                "BTCUSDT": {
+                    "data_source": "binance_perp",
+                    "instrument_type": "contract_perpetual",
+                    "venue_symbol": "BTC/USDT:USDT",
+                }
+            },
+        )
+
+        info = resolve_symbol(config, "BTCUSDT")
+
+        assert info.data_source == "binance_perp"
+        assert info.instrument_type == "contract_perpetual"
+        assert info.venue_symbol == "BTC/USDT:USDT"
+        assert info.can_short is True
+
+    def test_restating_the_registered_source_needs_no_routing_fields(self):
+        config = self._cfg(
+            data_source="binance_spot",
+            overrides={"BTCUSDT": {"data_source": "binance_spot"}},
+        )
+
+        assert resolve_symbol(config, "BTCUSDT").venue_symbol == "BTC/USDT"
+
+    def test_mixed_run_declares_multi(self):
+        config = self._cfg(
+            ("BTCUSDT", "BTCUSDT_QUARTERLY"),
+            data_source="multi",
+        )
+
+        assert resolve_symbol(config, "BTCUSDT_QUARTERLY").data_source == (
+            "binance_futures_continuous"
+        )
+
+    def test_unregistered_symbol_still_reads_the_run_source(self):
+        config = self._cfg(
+            ("BTCUSDTPERP",),
+            data_source="binance_perp",
+            overrides={
+                "BTCUSDTPERP": {
+                    "instrument_type": "contract_perpetual",
+                    "venue_symbol": "BTC/USDT:USDT",
+                    "currency": "USDT",
+                    "data_adapter": "crypto",
+                }
+            },
+            symbol_cost_overrides={"BTCUSDTPERP": {"multiplier": 1.0}},
+        )
+
+        info = resolve_symbol(config, "BTCUSDTPERP")
+
+        assert info.data_source == "binance_perp"
+        assert info.instrument_type == "contract_perpetual"
+
+    def test_unregistered_symbol_routes_its_own_source_in_a_mixed_run(self):
+        config = self._cfg(
+            ("BTCUSDT", "BTCUSDTPERP"),
+            data_source="multi",
+            overrides={
+                "BTCUSDTPERP": {
+                    "data_source": "binance_perp",
+                    "instrument_type": "contract_perpetual",
+                    "currency": "USDT",
+                    "data_adapter": "crypto",
+                }
+            },
+            symbol_cost_overrides={"BTCUSDTPERP": {"multiplier": 1.0}},
+        )
+
+        assert resolve_symbol(config, "BTCUSDTPERP").data_source == "binance_perp"
+
+
 class TestExecutablePriceIncrement:
     @staticmethod
     def _instrument(price_increment: float | None, *, tick_size: float | None = None):

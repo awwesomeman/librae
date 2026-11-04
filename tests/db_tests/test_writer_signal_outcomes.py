@@ -709,11 +709,13 @@ class TestPersistBacktest:
     ) -> None:
         df, symbol = self._make_featured_df(n=3)
         config = _test_cfg(
-            data_source="run-default",
+            data_source="multi",
             instrument_overrides={
                 symbol: {
                     "data_source": "ibkr",
                     "data_adapter": "ibkr",
+                    "instrument_type": "spot",
+                    "venue_symbol": "BTC/USDT",
                     "security_type": "STK",
                 }
             },

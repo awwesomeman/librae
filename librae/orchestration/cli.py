@@ -230,6 +230,9 @@ def _resolve_market_and_data_source(
     unregistered homogeneous universes, and instrument_overrides handles
     mixed universes. A heterogeneous result is represented as
     ``("multi", "multi")`` instead of borrowing the first symbol's route.
+    A declared data_source other than ``multi`` is returned unchanged so
+    RunConfig can check it against every symbol; returning the resolved value
+    would hide a disagreement from that check.
     """
     from librae.config.symbols import load_symbol_registry
 
@@ -252,15 +255,12 @@ def _resolve_market_and_data_source(
                 f"config.yaml market={market!r} for {sym!r} disagrees with "
                 f"its resolved market ({symbol_market!r})"
             )
-        if data_source not in (None, "multi") and data_source != symbol_source:
-            raise ValueError(
-                f"config.yaml data_source={data_source!r} for {sym!r} disagrees "
-                f"with its resolved data source ({symbol_source!r})"
-            )
         resolved_markets.add(symbol_market)
         resolved_sources.add(symbol_source)
 
     resolved_market = next(iter(resolved_markets)) if len(resolved_markets) == 1 else "multi"
+    if data_source not in (None, "multi"):
+        return resolved_market, data_source
     resolved_source = next(iter(resolved_sources)) if len(resolved_sources) == 1 else "multi"
     return resolved_market, resolved_source
 

@@ -288,6 +288,39 @@ class TestBuildRun:
         with pytest.raises(ValueError, match="requires backtest_revision"):
             RunOptions(replace_existing=True)
 
+    def test_declared_source_that_disagrees_with_the_registry_is_refused(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: BTCUSDT
+                  timeframe: 1h
+                  data_source: binance_perp
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match=r"binance_perp.*BTCUSDT.*binance_spot"):
+            build_run("test_strat", str(tmp_path / "run.py"))
+
+    def test_source_override_without_routing_fields_is_refused(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            textwrap.dedent(
+                """\
+                strategy:
+                  symbol: BTCUSDT
+                  timeframe: 1h
+                  data_source: binance_perp
+                  instrument_overrides:
+                    BTCUSDT:
+                      data_source: binance_perp
+                """
+            )
+        )
+
+        with pytest.raises(ValueError, match=r"instrument_type.*venue_symbol"):
+            build_run("test_strat", str(tmp_path / "run.py"))
+
     def test_deployment_options_stay_out_of_engine_config(self, tmp_path, monkeypatch):
         (tmp_path / "config.yaml").write_text(
             textwrap.dedent(
@@ -529,7 +562,7 @@ def _make_cfg(**overrides) -> RunConfig:
         symbols=["MU"],
         timeframe="1d",
         market="us_equity",
-        data_source="local",
+        data_source="ibkr",
         account=AccountConfig(currency="USD", initial_cash=100_000.0),
         mode="backtest",
     )
@@ -575,8 +608,9 @@ class TestCheckExistingRun:
             assert check_existing_run(_make_cfg(), "revision-a") is None
 
     def test_missing_revision_disables_cache_lookup(self):
+        config = _make_cfg()
         with patch("builtins.__import__") as import_module:
-            assert check_existing_run(_make_cfg(), None) is None
+            assert check_existing_run(config, None) is None
 
         import_module.assert_not_called()
 

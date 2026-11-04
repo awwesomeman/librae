@@ -1361,7 +1361,9 @@ class TestLiveTrader:
             instrument_overrides={
                 "BTCUSDT": {
                     "data_adapter": "vendor_plugin",
+                    "data_source": "vendor_feed",
                     "instrument_type": "spot",
+                    "venue_symbol": "BTC/USDT",
                     "currency": "USDT",
                 }
             },
@@ -3612,7 +3614,7 @@ class TestLiveTrader:
             "total": 50_000.0,
         }
 
-        cfg = _test_cfg(mode="live", symbols=["TXFR1"], market="tw_futures")
+        cfg = _test_cfg(mode="live", symbols=["TXFR1"], market="tw_futures", data_source="shioaji")
         runner = make_live_runner(config=cfg, order_adapter=mock_order_adapter)
         alerts: list[tuple[str, dict]] = []
         runner._notify = lambda method, **kwargs: alerts.append((method, kwargs))

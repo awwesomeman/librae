@@ -518,6 +518,13 @@ class RunConfig:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{field_name} must be a non-empty string")
+        from librae.config.symbols import validate_data_source_routes
+
+        validate_data_source_routes(
+            self.symbols,
+            data_source=self.data_source,
+            overrides=self.instrument_overrides or {},
+        )
         object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
         for field_name in ("start", "end"):
             value = getattr(self, field_name)

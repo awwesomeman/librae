@@ -216,6 +216,52 @@ def validate_instrument_overrides(
             )
 
 
+def validate_data_source_routes(
+    symbols: tuple[str, ...],
+    *,
+    data_source: str,
+    overrides: Mapping[str, Mapping[str, object]],
+) -> None:
+    """Refuse a run whose data source contradicts a symbol's route.
+
+    A registered symbol takes its ``instrument_type`` and ``venue_symbol``
+    from the registry unless overridden, and those two pick the market orders
+    go to. Moving it onto another source alone would read, say, perpetual
+    bars while trading spot, so the move must restate both. ``data_source``
+    names the run's one source, or ``"multi"`` for a mixed run, so it must
+    match what every symbol resolves to.
+    """
+    for symbol in symbols:
+        registered = _BUILTIN_SYMBOLS.get(symbol)
+        route = overrides.get(symbol, {})
+        override_source = route.get("data_source")
+        if registered is not None and override_source not in (None, registered.data_source):
+            missing = [name for name in ("instrument_type", "venue_symbol") if name not in route]
+            if missing:
+                raise ValueError(
+                    f"instrument_overrides[{symbol!r}] moves registered symbol {symbol!r} "
+                    f"from data_source={registered.data_source!r} to {override_source!r} "
+                    f"but keeps its registered {missing}; set both instrument_type and "
+                    "venue_symbol there, since they pick where orders go"
+                )
+        if data_source == "multi":
+            continue
+        resolved = override_source or (registered.data_source if registered else data_source)
+        if resolved != data_source:
+            origin = "instrument_overrides" if override_source else "the built-in registry"
+            hint = (
+                ""
+                if override_source
+                else "; to read a registered symbol elsewhere, override its "
+                "data_source, instrument_type and venue_symbol"
+            )
+            raise ValueError(
+                f"data_source={data_source!r} disagrees with {symbol!r}, which {origin} "
+                f"routes to {resolved!r}; declare the matching data_source, or 'multi' "
+                f"for a run mixing sources{hint}"
+            )
+
+
 @dataclass(frozen=True)
 class AvailableSymbol:
     """One live broker-catalog result, separate from configured accounting.
