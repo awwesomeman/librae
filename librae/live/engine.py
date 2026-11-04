@@ -1659,8 +1659,8 @@ class LiveTrader:
                     # The cache already holds these versions, so one not
                     # queued now is never offered again: a failed checkpoint
                     # is left to the flush below, after every row is queued.
-                    # A sink that leaves the queue full is not asked again
-                    # this fetch, once per row.
+                    # A flush that leaves the queue full is not repeated for
+                    # the rest of this fetch.
                     try:
                         self._flush_pending_ohlcv()
                     except Exception:
