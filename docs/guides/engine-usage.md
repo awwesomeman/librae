@@ -442,7 +442,12 @@ Input timestamps must be timezone-aware and every adapter/ETL path must use
 the same convention: `ts` is the UTC bar-start instant. A bar becomes eligible
 only after its interval close; fixed-duration bars use `ts + timeframe`, while
 calendar-aligned bars use the actual segment/session close. Adapters drop a
-final still-forming interval. A Shioaji date window returns whole bars only:
+final still-forming interval. The crypto adapter also holds back a newest
+candle whose close has passed, until a later candle appears or one more period
+ends: ccxt documents the last candle as possibly incomplete until the next one
+starts, and a decision taken on a short candle cannot be redone. A poll as
+long as the bar can then leave decisions a bar late. A Shioaji date window
+returns whole bars only:
 intraday bars that start on its dates and daily bars of its trading days, with
 the minutes fetched as far either side as those bars reach. Keeping the
 vendor's bar start avoids shifting shortened or session-ending bars to an
@@ -1427,13 +1432,16 @@ Each decision also offers, for each symbol it advances, the bars of its
 window that no earlier decision of that symbol read: the whole window at a
 start, bars that arrived while warmup was short, catch-up bars a live run
 stepped over. It does so after the decision's orders go out, so recording
-never delays one. After a restart, the fetch offers the
-bars already decided, to backfill rows a crash kept from the table. Neither is
+never delays one. After a restart, the fetch offers the window the last
+decision before it read, to backfill rows a crash kept from the table; older
+bars it fetched are left out, since a fetch can reach further back than any
+decision read and a crash can lose only that last window. Neither is
 queued, since either can run to thousands of rows; they go to `on_ohlcv_batch`
 as one call per symbol when the sink provides it. A refusal is logged, the
 rest is skipped, and the cycle still decides its new bar. A later version of a
 bar already decided is rare and is what the audit keeps, so it rides the
-queue.
+queue; a burst of them is flushed whenever the queue fills, so a healthy sink
+loses none to the bound.
 
 Any other callback keeps the documented best-effort contract: it is invoked,
 its failure is logged, and nothing is queued. The engine cannot acknowledge on
