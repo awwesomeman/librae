@@ -566,11 +566,37 @@ def default_commission_per_contract(symbol: str, market: str) -> float:
     return _TW_FUTURES_COMMISSION_BY_ROOT[match["root"]]
 
 
+_REGISTRY_FIELDS = frozenset(
+    {
+        "calendar_id",
+        "continuous_alias",
+        "contract_month",
+        "currency",
+        "data_adapter",
+        "data_source",
+        "exchange",
+        "instrument_type",
+        "market",
+        "min_notional",
+        "min_quantity",
+        "multiplier",
+        "price_increment",
+        "quantity_step",
+        "security_type",
+        "tick_size",
+        "venue_symbol",
+    }
+)
+
+
 def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
     """Validate + construct a symbol registry from a plain raw dict.
 
     Raises:
-        ValueError: instrument_type is missing/invalid, or a contract_*
+        ValueError: an entry has a key this function does not read (a
+            misspelling, or a field such as commission_per_contract that
+            comes from elsewhere, would otherwise have no effect);
+            instrument_type is missing/invalid, or a contract_*
             instrument is missing 'multiplier' — caught here, at build
             time, rather than letting an unvalidated/defaulted value drift
             into a PnL calculation. 'spot' instruments don't need
@@ -578,6 +604,9 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
     """
     registry: dict[str, SymbolInfo] = {}
     for symbol, data in raw.items():
+        unknown = sorted(set(data) - _REGISTRY_FIELDS)
+        if unknown:
+            raise ValueError(f"registry entry {symbol!r} has unknown keys {unknown}")
         instrument_type = str(data.get("instrument_type", ""))
         raw_multiplier = data.get("multiplier")
         if raw_multiplier is not None:

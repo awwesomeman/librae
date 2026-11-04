@@ -481,6 +481,25 @@ class TestPerContractCommission:
         assert entry_commission == pytest.approx(400.0)
         assert pnl.commission == pytest.approx(800.0)  # 40 x 10 contracts x 2 sides
 
+    def test_run_wide_fee_is_refused_when_products_could_differ(self) -> None:
+        from librae.core.run_config import AccountConfig, RunConfig
+
+        with pytest.raises(ValueError, match="symbol_cost_overrides"):
+            RunConfig(
+                strategy_name="x",
+                symbols=["TXFR1", "MXFR1", "TMFR1"],
+                timeframe="5m",
+                market="tw_futures",
+                data_source="shioaji",
+                account=AccountConfig(currency="TWD", initial_cash=1_000_000.0),
+                mode="backtest",
+                cost_overrides={"commission_per_contract": 25.0},
+            )
+
+    def test_run_wide_fee_still_sets_a_single_symbol_run(self) -> None:
+        cfg = self._cfg("TXFR1", cost_overrides={"commission_per_contract": 25.0})
+        assert CostModel.from_config(cfg).commission_per_contract == 25.0
+
     def test_symbol_cost_overrides_replaces_the_registry_fee(self) -> None:
         cfg = self._cfg("TXFR1", symbol_cost_overrides={"TXFR1": {"commission_per_contract": 25.0}})
         assert CostModel.from_config(cfg).calc_commission(22_000.0, 2.0) == pytest.approx(50.0)
@@ -676,6 +695,40 @@ class TestDescribeSymbols:
         assert results[1].error is not None
         assert "multiplier" in results[1].error
         assert results[1].multiplier is None
+        assert results[1].commission_per_contract_source == "unresolved"
+
+    def test_commission_reports_its_value_and_source(self) -> None:
+        from librae.core.cost_model import describe_symbols
+
+        cfg = self._cfg(
+            ["TXFR1", "MXFR1"],
+            symbol_cost_overrides={"MXFR1": {"commission_per_contract": 25.0}},
+        )
+        txf, mxf = describe_symbols(cfg)
+
+        assert (txf.commission_per_contract, txf.commission_per_contract_source) == (
+            40.0,
+            "product_default",
+        )
+        assert (mxf.commission_per_contract, mxf.commission_per_contract_source) == (
+            25.0,
+            "symbol_cost_overrides",
+        )
+
+    def test_unknown_product_fee_keeps_the_fields_that_resolved(self) -> None:
+        from librae.core.cost_model import describe_symbols
+
+        cfg = self._cfg(["ZEF202612"], symbol_cost_overrides={"ZEF202612": {"multiplier": 200.0}})
+        [result] = describe_symbols(cfg)
+
+        assert result.multiplier == 200.0
+        assert result.multiplier_source == "symbol_cost_overrides"
+        assert result.tick_size is not None
+        assert result.long_margin_rate is not None
+        assert result.commission_per_contract is None
+        assert result.commission_per_contract_source == "unresolved"
+        assert result.error is not None
+        assert "commission_per_contract" in result.error
 
     def test_defaults_to_cfg_symbols_when_omitted(self) -> None:
         from librae.core.cost_model import describe_symbols

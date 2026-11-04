@@ -474,6 +474,12 @@ class RunConfig:
             raise ValueError("rebalance_residual_policy is supported only when mode='backtest'")
         if len(self.symbols) != len(set(self.symbols)):
             raise ValueError("symbols must not contain duplicates")
+        if len(self.symbols) > 1 and "commission_per_contract" in (self.cost_overrides or {}):
+            raise ValueError(
+                "cost_overrides['commission_per_contract'] would charge every symbol one "
+                "per-contract fee, but the fee differs by product; set it per symbol in "
+                "symbol_cost_overrides"
+            )
         object.__setattr__(self, "optional_symbols", tuple(self.optional_symbols))
         optional = set(self.optional_symbols)
         if len(optional) != len(self.optional_symbols):

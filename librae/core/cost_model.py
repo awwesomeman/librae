@@ -180,54 +180,14 @@ class CostModel:
             return override
         symbol = symbol if symbol is not None else config.symbol
 
-        from librae.config.symbols import default_commission_per_contract, get_symbol
+        from librae.config.symbols import default_commission_per_contract
 
-        try:
-            sym = get_symbol(symbol)
-            multiplier, tick_size = sym.multiplier, sym.tick_size
-            symbol_market = sym.market
-        except KeyError:
-            multiplier, tick_size = None, None
-            symbol_market = config.market
-
-        route = (config.instrument_overrides or {}).get(symbol, {})
-        symbol_market = route.get("market", symbol_market)
-
-        from librae.config.market_config import get_market
-
-        mc = get_market(symbol_market, markets=markets)
-
-        # symbol_cost_overrides[symbol] wins over the run-wide cost_overrides
-        # fallback for anything both specify.
-        overrides = dict(config.cost_overrides or {})
-        overrides.update((config.symbol_cost_overrides or {}).get(symbol, {}))
-
-        multiplier = overrides.get("multiplier", multiplier)
-        tick_size = overrides.get("tick_size", tick_size)
-        if multiplier is None:
-            raise ValueError(
-                f"No multiplier for symbol={symbol!r} — pass config.symbol_cost_overrides={{"
-                f"{symbol!r}: {{'multiplier': ...}}}} (or config.cost_overrides for a "
-                "single-symbol run), or register it in librae/config/symbols.py's "
-                "built-in registry (spot instruments default to 1.0 automatically; "
-                "contract_* instruments need it explicit)."
+        fields, symbol_market = _cost_fields(config, symbol, markets)
+        if "commission_per_contract" not in fields:
+            fields["commission_per_contract"] = default_commission_per_contract(
+                symbol, symbol_market
             )
-        commission_per_contract = (
-            overrides["commission_per_contract"]
-            if "commission_per_contract" in overrides
-            else default_commission_per_contract(symbol, symbol_market)
-        )
-
-        base = asdict(
-            cls.from_market(
-                mc,
-                multiplier=multiplier,
-                tick_size=tick_size,
-                commission_per_contract=commission_per_contract,
-            )
-        )
-        base.update(overrides)
-        return cls(**base)
+        return cls(**fields)
 
     @classmethod
     def from_market(
@@ -365,6 +325,51 @@ class CostModel:
         return entry_price * (1 - self.maintenance_margin_rate + margin_rate)
 
 
+def _cost_fields(
+    config: RunConfig,
+    symbol: str,
+    markets: dict[str, MarketConfig] | None = None,
+) -> tuple[dict[str, object], str]:
+    """CostModel fields for one symbol and its market, in from_config's
+    priority, except a per-contract commission no override sets: that one is
+    left out for the caller to take from default_commission_per_contract, so
+    describe_symbols can report the other fields when only the fee fails."""
+    from librae.config.market_config import get_market
+    from librae.config.symbols import get_symbol
+
+    try:
+        sym = get_symbol(symbol)
+        multiplier, tick_size = sym.multiplier, sym.tick_size
+        symbol_market = sym.market
+    except KeyError:
+        multiplier, tick_size = None, None
+        symbol_market = config.market
+
+    route = (config.instrument_overrides or {}).get(symbol, {})
+    symbol_market = route.get("market", symbol_market)
+    mc = get_market(symbol_market, markets=markets)
+
+    # symbol_cost_overrides[symbol] wins over the run-wide cost_overrides
+    # fallback for anything both specify.
+    overrides = dict(config.cost_overrides or {})
+    overrides.update((config.symbol_cost_overrides or {}).get(symbol, {}))
+
+    multiplier = overrides.get("multiplier", multiplier)
+    tick_size = overrides.get("tick_size", tick_size)
+    if multiplier is None:
+        raise ValueError(
+            f"No multiplier for symbol={symbol!r} — pass config.symbol_cost_overrides={{"
+            f"{symbol!r}: {{'multiplier': ...}}}} (or config.cost_overrides for a "
+            "single-symbol run), or register it in librae/config/symbols.py's "
+            "built-in registry (spot instruments default to 1.0 automatically; "
+            "contract_* instruments need it explicit)."
+        )
+    fields = asdict(CostModel.from_market(mc, multiplier=multiplier, tick_size=tick_size))
+    del fields["commission_per_contract"]
+    fields.update(overrides)
+    return fields, symbol_market
+
+
 @dataclass(frozen=True)
 class SymbolDescription:
     """One symbol's resolved cost-model config, plus where each value came
@@ -381,6 +386,8 @@ class SymbolDescription:
     short_margin_rate: float | None
     long_margin_mode: MarginMode | None
     short_margin_mode: MarginMode | None
+    commission_per_contract: float | None
+    commission_per_contract_source: str
     error: str | None = None
 
 
@@ -388,9 +395,10 @@ def describe_symbols(
     config: RunConfig, symbols: list[str] | None = None
 ) -> list[SymbolDescription]:
     """Resolve and report each symbol's cost-model config (multiplier,
-    tick_size, margin rates) plus where each value came from —
-    'symbol_cost_overrides' > 'cost_overrides' > 'registry' > 'market_default',
-    matching CostModel.from_config's actual priority. A diagnostic to
+    tick_size, margin rates, per-contract commission) plus where each value
+    came from — 'symbol_cost_overrides' > 'cost_overrides' > 'registry' >
+    'market_default', and 'product_default' for a commission no override
+    sets, matching CostModel.from_config's actual priority. A diagnostic to
     confirm what's really applied before trusting a backtest, not something
     the engine consults itself.
 
@@ -398,9 +406,10 @@ def describe_symbols(
     resolve (no multiplier anywhere) is reported with its error message
     instead of raising, so one bad entry in a large batch doesn't hide the
     rest — this is the main reason to call this on a whole symbol list at
-    once rather than one at a time.
+    once rather than one at a time. A symbol whose only failure is its
+    per-contract commission keeps every other resolved field.
     """
-    from librae.config.symbols import get_symbol
+    from librae.config.symbols import default_commission_per_contract, get_symbol
 
     results: list[SymbolDescription] = []
     for sym in symbols if symbols is not None else config.symbols:
@@ -416,8 +425,25 @@ def describe_symbols(
             info.data_source if info else config.data_source
         )
 
+        fee_error: str | None = None
         try:
-            cm = CostModel.from_config(config, symbol=sym)
+            fields, symbol_market = _cost_fields(config, sym)
+            if "commission_per_contract" in symbol_over:
+                fee_source = "symbol_cost_overrides"
+            elif "commission_per_contract" in cost_over:
+                fee_source = "cost_overrides"
+            else:
+                fee_source = "product_default"
+                try:
+                    fields["commission_per_contract"] = default_commission_per_contract(
+                        sym, symbol_market
+                    )
+                except ValueError as e:
+                    fee_error = str(e)
+            fee = fields.get("commission_per_contract")
+            # A fee that failed has no value; 0.0 stands in only so the other
+            # fields still go through CostModel's validation.
+            cm = CostModel(**{**fields, "commission_per_contract": fee or 0.0})
         except (KeyError, ValueError) as e:
             results.append(
                 SymbolDescription(
@@ -432,6 +458,8 @@ def describe_symbols(
                     short_margin_rate=None,
                     long_margin_mode=None,
                     short_margin_mode=None,
+                    commission_per_contract=None,
+                    commission_per_contract_source="unresolved",
                     error=str(e),
                 )
             )
@@ -468,6 +496,9 @@ def describe_symbols(
                 short_margin_rate=cm.short_margin_rate,
                 long_margin_mode=cm.long_margin_mode,
                 short_margin_mode=cm.short_margin_mode,
+                commission_per_contract=fee,
+                commission_per_contract_source="unresolved" if fee_error else fee_source,
+                error=fee_error,
             )
         )
     return results
