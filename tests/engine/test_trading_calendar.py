@@ -79,6 +79,34 @@ def test_unknown_calendar_fails_explicitly() -> None:
         session_label(pd.Timestamp("2026-04-01 00:00Z"), "NOT_A_CALENDAR")
 
 
+@pytest.mark.parametrize(
+    ("calendar_id", "instant"),
+    [
+        ("XNYS", "2000-01-04 14:30Z"),
+        ("XTAI", "2000-01-04 02:00Z"),
+        (TAIFEX_INDEX_CALENDAR, "2000-01-04 02:00Z"),
+    ],
+)
+def test_calendars_reach_back_past_the_library_default(calendar_id: str, instant: str) -> None:
+    """exchange_calendars builds only the last 20 years unless given a start."""
+    assert session_label(pd.Timestamp(instant), calendar_id) == date(2000, 1, 4)
+
+
+def test_a_calendar_that_cannot_reach_back_that_far_starts_at_its_own_bound() -> None:
+    from librae.core.trading_calendar import _exchange_calendar
+
+    calendar = _exchange_calendar("XSAU")  # holidays recorded from 2021 only
+    assert calendar.first_session == calendar.sessions[calendar.sessions >= calendar.bound_min()][0]
+
+
+def test_xtai_and_the_taifex_calendars_share_one_calendar() -> None:
+    from librae.core.trading_calendar import _exchange_calendar
+
+    xtai = _exchange_calendar("XTAI")
+    assert _exchange_calendar(TAIFEX_INDEX_CALENDAR) is xtai
+    assert _exchange_calendar(TAIFEX_LATE_OPEN_CALENDAR) is xtai
+
+
 def test_naive_timestamp_is_rejected() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         session_label(pd.Timestamp("2026-04-01 00:00"), "24/7")
