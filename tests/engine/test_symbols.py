@@ -762,17 +762,44 @@ class TestDataSourceRoute:
             )
 
     @pytest.mark.parametrize(
-        ("supplied", "missing"),
+        ("route", "inherited"),
         [
-            ({"instrument_type": "contract_perpetual"}, "venue_symbol"),
-            ({"venue_symbol": "BTC/USDT:USDT"}, "instrument_type"),
+            (
+                {"data_source": "binance_perp", "instrument_type": "contract_perpetual"},
+                "venue_symbol='BTC/USDT'",
+            ),
+            (
+                {"data_source": "binance_perp", "venue_symbol": "BTC/USDT:USDT"},
+                "instrument_type='spot'",
+            ),
+            ({"instrument_type": "contract_perpetual"}, "data_source='binance_spot'"),
+            ({"venue_symbol": "BTC/USDT:USDT"}, "data_source='binance_spot'"),
+            (
+                {"instrument_type": "contract_perpetual", "venue_symbol": "BTC/USDT:USDT"},
+                "data_source='binance_spot'",
+            ),
+            # Restating the registered source does not make the rest explicit.
+            (
+                {"data_source": "binance_spot", "instrument_type": "contract_perpetual"},
+                "venue_symbol='BTC/USDT'",
+            ),
         ],
     )
-    def test_source_override_needs_both_routing_fields(self, supplied, missing):
-        with pytest.raises(ValueError, match=rf"\['{missing}'\]"):
+    def test_partial_route_change_is_refused_naming_what_it_inherits(self, route, inherited):
+        with pytest.raises(ValueError, match=rf"inherits its registered [^;]*{inherited}"):
+            self._cfg(data_source="multi", overrides={"BTCUSDT": route})
+
+    def test_symbol_cannot_take_multi_as_its_own_source(self):
+        with pytest.raises(ValueError, match=r"\['data_source'\]='multi' names no source"):
             self._cfg(
-                data_source="binance_perp",
-                overrides={"BTCUSDT": {"data_source": "binance_perp", **supplied}},
+                data_source="multi",
+                overrides={
+                    "BTCUSDT": {
+                        "data_source": "multi",
+                        "instrument_type": "spot",
+                        "venue_symbol": "BTC/USDT",
+                    }
+                },
             )
 
     def test_full_route_override_trades_the_perpetual(self):
@@ -848,6 +875,44 @@ class TestDataSourceRoute:
         )
 
         assert resolve_symbol(config, "BTCUSDTPERP").data_source == "binance_perp"
+
+    def test_unregistered_symbol_without_a_source_in_a_mixed_run_is_refused(self):
+        with pytest.raises(ValueError, match=r"instrument_overrides\['FOO'\]\['data_source'\]"):
+            self._cfg(
+                ("BTCUSDT", "FOO"),
+                data_source="multi",
+                overrides={
+                    "FOO": {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "data_adapter": "crypto",
+                    }
+                },
+            )
+
+    def test_restating_the_registered_order_market_needs_no_source(self):
+        config = self._cfg(
+            data_source="binance_spot",
+            overrides={"BTCUSDT": {"instrument_type": "spot", "venue_symbol": "BTC/USDT"}},
+        )
+
+        assert resolve_symbol(config, "BTCUSDT").data_source == "binance_spot"
+
+    def test_order_market_override_with_a_stated_source_is_accepted(self):
+        config = self._cfg(
+            data_source="binance_spot",
+            overrides={
+                "BTCUSDT": {
+                    "data_source": "binance_spot",
+                    "instrument_type": "contract_perpetual",
+                    "venue_symbol": "BTC/USDT:USDT",
+                }
+            },
+        )
+
+        info = resolve_symbol(config, "BTCUSDT")
+
+        assert (info.data_source, info.instrument_type) == ("binance_spot", "contract_perpetual")
 
 
 class TestExecutablePriceIncrement:
