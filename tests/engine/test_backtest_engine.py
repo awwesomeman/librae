@@ -687,11 +687,13 @@ class TestBacktestDataContract:
         frame = _make_multiindex_df([100.0] * 5)
         config = make_test_cfg(
             mode="backtest",
-            data_source="run-default",
+            data_source="multi",
             instrument_overrides={
                 "BTCUSDT": {
                     "data_source": "instrument-source",
                     "data_adapter": "crypto",
+                    "instrument_type": "spot",
+                    "venue_symbol": "BTC/USDT",
                     "calendar_id": "24/7",
                 }
             },

@@ -592,6 +592,13 @@ For a rolling route, omit `contract_month` and set
 symbols (for example `ES_202609` and `ES_202612`); no code infers expiry from
 those names.
 
+`RunConfig.data_source` names the run's one source, or `multi` for a run
+mixing sources, and construction refuses it when a symbol resolves elsewhere,
+instead of letting the registry's value win unnoticed. A registered symbol
+keeps its registered `instrument_type` and `venue_symbol`, which pick the
+market orders go to, so an override moving it to another `data_source` must
+restate both: perpetual bars over the registered spot route would trade spot.
+
 `quantity_step`, `min_quantity`, `min_notional`, and a fixed `price_increment`
 are stable, cross-mode execution facts. The core rounds quantities down before
 cash, liquidity, and risk checks, applies the entry minimum notional, and

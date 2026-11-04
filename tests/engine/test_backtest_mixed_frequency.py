@@ -875,7 +875,7 @@ def test_config_mixed_backtest_reuses_resolved_primary_identity() -> None:
     )
     auxiliary_subscription = _subscription("BTCUSDT", "D1", source="daily")
     strategy = _Capture()
-    config = make_test_cfg(mode="backtest", data_source="fixture")
+    config = make_test_cfg(mode="backtest")
 
     backtest = Backtest(
         primary,

@@ -345,8 +345,10 @@ def test_factory_builds_external_data_adapter() -> None:
         instrument_overrides={
             "BTCUSDT": {
                 "data_adapter": "vendor_plugin",
+                "data_source": "vendor_feed",
                 "currency": "USDT",
                 "instrument_type": "spot",
+                "venue_symbol": "BTC/USDT",
             }
         },
     )
@@ -549,6 +551,7 @@ def test_factory_rejects_mixed_binance_products_before_building_adapters() -> No
         mode="live",
         broker="binance",
         symbols=["BTCUSDT", "BTCUSDT_PERP"],
+        data_source="multi",
         symbol_cost_overrides={"BTCUSDT_PERP": {"multiplier": 1.0}},
         instrument_overrides={
             "BTCUSDT_PERP": {
@@ -628,6 +631,7 @@ def test_live_execution_allows_independent_market_data_sources() -> None:
         mode="live",
         broker="binance",
         symbols=["BTC", "ETH"],
+        data_source="multi",
         symbol_cost_overrides={
             "BTC": {"multiplier": 1.0},
             "ETH": {"multiplier": 1.0},
@@ -683,8 +687,10 @@ def test_factory_reuses_external_adapter_for_live_orders() -> None:
         instrument_overrides={
             "BTCUSDT": {
                 "data_adapter": "vendor_plugin",
+                "data_source": "vendor_feed",
                 "currency": "USDT",
                 "instrument_type": "spot",
+                "venue_symbol": "BTC/USDT",
             }
         },
     )
@@ -898,11 +904,13 @@ def test_register_run_persists_poll_seconds_for_runtime_health() -> None:
 
 def test_register_run_persists_resolved_per_symbol_data_sources() -> None:
     config = make_test_cfg(
-        data_source="run-default",
+        data_source="multi",
         instrument_overrides={
             "BTCUSDT": {
                 "data_source": "ibkr",
                 "data_adapter": "ibkr",
+                "instrument_type": "spot",
+                "venue_symbol": "BTC/USDT",
                 "security_type": "STK",
             }
         },
@@ -916,7 +924,7 @@ def test_register_run_persists_resolved_per_symbol_data_sources() -> None:
     ):
         callbacks.register_run("run-1")
 
-    assert write_run.call_args.kwargs["data_source"] == "run-default"
+    assert write_run.call_args.kwargs["data_source"] == "multi"
     assert write_run.call_args.kwargs["data_source_by_symbol"] == {"BTCUSDT": "ibkr"}
 
 
