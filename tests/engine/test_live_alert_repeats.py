@@ -18,6 +18,7 @@ from datetime import timedelta
 import pytest
 from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import OrderIntent
+from librae.live.persistent_alerts import PersistentAlerts
 from librae.live.state import MemoryLiveStateStore
 
 from tests.engine.live_factories import (
@@ -273,6 +274,30 @@ class TestAReportThatKeepsFailingToApply:
         [resolved] = _exactly(alerts, "Resolved")
         assert resolved["message"].startswith(f"{NOT_APPLIED} cleared after 1h 5m, seen 13 times")
 
+    def test_a_cancel_error_whose_text_differs_every_time_stays_one_problem(self):
+        """A venue error names its own request, so its text is new on every cancel."""
+        adapter = _resting_adapter()
+        trader, alerts, now = _trader(adapter)
+        _buy_aaa(trader)
+        attempts = iter(range(1, 100))
+
+        def cancel_times_out(_order_id, _s):
+            raise RuntimeError(f"request timed out (request id {next(attempts)})")
+
+        adapter.cancel_order.side_effect = cancel_times_out
+        trader.halt("desk asked to stop")
+        adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
+
+        for _ in range(13):
+            trader._poll_cycle()
+            now[0] += timedelta(minutes=5)
+
+        first, reminder = _titled_not_applied(alerts)
+        assert "cancel not confirmed (RuntimeError: request timed out" in first["message"]
+        assert "still so after 1h 0m, seen 13 times" in reminder["message"]
+        assert first["message"] != reminder["message"].split(" — still so")[0]
+        assert trader._halt_cancels_pending is True
+
     def test_one_whose_order_ends_in_the_pass_a_read_failed_is_not_resolved(self):
         """Its cancel's answer applied, but the read's fills may be missing from the ledger."""
         adapter = _resting_adapter()
@@ -460,3 +485,37 @@ class TestAReportThatKeepsFailingToApply:
 
 def _titled_not_applied(alerts) -> list[dict]:
     return _exactly(alerts, NOT_APPLIED)
+
+
+class TestARepeatBetweenAlerts:
+    def _alerts(self):
+        now = [TEST_CLOCK_NOW]
+        sent: list[tuple[str, str]] = []
+        alerts = PersistentAlerts(
+            lambda title, message: sent.append((title, message)), lambda: now[0]
+        )
+        return alerts, sent, now
+
+    def test_is_logged_at_the_default_level(self, caplog):
+        alerts, sent, _ = self._alerts()
+        alerts.fire("key", "Stuck", "still stuck")
+        caplog.clear()
+
+        with caplog.at_level(logging.INFO, logger="librae.live.persistent_alerts"):
+            alerts.fire("key", "Stuck", "still stuck")
+
+        assert len(sent) == 1
+        [record] = caplog.records
+        assert record.levelno == logging.INFO
+        assert "seen 2 times" in record.getMessage()
+
+    def test_after_the_clock_steps_back_reports_no_negative_duration(self):
+        alerts, sent, now = self._alerts()
+        alerts.fire("key", "Stuck", "still stuck")
+        now[0] -= 2 * HOUR
+
+        alerts.resolve("key")
+
+        [_, (title, message)] = sent
+        assert title == "Resolved"
+        assert message.startswith("Stuck cleared after 0s, seen once")
