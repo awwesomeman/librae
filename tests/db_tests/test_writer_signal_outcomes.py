@@ -133,6 +133,28 @@ def test_run_metadata_rejects_existing_different_immutable_identity(_mock_schema
 
 
 @patch("librae.db.timescale_writer.require_current_schema")
+def test_run_metadata_keeps_a_runs_mode(_mock_schema) -> None:
+    """A backtest save that took over a sim or live run would then clear the
+    rows its engine recorded."""
+    cursor = MagicMock(rowcount=1)
+
+    write_run_metadata(
+        "run-1",
+        "strategy",
+        ["BTCUSDT"],
+        "H1",
+        "backtest",
+        data_source="test",
+        primary_subscriptions=(_subscription(),),
+        cur=cursor,
+    )
+
+    sql = cursor.execute.call_args.args[0]
+    assert "backtest_runs.mode = EXCLUDED.mode" in sql.split("WHERE", 1)[1]
+    assert "mode=EXCLUDED.mode" not in sql
+
+
+@patch("librae.db.timescale_writer.require_current_schema")
 def test_live_run_metadata_persists_sanitized_execution_identity(_mock_schema) -> None:
     cursor = MagicMock(rowcount=1)
     identity = {
@@ -213,6 +235,7 @@ class TestBacktestCacheKeyClaim:
                 None,
                 "new-run",
                 replace_existing=False,
+                store_bars=False,
             )
             is True
         )
@@ -227,6 +250,7 @@ class TestBacktestCacheKeyClaim:
             "same-config",
             "racing-run",
             replace_existing=False,
+            store_bars=False,
         )
 
         assert claimed is False
@@ -246,6 +270,7 @@ class TestBacktestCacheKeyClaim:
             "same-config",
             "forced-run",
             replace_existing=True,
+            store_bars=True,
         )
 
         assert claimed is True
@@ -264,8 +289,33 @@ class TestBacktestCacheKeyClaim:
                 "same-config",
                 "same-run",
                 replace_existing=False,
+                store_bars=True,
             )
             is True
+        )
+
+    @pytest.mark.parametrize("canonical_has_bars", [True, False])
+    def test_a_duplicate_asking_for_bars_needs_a_canonical_run_that_keeps_them(
+        self, canonical_has_bars
+    ) -> None:
+        """Skipping silently would leave the caller without the bars it asked
+        for, and its charts empty."""
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [("canonical-run",), (canonical_has_bars,)]
+
+        def claim():
+            return _claim_backtest_cache_key(
+                cursor, "same-config", "racing-run", replace_existing=False, store_bars=True
+            )
+
+        if canonical_has_bars:
+            assert claim() is False
+        else:
+            with pytest.raises(ValueError, match=r"'canonical-run'.*keeps no bars"):
+                claim()
+        assert cursor.execute.call_args.args == (
+            "SELECT EXISTS (SELECT 1 FROM run_bars WHERE run_id = %s)",
+            ("canonical-run",),
         )
 
     @patch("librae.db.timescale_writer.write_run_metadata")
@@ -297,6 +347,7 @@ class TestBacktestCacheKeyClaim:
             cache_key,
             "racing-run",
             replace_existing=False,
+            store_bars=False,
         )
         mock_write_metadata.assert_not_called()
 
@@ -838,6 +889,7 @@ class TestSaveSignalResults:
             cache_key,
             "racing-run",
             replace_existing=False,
+            store_bars=True,
         )
         mock_write_metadata.assert_not_called()
         mock_exec_values.assert_not_called()
