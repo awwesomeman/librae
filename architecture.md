@@ -846,9 +846,10 @@ assumptions, and portfolio limits cannot drift into one untyped bag.
 `backtest_revision` records the caller-owned code/data fingerprint, and the
 nullable unique `backtest_cache_key` is the only backtest deduplication
 identity. Sim state uses `sim:config_hash`; live state additionally binds the
-adapter-observed execution-identity digest. A run's `mode` and data identity
-never change: saving a backtest under a sim or live `run_id` is refused rather
-than clearing the rows its engine recorded.
+adapter-observed execution-identity digest. A run's `mode`, symbols,
+subscriptions and execution identity never change, and the backtest savers
+store backtest runs only, so no save clears the rows a sim or live engine
+recorded.
 
 `signal_events` and the run's `run_bars` are the source facts for
 signal-quality analysis, so a backtest feeds the signal dashboard only when

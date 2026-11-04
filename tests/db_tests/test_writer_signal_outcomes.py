@@ -150,7 +150,7 @@ def test_run_metadata_keeps_a_runs_mode(_mock_schema) -> None:
     )
 
     sql = cursor.execute.call_args.args[0]
-    assert "backtest_runs.mode = EXCLUDED.mode" in sql.split("WHERE", 1)[1]
+    assert "backtest_runs.mode IS NOT DISTINCT FROM EXCLUDED.mode" in sql.split("WHERE", 1)[1]
     assert "mode=EXCLUDED.mode" not in sql
 
 
@@ -333,6 +333,7 @@ class TestBacktestCacheKeyClaim:
         mock_conn_ctx.return_value = connection
         output = MagicMock()
         output.run_metadata.run_id = "racing-run"
+        output.run_metadata.mode = "backtest"
 
         counts = save_backtest_output(
             output,
@@ -711,6 +712,7 @@ class TestPersistBacktest:
         df, _symbol = self._make_featured_df()
         config = _test_cfg()
         output = MagicMock()
+        output.run_metadata.mode = "backtest"
         output.run_metadata.primary_subscriptions = _config_subscriptions(config)
 
         with pytest.raises(ValueError, match="requires backtest_revision"):
@@ -1034,6 +1036,26 @@ class TestSaveSignalResults:
                 store_bars=True,
             )
 
+    @pytest.mark.parametrize("mode", ["sim", "live"])
+    def test_a_run_of_another_mode_is_refused_before_connecting(self, mode) -> None:
+        """The save clears the run's rows first; under a sim or live run_id
+        those are the rows its engine recorded."""
+        with (
+            patch("librae.db.timescale_writer.get_conn") as get_conn,
+            pytest.raises(ValueError, match="stores backtest runs"),
+        ):
+            save_signal_results(
+                pd.DataFrame(),
+                "BTCUSDT",
+                "H1",
+                "test_strategy",
+                "binance_spot",
+                run_id="engine-run",
+                mode=mode,
+                primary_subscription=_subscription(data_source="binance_spot"),
+            )
+        get_conn.assert_not_called()
+
     @patch("librae.db.timescale_writer.require_current_schema")
     @patch("librae.db.timescale_writer.write_run_bars", return_value=5)
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
@@ -1087,6 +1109,7 @@ class TestSaveBacktestOutputBars:
     def _output(config: RunConfig) -> MagicMock:
         output = MagicMock()
         output.run_metadata.run_id = "run-1"
+        output.run_metadata.mode = "backtest"
         output.run_metadata.timeframe = "H1"
         output.run_metadata.auxiliary_subscriptions = ()
         output.run_metadata.primary_subscriptions = _config_subscriptions(config)
@@ -1094,6 +1117,18 @@ class TestSaveBacktestOutputBars:
         output.financing_cash_flows = ()
         output.account.equity_curve = ()
         return output
+
+    @pytest.mark.parametrize("mode", ["sim", "live"])
+    def test_a_run_of_another_mode_is_refused_before_connecting(self, mode) -> None:
+        output = self._output(_test_cfg())
+        output.run_metadata.mode = mode
+
+        with (
+            patch("librae.db.timescale_writer.get_conn") as get_conn,
+            pytest.raises(ValueError, match="stores backtest runs"),
+        ):
+            save_backtest_output(output)
+        get_conn.assert_not_called()
 
     @pytest.mark.parametrize(
         "bars_by_symbol",

@@ -190,9 +190,9 @@ def write_run_metadata(
 ) -> None:
     """Write a single run record to backtest_runs (upsert).
 
-    A run's mode and data identity are fixed: an upsert that would change
-    them is refused, so a backtest save cannot take over a sim or live run
-    and clear the rows its engine recorded.
+    A run's mode, symbols, subscriptions and execution identity are fixed:
+    an upsert that would change them is refused, so a backtest save cannot
+    take over a sim or live run and clear the rows its engine recorded.
 
     If ``cur`` is provided, executes on that cursor (caller owns the
     transaction).  Otherwise opens its own connection and commits.
@@ -239,7 +239,7 @@ def write_run_metadata(
                  backtest_revision=EXCLUDED.backtest_revision,
                  backtest_cache_key=EXCLUDED.backtest_cache_key,
                  execution_identity=EXCLUDED.execution_identity
-               WHERE backtest_runs.mode = EXCLUDED.mode
+               WHERE backtest_runs.mode IS NOT DISTINCT FROM EXCLUDED.mode
                  AND backtest_runs.symbols = EXCLUDED.symbols
                  AND backtest_runs.timeframe = EXCLUDED.timeframe
                  AND backtest_runs.data_source IS NOT DISTINCT FROM EXCLUDED.data_source
@@ -337,7 +337,7 @@ def _claim_backtest_cache_key(
         if not cur.fetchone()[0]:
             raise ValueError(
                 f"run_id={existing[0]!r} already holds this backtest_cache_key and keeps "
-                "no bars; save with replace_existing=True to store them"
+                "no bars; replace_existing=True (CLI --force) replaces that run with this one"
             )
 
     logger.info(
@@ -387,6 +387,10 @@ def save_backtest_output(
     """
     output.validate()
     meta = output.run_metadata
+    # These saves clear a run's rows before writing; a sim or live run's rows
+    # are the only record of what its engine saw and did.
+    if meta.mode != "backtest":
+        raise ValueError(f"save_backtest_output stores backtest runs, not mode={meta.mode!r}")
     auxiliary_subscriptions = getattr(meta, "auxiliary_subscriptions", ())
     if isinstance(auxiliary_subscriptions, tuple) and auxiliary_subscriptions:
         raise ValueError(
@@ -1401,6 +1405,11 @@ def save_signal_results(
     """
     if store_bars and run_id is None:
         raise ValueError("store_bars=True requires run_id: run_bars rows belong to a run")
+    if run_id is not None and mode != "backtest":
+        raise ValueError(
+            f"save_signal_results stores backtest runs; a run_id with mode={mode!r} would "
+            "clear rows an engine recorded"
+        )
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
     exit_signal_series = _extract_exit_signals(df, symbol)
     tf = to_canonical(timeframe)
