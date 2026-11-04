@@ -672,9 +672,11 @@ class LiveTrader:
         self._timeframe = to_ccxt(config.timeframe)
         self._interval_delta = interval_to_timedelta(self._timeframe)
         self._poll_seconds = config.runtime.poll_seconds
-        if self._poll_seconds > 0 and self._poll_seconds > self._interval_delta.total_seconds():
+        # A bar the venue has not closed by one poll waits for the next, so a
+        # poll as long as the bar can leave every decision a bar late.
+        if self._poll_seconds > 0 and self._poll_seconds >= self._interval_delta.total_seconds():
             logger.warning(
-                "poll_seconds=%s exceeds timeframe=%s (%s seconds); "
+                "poll_seconds=%s is not shorter than timeframe=%s (%s seconds); "
                 "runtime polling may observe bars late",
                 self._poll_seconds,
                 config.timeframe,

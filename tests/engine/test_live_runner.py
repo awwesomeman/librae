@@ -2502,11 +2502,12 @@ class TestLiveTrader:
         failing_sink.assert_called_once()
         retry_sink.assert_not_called()
 
-    def test_poll_slower_than_timeframe_warns(self, caplog):
+    @pytest.mark.parametrize("poll_seconds", [3600, 3601])
+    def test_poll_not_shorter_than_timeframe_warns(self, caplog, poll_seconds):
         with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
-            make_live_runner(config=_test_cfg(poll_seconds=3601))
+            make_live_runner(config=_test_cfg(poll_seconds=poll_seconds))
 
-        assert "poll_seconds=3601 exceeds timeframe=H1" in caplog.text
+        assert f"poll_seconds={poll_seconds} is not shorter than timeframe=H1" in caplog.text
 
     def test_cycle_diagnostics_marks_poll_deadline_miss(self):
         runner = make_live_runner(config=_test_cfg(poll_seconds=1))
