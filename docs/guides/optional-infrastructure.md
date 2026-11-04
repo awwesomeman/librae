@@ -44,9 +44,8 @@ The reference Compose service initializes an empty database automatically;
 see [Schema revisions](#schema-revisions) for an existing database.
 
 Runs whose exact identities cannot be recovered are marked with
-`primary_subscriptions=[]` as legacy records; `load_ohlcv(run_id=...)`
-rejects them and requires recreation rather than reading a mixed dataset.
-New writes still require a complete non-empty identity list. The reference
+`primary_subscriptions=[]` as legacy records; new writes still require a
+complete non-empty identity list. The reference
 live factory treats `backtest_runs` registration as a startup precondition: if the
 foreign-key parent cannot be written, construction fails before polling or
 order execution and emits a distinct `DB Startup Failed` alert when a notifier
@@ -71,21 +70,19 @@ ad hoc SQL. The repository runner skips database writes when
 `instrument_type` values are validated in Python against
 `librae.config.symbols.ALLOWED_INSTRUMENT_TYPES` before any SQL runs — fails
 fast instead of relying on the `CHECK` constraint at `INSERT`.
-OHLCV read/write helpers accept a `MarketDataSubscription`
-instead of a collection of optional scalar filters. `load_ohlcv(as_of=...)`
-filters on `available_at`, so a DB-backed warmup cannot observe a bar merely
-because its start label is inside the requested range.
-OHLCV upserts treat `available_at` as a row-version clock: only a strictly
-later value replaces the stored OHLCV row. Equal versions are idempotent and
-older replays are ignored, so values and availability never come from
-different versions.
-Live `on_ohlcv` is a best-effort audit callback over the fetched-history
-window. After a restart, rows at or behind the durable event watermark can be
-replayed without re-running strategy or execution, so a custom sink must be
-idempotent on the exact subscription identity plus `(ts, available_at)`.
-Delivery failures are not guaranteed to retry; the callback is not a durable
-outbox or acknowledgement protocol. The built-in Timescale sink tolerates
-duplicate delivery through the same strictly-newer row-version upsert policy.
+The reference database stores a run's bars in `run_bars`, never collected
+market data; see
+[Data acquisition and ownership boundary](../../architecture.md#data-acquisition-and-ownership-boundary).
+`write_run_bars()` takes one run and one complete `MarketDataSubscription`
+instead of a collection of optional scalar filters, and stores each
+`(ts, available_at)` version once.
+Live `on_ohlcv` is an audit callback over the fetched-history window. After a
+restart, rows at or behind the durable event watermark can be replayed without
+re-running strategy or execution, so a custom sink must be idempotent on the
+exact subscription identity plus `(ts, available_at)`. A plain callback is
+best-effort; the built-in Timescale sink declares durable delivery (see
+[OHLCV audit delivery](engine-usage.md#ohlcv-audit-delivery)) and writes
+`run_bars`.
 
 Backtest database reuse is disabled unless the caller supplies
 `backtest_revision` through CLI/YAML orchestration and passes the same value to
@@ -198,11 +195,12 @@ positions are reconstructed at each run's own equity timestamp rather than at
 "now", so a row never mixes moments. See
 [the dashboard-scope ADR](../decisions/2026-09-07-account-overview-is-a-separate-dashboard.md).
 
-OHLCV panels use the same exact six-field `primary_subscriptions` identity as
-the Python reader and never widen a query to make legacy data appear. A legacy
-run marked with `primary_subscriptions=[]` therefore has no price data in the
-strategy or signal dashboard; recreate the run or explicitly migrate its
-metadata from an auditable source.
+Price panels read the bars the selected run stored in `run_bars`, the latest
+version of each. A sim or live run stores the bars behind its decisions (see
+[architecture.md](../../architecture.md#data-acquisition-and-ownership-boundary)); a backtest stores
+its inputs only when saved with `store_bars=True`. A backtest saved without it
+is expected to show empty price panels, no mark for its open positions, and
+no forward-return statistics on the signal dashboard.
 
 Dashboards query the TimescaleDB tables and remain empty until a strategy has
 written data. To inspect the panels before running a real strategy, load the

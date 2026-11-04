@@ -49,7 +49,7 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 28
+_STATE_SCHEMA_VERSION = 29
 
 
 def normalize_runtime_revision(
@@ -496,11 +496,15 @@ class PendingOhlcvDelivery:
     ``identity`` is the exact subscription, the bar timestamp, and the row
     version. A correction shares its timestamp with the bar it replaces, so
     the version is what makes the two distinct.
+
+    ``observed_at`` rides along so a replay records when the row was received,
+    not when the database came back.
     """
 
     subscription: MarketDataSubscription
     ts: datetime
     available_at: datetime
+    observed_at: datetime
     bar: dict[str, float]
 
     @property
@@ -517,6 +521,7 @@ class PendingOhlcvDelivery:
             "subscription": self.subscription.to_dict(),
             "ts": self.ts.isoformat(),
             "available_at": self.available_at.isoformat(),
+            "observed_at": self.observed_at.isoformat(),
             "bar": {key: float(value) for key, value in self.bar.items()},
         }
 
@@ -524,12 +529,14 @@ class PendingOhlcvDelivery:
     def from_dict(cls, raw: dict) -> PendingOhlcvDelivery:
         ts = _to_utc(raw["ts"])
         available_at = _to_utc(raw["available_at"])
-        if ts is None or available_at is None:
-            raise ValueError("pending OHLCV delivery requires ts and available_at")
+        observed_at = _to_utc(raw["observed_at"])
+        if ts is None or available_at is None or observed_at is None:
+            raise ValueError("pending OHLCV delivery requires ts, available_at and observed_at")
         return cls(
             subscription=MarketDataSubscription.from_dict(raw["subscription"]),
             ts=ts,
             available_at=available_at,
+            observed_at=observed_at,
             bar={str(key): float(value) for key, value in raw["bar"].items()},
         )
 

@@ -62,6 +62,7 @@ from librae.core.financing import (
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
+    OBSERVED_AT_COLUMN,
     BatchFeatureFn,
     FeatureBatch,
     MarketDataSubscription,
@@ -116,6 +117,7 @@ from .interfaces import (
     FinancingCashFlowCallback,
     HeartbeatCallback,
     Notifier,
+    OhlcvBatchCallback,
     OhlcvCallback,
     PerformanceCallback,
     PositionEventCallback,
@@ -177,6 +179,7 @@ class _MarketDataFetchResult:
     frame: pd.DataFrame | None
     elapsed_seconds: float
     audit_rows: tuple[_OhlcvAuditRow, ...] = ()
+    corrections: tuple[_OhlcvAuditRow, ...] = ()
     error: Exception | None = None
 
 
@@ -633,6 +636,7 @@ class LiveTrader:
         on_bar: BarCallback | None = None,
         on_position_event: PositionEventCallback | None = None,
         on_ohlcv: OhlcvCallback | None = None,
+        on_ohlcv_batch: OhlcvBatchCallback | None = None,
         on_heartbeat: HeartbeatCallback | None = None,
         on_signal_outcome: SignalOutcomeCallback | None = None,
         on_financing_cash_flow: FinancingCashFlowCallback | None = None,
@@ -653,6 +657,8 @@ class LiveTrader:
 
         if (feature_fn is None) == (batch_feature_fn is None):
             raise ValueError("exactly one of feature_fn and batch_feature_fn is required")
+        if on_ohlcv_batch is not None and on_ohlcv is None:
+            raise ValueError("on_ohlcv_batch is the many-bar path of an on_ohlcv sink; pass both")
         if feature_fn is not None and not callable(feature_fn):
             raise TypeError("feature_fn must be callable or None")
         if batch_feature_fn is not None and not callable(batch_feature_fn):
@@ -860,6 +866,10 @@ class LiveTrader:
             )
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
+        # When this process first received each cached row version, keyed by
+        # (ts, available_at) in nanoseconds. Kept beside the cache rather than
+        # as a column so strategies never see it; it feeds only the audit row.
+        self._bar_observed_at: dict[str, dict[tuple[int, int], datetime]] = {}
         self._consecutive_errors: int = 0
         self._market_data_fetch_failures: dict[str, int] = {}
         # Recent fetch health is intentionally process-local. Persisting a
@@ -962,6 +972,8 @@ class LiveTrader:
         self._account_lease_acquired = False
         self._restored_state = False
         self._on_runtime_event = on_runtime_event
+        # Before the restore, which refills it from the checkpoint.
+        self._pending_ohlcv: list[PendingOhlcvDelivery] = []
         if self._state_store is not None:
             restored = self._state_store.load(self._state_key)
             if restored is not None:
@@ -988,12 +1000,12 @@ class LiveTrader:
         self._clean_position_event_cycles = 0
         self._dropped_position_event_sequences: list[int] = []
         self._on_ohlcv = on_ohlcv
+        self._on_ohlcv_batch = on_ohlcv_batch
         # A sink opts into at-least-once delivery by declaring it. Anything
         # else keeps the documented best-effort contract, because the engine
         # cannot acknowledge on a caller's behalf.
         sink_owner = getattr(on_ohlcv, "__self__", on_ohlcv)
         self._durable_ohlcv_delivery = getattr(sink_owner, "durable_ohlcv_delivery", False) is True
-        self._pending_ohlcv: list[PendingOhlcvDelivery] = []
         self._ohlcv_audit_degraded = False
         self._on_heartbeat = on_heartbeat
         self._on_signal_outcome = on_signal_outcome
@@ -1568,6 +1580,7 @@ class LiveTrader:
         def fetch_one(symbol: str) -> _MarketDataFetchResult:
             started = perf_counter()
             audit_rows: list[_OhlcvAuditRow] = []
+            corrections: list[_OhlcvAuditRow] = []
             if symbol in self._replay_backlog_exhausted:
                 return _MarketDataFetchResult(
                     outcome="terminal",
@@ -1578,6 +1591,7 @@ class LiveTrader:
                 frame = self._fetch_with_cache_unchecked(
                     symbol,
                     audit_sink=audit_rows,
+                    correction_sink=corrections,
                 )
             except Exception as exc:
                 frame = self._ohlcv_cache.get(symbol)
@@ -1586,6 +1600,7 @@ class LiveTrader:
                     frame=frame,
                     elapsed_seconds=perf_counter() - started,
                     audit_rows=tuple(audit_rows),
+                    corrections=tuple(corrections),
                     error=exc,
                 )
             outcome: Literal["success", "terminal"] = (
@@ -1596,6 +1611,7 @@ class LiveTrader:
                 frame=frame,
                 elapsed_seconds=perf_counter() - started,
                 audit_rows=tuple(audit_rows),
+                corrections=tuple(corrections),
             )
 
         if self._market_data_workers == 1 or len(self._symbols) == 1:
@@ -1606,6 +1622,18 @@ class LiveTrader:
                 futures = {symbol: pool.submit(fetch_one, symbol) for symbol in self._symbols}
                 results = {symbol: futures[symbol].result() for symbol in self._symbols}
 
+        def by_version(rows: tuple[_OhlcvAuditRow, ...]) -> list[_OhlcvAuditRow]:
+            unique: dict[tuple[int, int], _OhlcvAuditRow] = {}
+            for event_ts, audit_bar in rows:
+                version = (
+                    pd.Timestamp(event_ts).value,
+                    pd.Timestamp(audit_bar[AVAILABLE_AT_COLUMN]).value,
+                )
+                unique.setdefault(version, (event_ts, audit_bar))
+            return [unique[version] for version in sorted(unique)]
+
+        corrections_queued = False
+        reread: list[tuple[str, datetime, dict[str, object]]] = []
         for symbol, result in results.items():
             self._cycle_fetch_seconds[symbol] = result.elapsed_seconds
             if result.outcome == "error":
@@ -1613,18 +1641,27 @@ class LiveTrader:
                 self._record_market_data_fetch_failure(symbol, result.error)
             elif result.outcome == "success":
                 self._record_market_data_fetch_success(symbol)
-            if self._on_ohlcv is not None:
-                audit_by_version: dict[tuple[int, int], _OhlcvAuditRow] = {}
-                for event_ts, audit_bar in result.audit_rows:
-                    version = (
-                        pd.Timestamp(event_ts).value,
-                        pd.Timestamp(audit_bar[AVAILABLE_AT_COLUMN]).value,
-                    )
-                    audit_by_version.setdefault(version, (event_ts, audit_bar))
-                for event_ts, audit_bar in (
-                    audit_by_version[version] for version in sorted(audit_by_version)
-                ):
-                    self._on_ohlcv(symbol, self._timeframe, audit_bar, event_ts)
+            if self._on_ohlcv is None:
+                continue
+            # A later version of a bar already decided is what the audit
+            # exists to keep, and rare, so it rides the same queue as a
+            # decided bar.
+            for event_ts, audit_bar in by_version(result.corrections):
+                self._queue_ohlcv({symbol: audit_bar}, event_ts)
+                corrections_queued = True
+                if not self._durable_ohlcv_delivery:
+                    self._deliver_ohlcv({symbol: audit_bar}, event_ts)
+            reread.extend(
+                (symbol, event_ts, audit_bar)
+                for event_ts, audit_bar in by_version(result.audit_rows)
+            )
+        # Bars already decided before a restart: a refusal is an audit gap,
+        # not a reason to skip this cycle's decision.
+        self._offer_audit_rows(reread, "restart re-read")
+        if corrections_queued and self._durable_ohlcv_delivery:
+            # Offered now, as the cycle's first flush was; a refusal keeps
+            # them queued for the next checkpoint and retry.
+            self._flush_pending_ohlcv()
         return results
 
     def _record_market_data_fetch_failure(self, symbol: str, error: Exception) -> None:
@@ -3032,6 +3069,7 @@ class LiveTrader:
         symbol: str,
         *,
         audit_sink: list[_OhlcvAuditRow] | None = None,
+        correction_sink: list[_OhlcvAuditRow] | None = None,
     ) -> pd.DataFrame | None:
         """Fetch and cache one symbol, propagating failures to the poll coordinator."""
         cached = self._ohlcv_cache.get(symbol)
@@ -3039,11 +3077,7 @@ class LiveTrader:
             # Restored and test-injected legacy caches may predate row-version
             # metadata. Normalize them before comparing history fingerprints.
             cached = self._normalize_runtime_rows(symbol, cached)
-        restart_audit_watermark = (
-            self._last_bar_ts.get(symbol)
-            if audit_sink is not None and (cached is None or cached.empty)
-            else None
-        )
+        first_fill = cached is None or cached.empty
         if symbol in self._replay_backlog_exhausted:
             return cached
         if self._warmup_gap(symbol, cached) is not None:
@@ -3067,7 +3101,8 @@ class LiveTrader:
                     base,
                     fetched,
                     audit_sink=audit_sink,
-                    restart_audit_watermark=restart_audit_watermark,
+                    correction_sink=correction_sink,
+                    first_fill=first_fill,
                 )
 
             try:
@@ -3167,7 +3202,8 @@ class LiveTrader:
                 cached,
                 new_df,
                 audit_sink=audit_sink,
-                restart_audit_watermark=restart_audit_watermark,
+                correction_sink=correction_sink,
+                first_fill=first_fill,
             )
 
         return self._store_runtime_cache(symbol, merged)
@@ -3202,6 +3238,11 @@ class LiveTrader:
             merged = merged.iloc[-self._warmup_periods :]
         merged = merged.reset_index(drop=True)
         self._ohlcv_cache[symbol] = merged
+        head = pd.Timestamp(merged["ts"].iloc[0]).value
+        received = self._bar_observed_at.get(symbol, {})
+        self._bar_observed_at[symbol] = {
+            version: at for version, at in received.items() if version[0] >= head
+        }
         return merged
 
     def _fetch_history(self, symbol: str, requested_periods: int) -> pd.DataFrame:
@@ -3310,41 +3351,47 @@ class LiveTrader:
         fetched: pd.DataFrame,
         *,
         audit_sink: list[_OhlcvAuditRow] | None = None,
-        restart_audit_watermark: datetime | None = None,
+        correction_sink: list[_OhlcvAuditRow] | None = None,
+        first_fill: bool = False,
     ) -> pd.DataFrame:
-        """Merge causal row versions, then validate the whole cache cadence."""
+        """Merge causal row versions, then validate the whole cache cadence.
+
+        ``first_fill`` marks a fetch into an empty cache. After a restart it
+        offers the bars at or before the watermark to ``audit_sink``, a
+        best-effort backfill for rows a crash kept from the table; a decision
+        records the bars it reads after that (``_offer_decision_window``).
+        """
         fetched = self._normalize_runtime_rows(symbol, fetched)
-        accepted_audit_rows: list[_OhlcvAuditRow] = []
-        if audit_sink is not None and restart_audit_watermark is not None:
-            replay_rows = fetched.loc[fetched["ts"] <= pd.Timestamp(restart_audit_watermark)]
-            accepted_audit_rows.extend(
+        observed_at = self._record_observed_at(symbol, fetched)
+        watermark = self._last_bar_ts.get(symbol)
+
+        def audit_rows(rows: pd.DataFrame) -> list[_OhlcvAuditRow]:
+            return [
                 (
                     pd.Timestamp(row["ts"]).to_pydatetime(),
-                    row.drop(labels="ts").to_dict(),
+                    {**row.drop(labels="ts").to_dict(), OBSERVED_AT_COLUMN: observed_at[index]},
                 )
-                for _, row in replay_rows.iterrows()
-            )
+                for index, row in rows.iterrows()
+            ]
+
+        accepted_audit_rows: list[_OhlcvAuditRow] = []
+        accepted_corrections: list[_OhlcvAuditRow] = []
+        if audit_sink is not None and first_fill and watermark is not None:
+            accepted_audit_rows = audit_rows(fetched.loc[fetched["ts"] <= pd.Timestamp(watermark)])
         if cached is None or cached.empty:
             merged = fetched
         else:
             cached = self._normalize_runtime_rows(symbol, cached)
-            if audit_sink is not None and restart_audit_watermark is None:
-                watermark = self._last_bar_ts.get(symbol)
-                if watermark is not None:
-                    previous_availability = cached.set_index("ts")[AVAILABLE_AT_COLUMN]
-                    previous_versions = fetched["ts"].map(previous_availability)
-                    corrections = fetched.loc[
+            if correction_sink is not None and not first_fill and watermark is not None:
+                previous_availability = cached.set_index("ts")[AVAILABLE_AT_COLUMN]
+                previous_versions = fetched["ts"].map(previous_availability)
+                accepted_corrections = audit_rows(
+                    fetched.loc[
                         previous_versions.notna()
                         & (fetched[AVAILABLE_AT_COLUMN] > pd.DatetimeIndex(previous_versions))
                         & (fetched["ts"] <= pd.Timestamp(watermark))
                     ]
-                    accepted_audit_rows.extend(
-                        (
-                            pd.Timestamp(row["ts"]).to_pydatetime(),
-                            row.drop(labels="ts").to_dict(),
-                        )
-                        for _, row in corrections.iterrows()
-                    )
+                )
             cached = cached.assign(_librae_source_priority=0)
             fetched = fetched.assign(_librae_source_priority=1)
             merged = pd.concat([cached, fetched], ignore_index=True)
@@ -3363,7 +3410,153 @@ class LiveTrader:
         normalized = self._normalize_runtime_rows(symbol, merged)
         if audit_sink is not None:
             audit_sink.extend(accepted_audit_rows)
+        if correction_sink is not None:
+            correction_sink.extend(accepted_corrections)
         return normalized
+
+    def _record_observed_at(self, symbol: str, fetched: pd.DataFrame) -> pd.Series:
+        """Stamp each fetched row version with the first time it was received.
+
+        A version fetched again on a later poll keeps its first stamp, so the
+        audit row says when the engine had that version, not when it last
+        asked for it.
+        """
+        now = self._utc_now()
+        received = self._bar_observed_at.setdefault(symbol, {})
+        return pd.Series(
+            [
+                received.setdefault((pd.Timestamp(ts).value, pd.Timestamp(available_at).value), now)
+                for ts, available_at in zip(
+                    fetched["ts"], fetched[AVAILABLE_AT_COLUMN], strict=True
+                )
+            ],
+            index=fetched.index,
+            dtype=object,
+        )
+
+    def _observed_at(self, symbol: str, ts: datetime, available_at: object | None) -> datetime:
+        """When the engine received the cached version of one bar."""
+        if available_at is not None:
+            observed = self._bar_observed_at.get(symbol, {}).get(
+                (pd.Timestamp(ts).value, pd.Timestamp(available_at).value)
+            )
+            if observed is not None:
+                return observed
+        # Every fetched row passes _merge_runtime_rows, so only a cache set
+        # without fetching lacks a stamp; the decision time bounds it.
+        logger.warning(
+            "No receipt time recorded for %s at %s; recording the decision time", symbol, ts
+        )
+        return self._utc_now()
+
+    def _commit_cycle_bars(
+        self,
+        audit_bars: Mapping[str, dict[str, object]],
+        audit_histories: Mapping[str, pd.DataFrame],
+        ts: datetime,
+    ) -> None:
+        """Checkpoint the cycle with its decided bars queued, then record them.
+
+        Every return after a decision comes through here, a halt included: the
+        caller advances the watermark past these bars, and nothing records a
+        bar behind the watermark again. The window behind them is collected
+        only now, after any order went out, so audit work never delays one.
+        """
+        try:
+            self._queue_ohlcv(audit_bars, ts)
+        except Exception:
+            # A full queue reports each dropped row through the runtime-event
+            # callback, which may raise; audit work must never stand between
+            # a cycle, a halt included, and its checkpoint.
+            logger.warning(
+                "Queueing this cycle's bars failed; the checkpoint goes ahead without them",
+                exc_info=True,
+            )
+        self._persist_state()
+        try:
+            self._deliver_ohlcv(audit_bars, ts)
+            window_rows: list[tuple[str, datetime, dict[str, object]]] = []
+            for symbol, history in audit_histories.items():
+                window_rows.extend(self._unrecorded_window(symbol, history))
+            self._offer_decision_window(window_rows)
+        except Exception:
+            # The checkpoint above holds the decided bars; a failure past it
+            # (the flush's own checkpoint, or collecting the window) must not
+            # turn a finished cycle, or a halt, into a failed one.
+            logger.warning("Recording this cycle's bars failed after its checkpoint", exc_info=True)
+
+    def _unrecorded_window(
+        self, symbol: str, history: pd.DataFrame
+    ) -> list[tuple[str, datetime, dict[str, object]]]:
+        """Bars this decision reads that no earlier decision of the symbol did.
+
+        ``history`` is the decision's window, indexed by ts and ending at the
+        decided bar, which records itself. In steady state this is empty; it
+        holds the window at a start, bars that arrived while warmup was short,
+        and catch-up bars a live run stepped over.
+        """
+        previous = self._last_bar_ts.get(symbol)
+        read = history.iloc[:-1]
+        if previous is not None:
+            read = read.loc[read.index > pd.Timestamp(previous)]
+        rows: list[tuple[str, datetime, dict[str, object]]] = []
+        for bar_ts, row in read.iterrows():
+            bar = row.to_dict()
+            bar[OBSERVED_AT_COLUMN] = self._observed_at(
+                symbol, bar_ts, bar.get(AVAILABLE_AT_COLUMN)
+            )
+            rows.append((symbol, pd.Timestamp(bar_ts).to_pydatetime(), bar))
+        return rows
+
+    def _offer_decision_window(self, rows: list[tuple[str, datetime, dict[str, object]]]) -> None:
+        """Offer a decision's unrecorded window once, after the decision."""
+        if rows and self._durable_ohlcv_delivery and self._pending_ohlcv:
+            # The sink just refused the decided bar; the window would only
+            # wait on the same failing database.
+            logger.warning(
+                "Skipping %d window bar(s) of this decision: the OHLCV audit sink "
+                "refused the decided bar",
+                len(rows),
+            )
+            return
+        self._offer_audit_rows(rows, "decision's window")
+
+    def _offer_audit_rows(
+        self, rows: list[tuple[str, datetime, dict[str, object]]], what: str
+    ) -> None:
+        """Offer best-effort audit rows, one batch per symbol when the sink takes batches.
+
+        Not queued: a start's window or a restart's re-read can be thousands
+        of rows, too many for the checkpoint and, one write each, enough to
+        hold up a poll for minutes. A refusal is logged and the rest skipped
+        rather than waiting on a dead sink.
+        """
+        if self._on_ohlcv is None or not rows:
+            return
+        batches: list[tuple[str, list[tuple[datetime, dict[str, object]]]]] = []
+        in_batch: set[datetime] = set()
+        for symbol, bar_ts, bar in rows:
+            # A batch holds one version per bar; a second version opens the next.
+            if not batches or batches[-1][0] != symbol or bar_ts in in_batch:
+                batches.append((symbol, []))
+                in_batch = set()
+            batches[-1][1].append((bar_ts, bar))
+            in_batch.add(bar_ts)
+        for symbol, bars in batches:
+            try:
+                if self._on_ohlcv_batch is not None:
+                    self._on_ohlcv_batch(symbol, self._timeframe, bars)
+                else:
+                    for bar_ts, bar in bars:
+                        self._on_ohlcv(symbol, self._timeframe, bar, bar_ts)
+            except Exception:
+                logger.warning(
+                    "OHLCV audit delivery of a %s failed for %s; the rest is not delivered",
+                    what,
+                    symbol,
+                    exc_info=True,
+                )
+                return
 
     def _report_incomplete_warmup(self) -> None:
         """Publish an edge-triggered diagnostic after bounded backfill fails."""
@@ -5507,6 +5700,7 @@ class LiveTrader:
         histories: dict[str, pd.DataFrame] = {}
         raw_bars: dict[str, dict[str, float]] = {}
         audit_bars: dict[str, dict[str, object]] = {}
+        audit_histories: dict[str, pd.DataFrame] = {}
         previous_volumes: dict[str, float] = {}
         lagged_adv_by_symbol: dict[str, float] = {}
         for symbol in resolved_active_symbols:
@@ -5518,7 +5712,12 @@ class LiveTrader:
             history = audit_history.drop(columns=[AVAILABLE_AT_COLUMN], errors="ignore")
             histories[symbol] = history
             raw_bar = history.iloc[-1].to_dict()
-            audit_bars[symbol] = audit_history.iloc[-1].to_dict()
+            audit_bar = audit_history.iloc[-1].to_dict()
+            audit_bar[OBSERVED_AT_COLUMN] = self._observed_at(
+                symbol, ts, audit_bar.get(AVAILABLE_AT_COLUMN)
+            )
+            audit_bars[symbol] = audit_bar
+            audit_histories[symbol] = audit_history
             close = float(raw_bar.get("close", float("nan")))
             if not isfinite(close) or close <= 0:
                 raise ValueError(f"{symbol} has invalid close at {ts}: {close}")
@@ -5656,7 +5855,7 @@ class LiveTrader:
             ts,
             lagged_adv_by_symbol=lagged_adv_by_symbol,
         ):
-            self._persist_state()
+            self._commit_cycle_bars(audit_bars, audit_histories, ts)
             return None
         if not execution_already_committed:
             for symbol in resolved_active_symbols:
@@ -5705,16 +5904,15 @@ class LiveTrader:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
                     position.periods_held += 1
-            self._persist_state()
+            # Equity is still marked on this bar, so the bar is recorded too.
+            self._commit_cycle_bars(audit_bars, audit_histories, ts)
             return feature_batch.as_of if feature_batch is not None else None
 
         if live_rebalance_blocks_decisions:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
                     position.periods_held += 1
-            self._queue_ohlcv(audit_bars, ts)
-            self._persist_state()
-            self._deliver_ohlcv(audit_bars, ts)
+            self._commit_cycle_bars(audit_bars, audit_histories, ts)
             return feature_batch.as_of if feature_batch is not None else None
 
         # A declared auxiliary input is read through ctx.market_data, which
@@ -5847,17 +6045,14 @@ class LiveTrader:
                     lagged_adv_by_symbol=lagged_adv_by_symbol,
                 )
                 if not execution_complete and self._halted:
-                    self._persist_state()
+                    self._commit_cycle_bars(audit_bars, audit_histories, ts)
                     return None
 
         for symbol, position in self._positions.items():
             if symbol in raw_bars:
                 position.periods_held += 1
-        self._queue_ohlcv(audit_bars, ts)
-        self._persist_state()
-
         # Record OHLCV after processing (equity already recorded in Step 1.5)
-        self._deliver_ohlcv(audit_bars, ts)
+        self._commit_cycle_bars(audit_bars, audit_histories, ts)
         return feature_batch.as_of if feature_batch is not None else None
 
     def _post_fill_risk_violation(self, *, include_net: bool = True) -> str | None:

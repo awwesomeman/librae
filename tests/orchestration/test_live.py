@@ -124,6 +124,9 @@ def test_factory_registers_timescale_callbacks() -> None:
         trader = build_live_trader(MagicMock(), lambda frame: frame, config=config)
 
     callbacks.register_run.assert_called_once_with(trader.run_id)
+    # The window a decision reads and a restart's re-read go out as one write
+    # per symbol, not one per bar.
+    assert trader._on_ohlcv_batch is callbacks.on_ohlcv_batch
 
 
 def test_database_enabled_sim_checkpoints_portfolio_weights_decision() -> None:
@@ -928,15 +931,18 @@ def test_register_run_persists_resolved_per_symbol_data_sources() -> None:
     assert write_run.call_args.kwargs["data_source_by_symbol"] == {"BTCUSDT": "ibkr"}
 
 
-def test_live_ohlcv_write_preserves_session_identity() -> None:
+def test_live_bar_is_stored_under_the_run_with_both_clocks() -> None:
+    """The row says which run saw the bar and when it received it; without
+    the run the bars of every sim on one feed would be one series again."""
     config = make_test_cfg(mode="sim", session_mode="regular")
     callbacks = _TimescaleCallbacks(
         config,
         {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
         None,
     )
+    callbacks._run_id = "run-1"
 
-    with patch("librae.db.timescale_writer.write_ohlcv", autospec=True) as write:
+    with patch("librae.db.timescale_writer.write_run_bars", autospec=True) as write:
         callbacks.on_ohlcv(
             "BTCUSDT",
             "H1",
@@ -947,11 +953,13 @@ def test_live_ohlcv_write_preserves_session_identity() -> None:
                 "close": 100.0,
                 "volume": 10.0,
                 "available_at": datetime(2025, 1, 1, 1, tzinfo=UTC),
+                "observed_at": datetime(2025, 1, 1, 1, 0, 2, tzinfo=UTC),
             },
             datetime(2025, 1, 1, tzinfo=UTC),
         )
 
-    subscription = write.call_args.args[1]
+    run_id, subscription, frame = write.call_args.args
+    assert run_id == "run-1"
     assert subscription.to_dict() == {
         "symbol": "BTCUSDT",
         "timeframe": "H1",
@@ -960,7 +968,8 @@ def test_live_ohlcv_write_preserves_session_identity() -> None:
         "data_source": "binance_spot",
         "instrument_type": "spot",
     }
-    assert write.call_args.args[0]["available_at"].iloc[0] == datetime(2025, 1, 1, 1, tzinfo=UTC)
+    assert frame["available_at"].iloc[0] == datetime(2025, 1, 1, 1, tzinfo=UTC)
+    assert frame["observed_at"].iloc[0] == datetime(2025, 1, 1, 1, 0, 2, tzinfo=UTC)
 
 
 def test_live_ohlcv_analytics_write_records_and_propagates() -> None:
@@ -980,7 +989,7 @@ def test_live_ohlcv_analytics_write_records_and_propagates() -> None:
 
     with (
         patch(
-            "librae.db.timescale_writer.write_ohlcv",
+            "librae.db.timescale_writer.write_run_bars",
             autospec=True,
             side_effect=RuntimeError("database unavailable"),
         ) as write,
@@ -1001,7 +1010,101 @@ def test_live_ohlcv_analytics_write_records_and_propagates() -> None:
         )
 
     write.assert_called_once()
-    assert callbacks._failures["write_ohlcv"] == 1
+    assert callbacks._failures["write_run_bars"] == 1
+
+
+def test_a_batch_of_bars_is_one_write_with_every_clock() -> None:
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        None,
+    )
+    callbacks._run_id = "run-1"
+    bars = [
+        (
+            datetime(2025, 1, 1, hour, tzinfo=UTC),
+            {
+                "open": 99.0,
+                "high": 101.0,
+                "low": 98.0,
+                "close": 100.0 + hour,
+                "volume": 10.0,
+                "available_at": datetime(2025, 1, 1, hour + 1, tzinfo=UTC),
+                "observed_at": datetime(2025, 1, 1, 6, 0, 3, tzinfo=UTC),
+            },
+        )
+        for hour in range(5)
+    ]
+
+    with patch("librae.db.timescale_writer.write_run_bars", autospec=True) as write:
+        callbacks.on_ohlcv_batch("BTCUSDT", "H1", bars)
+
+    write.assert_called_once()
+    run_id, _subscription, frame = write.call_args.args
+    assert run_id == "run-1"
+    assert frame["close"].tolist() == [100.0, 101.0, 102.0, 103.0, 104.0]
+    assert frame["observed_at"].nunique() == 1
+    assert frame.index.tolist() == [ts for ts, _bar in bars]
+
+
+def test_one_misstamped_bar_does_not_cost_the_rest_of_a_batch() -> None:
+    """The writer refuses a whole batch for one bad stamp, and a batch can be
+    a decision's whole window; the good bars are written without it."""
+    config = make_test_cfg(mode="sim")
+    notifier = MagicMock(enabled=True)
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        notifier,
+    )
+    callbacks._run_id = "run-1"
+    bar = {"open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 10.0}
+    stamps = [
+        datetime(2025, 1, 1, 0, tzinfo=UTC),
+        datetime(2025, 1, 1, 1, 30, tzinfo=UTC),  # not an H1 bar start
+        datetime(2025, 1, 1, 3, tzinfo=UTC),
+    ]
+    written: list[list[datetime]] = []
+
+    def record(_cur, _sql, rows, **_kwargs):
+        written.append([row[0] for row in rows])
+        return [(1,)] * len(rows)
+
+    with (
+        patch("librae.db.timescale_writer.get_conn"),
+        patch("librae.db.timescale_writer.psycopg2.extras.execute_values", side_effect=record),
+    ):
+        callbacks.on_ohlcv_batch("BTCUSDT", "H1", [(ts, dict(bar)) for ts in stamps])
+
+    assert written == [[stamps[0], stamps[2]]]
+    assert "OHLCV Bar Rejected" in notifier.send_alert.call_args.kwargs["title"]
+
+
+def test_failing_bar_writes_alert_once_per_streak_and_never_stop_propagating() -> None:
+    """The engine keeps each refused row queued, so every failure must reach
+    it; the person needs one alert for the outage, not one per bar."""
+    config = make_test_cfg(mode="sim")
+    notifier = MagicMock(enabled=True)
+    callbacks = _TimescaleCallbacks(
+        config,
+        {"BTCUSDT": resolve_symbol(config, "BTCUSDT")},
+        notifier,
+    )
+    bar = {"open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 10.0}
+
+    with patch(
+        "librae.db.timescale_writer.write_run_bars",
+        autospec=True,
+        side_effect=RuntimeError("database unavailable"),
+    ):
+        for hour in range(5):
+            with pytest.raises(RuntimeError, match="database unavailable"):
+                callbacks.on_ohlcv("BTCUSDT", "H1", bar, datetime(2025, 1, 1, hour, tzinfo=UTC))
+
+    titles = [call.kwargs["title"] for call in notifier.send_alert.call_args_list]
+    assert titles == [f"[{config.strategy_name}] DB Write Failing"]
+    assert callbacks._failures["write_run_bars"] == 5
 
 
 def test_live_ohlcv_bar_with_a_rejected_timestamp_is_alerted_and_acknowledged() -> None:
@@ -1019,7 +1122,7 @@ def test_live_ohlcv_bar_with_a_rejected_timestamp_is_alerted_and_acknowledged() 
     )
 
     with patch(
-        "librae.db.timescale_writer.write_ohlcv",
+        "librae.db.timescale_writer.write_run_bars",
         autospec=True,
         side_effect=BarTimestampError("1 of 1 timestamps are not H1 bar starts"),
     ):
@@ -1034,7 +1137,7 @@ def test_live_ohlcv_bar_with_a_rejected_timestamp_is_alerted_and_acknowledged() 
     assert "OHLCV Bar Rejected" in notifier.send_alert.call_args.kwargs["title"]
     assert "not H1 bar starts" in notifier.send_alert.call_args.kwargs["message"]
     # The database did not fail, so this must not build toward "DB Write Failing".
-    assert callbacks._failures.get("write_ohlcv", 0) == 0
+    assert callbacks._failures.get("write_run_bars", 0) == 0
 
 
 def test_live_ohlcv_bars_rejected_for_hours_alert_hourly_and_resolve_once() -> None:
@@ -1064,7 +1167,7 @@ def test_live_ohlcv_bars_rejected_for_hours_alert_hourly_and_resolve_once() -> N
     with (
         patch("librae.orchestration.live.datetime", _Clock),
         patch(
-            "librae.db.timescale_writer.write_ohlcv",
+            "librae.db.timescale_writer.write_run_bars",
             autospec=True,
             side_effect=BarTimestampError("1 of 1 timestamps are not M1 bar starts"),
         ) as write,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +16,7 @@ import pandas as pd
 from librae.config.symbols import resolve_symbol
 from librae.core.cost_model import CostModel
 from librae.core.market_data import BarTimestampError
+from librae.core.trading_calendar import bar_start_problem
 from librae.core.utils import make_event_id
 from librae.integrations import AdapterFactory
 from librae.live.engine import (
@@ -454,8 +455,8 @@ class _TimescaleCallbacks:
 
     # The first-party persistence path opts into at-least-once delivery: the
     # engine queues each row in the checkpoint before offering it, and only
-    # drops it once this returns. write_ohlcv is idempotent on an equal or
-    # older row version, so a duplicate replay is a deterministic no-op.
+    # drops it once this returns. write_run_bars stores each row version once,
+    # so a duplicate replay is a deterministic no-op.
     durable_ohlcv_delivery = True
 
     def on_ohlcv(
@@ -465,20 +466,36 @@ class _TimescaleCallbacks:
         bar: dict[str, object],
         ts: datetime,
     ) -> None:
-        from librae.core.market_data import AVAILABLE_AT_COLUMN, subscription_from_instrument
-        from librae.db.timescale_writer import write_ohlcv
+        self.on_ohlcv_batch(symbol, timeframe, [(ts, bar)])
 
-        row = {
-            "ts": ts,
-            "open": bar["open"],
-            "high": bar["high"],
-            "low": bar["low"],
-            "close": bar["close"],
-            "volume": bar["volume"],
-        }
-        if AVAILABLE_AT_COLUMN in bar:
-            row[AVAILABLE_AT_COLUMN] = bar[AVAILABLE_AT_COLUMN]
-        frame = pd.DataFrame([row]).set_index("ts")
+    def on_ohlcv_batch(
+        self,
+        symbol: str,
+        timeframe: str,
+        bars: Sequence[tuple[datetime, dict[str, object]]],
+    ) -> None:
+        from librae.core.market_data import (
+            AVAILABLE_AT_COLUMN,
+            OBSERVED_AT_COLUMN,
+            subscription_from_instrument,
+        )
+        from librae.db.timescale_writer import write_run_bars
+
+        rows = []
+        for ts, bar in bars:
+            row = {
+                "ts": ts,
+                "open": bar["open"],
+                "high": bar["high"],
+                "low": bar["low"],
+                "close": bar["close"],
+                "volume": bar["volume"],
+            }
+            for clock in (AVAILABLE_AT_COLUMN, OBSERVED_AT_COLUMN):
+                if clock in bar:
+                    row[clock] = bar[clock]
+            rows.append(row)
+        frame = pd.DataFrame(rows).set_index("ts")
         instrument = self._instruments[symbol]
         subscription = self._subscriptions.get(symbol) or subscription_from_instrument(
             instrument,
@@ -491,22 +508,39 @@ class _TimescaleCallbacks:
         # the writer refuses is the exception: no retry fixes it, and the queue
         # is ordered, so holding it back would hold back every row behind it.
         # It is acknowledged after alerting, and does not count as the database
-        # failing. Trading does not depend on the stored copy.
+        # failing; in a batch the writer refuses all its bars. Trading does not
+        # depend on the stored copy.
         try:
             self._write(
-                write_ohlcv,
-                frame,
+                write_run_bars,
+                self._run_id,
                 subscription,
+                frame,
                 propagate=True,
             )
         except BarTimestampError as exc:
             self._bar_rejections.fire(
                 subscription,
                 "OHLCV Bar Rejected",
-                f"{exc}. The bar was not stored; trading continues.",
+                f"{exc}. Those bars were not stored; trading continues.",
                 # Each error names its own bar; the problem is the feed's.
                 content="",
             )
+            # The writer refuses a whole batch for one bad stamp; one stray bar
+            # must not cost a decision window of good ones.
+            accepted = [
+                (ts, bar)
+                for ts, bar in bars
+                if bar_start_problem(
+                    ts,
+                    subscription.timeframe,
+                    subscription.calendar_id,
+                    session_mode=subscription.session_mode,
+                )
+                is None
+            ]
+            if accepted and len(accepted) < len(bars):
+                self.on_ohlcv_batch(symbol, timeframe, accepted)
             return
         self._bar_rejections.clear(subscription)
 
@@ -729,6 +763,7 @@ def build_live_trader(
         on_bar=callbacks.on_bar if callbacks else None,
         on_position_event=callbacks.on_position_event if callbacks else None,
         on_ohlcv=callbacks.on_ohlcv if callbacks else None,
+        on_ohlcv_batch=callbacks.on_ohlcv_batch if callbacks else None,
         on_heartbeat=callbacks.on_heartbeat if callbacks else None,
         on_signal_outcome=callbacks.on_signal_outcome if callbacks else None,
         on_financing_cash_flow=callbacks.on_financing_cash_flow if callbacks else None,

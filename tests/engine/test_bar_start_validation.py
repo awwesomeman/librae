@@ -17,7 +17,7 @@ from librae.core.market_data import (
     MarketDataSubscription,
     validate_bar_starts,
 )
-from librae.db.timescale_writer import write_ohlcv
+from librae.db.timescale_writer import write_run_bars
 
 
 def _taipei(*values: str) -> pd.DatetimeIndex:
@@ -161,7 +161,7 @@ def test_repeated_timestamps_are_checked_once() -> None:
 # --- the writer ------------------------------------------------------------
 
 
-def test_write_ohlcv_refuses_the_whole_batch_before_touching_the_database() -> None:
+def test_write_run_bars_refuses_the_whole_batch_before_touching_the_database() -> None:
     index = _taipei("2026-11-02 12:45", "2026-11-02 13:45")
     frame = pd.DataFrame(
         {
@@ -184,8 +184,8 @@ def test_write_ohlcv_refuses_the_whole_batch_before_touching_the_database() -> N
 
     with (
         patch("librae.db.timescale_writer.get_conn") as get_conn,
-        pytest.raises(BarTimestampError, match="OHLCV write for 'TXFR1' 'shioaji'"),
+        pytest.raises(BarTimestampError, match="run bars write for 'TXFR1' 'shioaji'"),
     ):
-        write_ohlcv(frame, subscription)
+        write_run_bars("run-1", subscription, frame)
 
     get_conn.assert_not_called()

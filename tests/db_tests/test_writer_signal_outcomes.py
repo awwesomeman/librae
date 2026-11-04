@@ -18,7 +18,7 @@ from librae.db.timescale_writer import (
     save_signal_results,
     save_strategy_results,
     write_equity_curve_point,
-    write_ohlcv,
+    write_run_bars,
     write_run_metadata,
     write_signal_event,
     write_strategy_performance,
@@ -398,7 +398,7 @@ def test_write_trade_event_sql_matches_persisted_cost_fields(mock_conn_ctx) -> N
     assert values[19:22] == (0.1, None, None)
 
 
-def test_write_ohlcv_requires_real_volume() -> None:
+def test_write_run_bars_requires_real_volume() -> None:
     frame = pd.DataFrame(
         {
             "open": [100.0],
@@ -410,10 +410,10 @@ def test_write_ohlcv_requires_real_volume() -> None:
     )
 
     with pytest.raises(ValueError, match="volume"):
-        write_ohlcv(frame, _subscription())
+        write_run_bars("run-1", _subscription(), frame)
 
 
-def test_write_ohlcv_rejects_partial_scalar_identity() -> None:
+def test_write_run_bars_rejects_partial_scalar_identity() -> None:
     frame = pd.DataFrame(
         {
             "open": [100.0],
@@ -426,51 +426,100 @@ def test_write_ohlcv_rejects_partial_scalar_identity() -> None:
     )
 
     with pytest.raises(TypeError, match="MarketDataSubscription"):
-        write_ohlcv(frame, "BTCUSDT")  # type: ignore[arg-type]
+        write_run_bars("run-1", "BTCUSDT", frame)  # type: ignore[arg-type]
 
 
-@patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
-@patch("librae.db.timescale_writer.get_conn")
-def test_write_ohlcv_uses_complete_subscription_and_availability(
-    mock_conn_ctx, mock_exec_values
-) -> None:
-    mock_exec_values.return_value = []
-    mock_cur = MagicMock()
-    mock_conn = MagicMock()
-    mock_conn.__enter__.return_value = mock_conn
-    mock_conn.cursor.return_value = mock_cur
-    mock_conn_ctx.return_value = mock_conn
-    frame = pd.DataFrame(
+def _one_bar(
+    ts: datetime = datetime(2024, 6, 3, 13, tzinfo=UTC), **clocks: datetime
+) -> pd.DataFrame:
+    return pd.DataFrame(
         {
             "open": [100.0],
             "high": [101.0],
             "low": [99.0],
             "close": [100.0],
             "volume": [10.0],
-            "available_at": [datetime(2024, 6, 3, 15, tzinfo=UTC)],
+            **{name: [value] for name, value in clocks.items()},
         },
-        index=pd.DatetimeIndex([datetime(2024, 6, 3, 13, 30, tzinfo=UTC)], name="ts"),
+        index=pd.DatetimeIndex([ts], name="ts"),
     )
+
+
+@patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+@patch("librae.db.timescale_writer.get_conn")
+def test_write_run_bars_keys_rows_by_run_and_keeps_the_first_receipt(
+    mock_conn_ctx, mock_exec_values
+) -> None:
+    """A version already stored is left alone: overwriting it would let a
+    replayed delivery move when the run received that bar. The values are part
+    of the version: a source can revise a closed bar without moving its
+    available_at, and a restarted run then reads the revised values."""
+    mock_exec_values.return_value = [(1,)]
+    mock_conn = MagicMock()
+    mock_conn.__enter__.return_value = mock_conn
+    mock_conn_ctx.return_value = mock_conn
     subscription = _subscription(
         symbol="AAPL",
         calendar_id="XNYS",
         session_mode="regular",
         data_source="ibkr",
     )
+    available_at = datetime(2024, 6, 3, 15, tzinfo=UTC)
+    observed_at = datetime(2024, 6, 3, 15, 0, 4, tzinfo=UTC)
 
-    accepted = write_ohlcv(frame, subscription)
+    inserted = write_run_bars(
+        "run-1",
+        subscription,
+        _one_bar(
+            datetime(2024, 6, 3, 13, 30, tzinfo=UTC),
+            available_at=available_at,
+            observed_at=observed_at,
+        ),
+    )
 
     sql = mock_exec_values.call_args[0][1]
     row = mock_exec_values.call_args[0][2][0]
-    assert "calendar_id, session_mode" in sql
-    assert "available_at=EXCLUDED.available_at" in sql
-    assert "WHERE EXCLUDED.available_at > ohlcv.available_at" in sql
-    assert "RETURNING 1" in sql
-    assert "GREATEST" not in sql
+    assert (
+        "ON CONFLICT (run_id, symbol, ts, available_at, open, high, low, close, volume)"
+        in " ".join(sql.split())
+    )
+    assert "DO NOTHING" in sql
+    assert "DO UPDATE" not in sql
     assert mock_exec_values.call_args.kwargs["fetch"] is True
-    assert accepted == 0
-    assert row[1:7] == tuple(subscription.to_dict().values())
-    assert row[7] == datetime(2024, 6, 3, 15, tzinfo=UTC)
+    assert inserted == 1
+    assert row[1] == "run-1"
+    assert row[2:8] == tuple(subscription.to_dict().values())
+    assert row[8:10] == (available_at, observed_at)
+
+
+@patch("librae.db.timescale_writer.psycopg2.extras.execute_values", return_value=[])
+@patch("librae.db.timescale_writer.get_conn")
+def test_write_run_bars_without_a_receipt_time_stores_none(mock_conn_ctx, mock_exec_values):
+    """A backtest replays its inputs; it observed nothing, so no time is invented."""
+    mock_conn_ctx.return_value.__enter__.return_value = MagicMock()
+
+    write_run_bars("run-1", _subscription(), _one_bar())
+
+    row = mock_exec_values.call_args[0][2][0]
+    assert row[9] is None
+    assert row[8] == datetime(2024, 6, 3, 14, tzinfo=UTC)  # derived bar close
+
+
+def test_write_run_bars_on_a_callers_cursor_opens_no_connection() -> None:
+    cursor = MagicMock()
+    with (
+        patch("librae.db.timescale_writer.get_conn") as get_conn,
+        patch("librae.db.timescale_writer.psycopg2.extras.execute_values", return_value=[]) as ev,
+    ):
+        write_run_bars("run-1", _subscription(), _one_bar(), cur=cursor)
+
+    get_conn.assert_not_called()
+    assert ev.call_args[0][0] is cursor
+
+
+def test_write_run_bars_refuses_a_naive_receipt_time() -> None:
+    with pytest.raises(ValueError, match="Timezone-naive"):
+        write_run_bars("run-1", _subscription(), _one_bar(observed_at=datetime(2024, 6, 3, 15)))
 
 
 class TestWriteSignalEvent:
@@ -554,9 +603,8 @@ class TestPersistBacktest:
         )
         return df, symbol
 
-    @patch("librae.db.timescale_writer.write_ohlcv", return_value=20)
     @patch("librae.db.timescale_writer.save_backtest_output", return_value={"backtest_runs": 1})
-    def test_extracts_signals_and_calls_writer(self, mock_write_bt, mock_write_ohlcv):
+    def test_extracts_signals_and_calls_writer(self, mock_write_bt):
         df, _symbol = self._make_featured_df()
         mock_output = MagicMock()
         config = _test_cfg()
@@ -589,11 +637,10 @@ class TestPersistBacktest:
         assert call_kwargs.kwargs["replace_existing"] is False
         assert call_kwargs.kwargs["backtest_revision"] == "revision-a"
 
-        assert counts["ohlcv"] == 20
+        assert counts == {"backtest_runs": 1}
 
-    @patch("librae.db.timescale_writer.write_ohlcv", return_value=20)
     @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
-    def test_force_recompute_replaces_existing_hash(self, mock_write_bt, mock_write_ohlcv):
+    def test_force_recompute_replaces_existing_hash(self, mock_write_bt):
         df, _symbol = self._make_featured_df()
         config = _test_cfg()
         output = MagicMock()
@@ -623,9 +670,8 @@ class TestPersistBacktest:
                 replace_existing=True,
             )
 
-    @patch("librae.db.timescale_writer.write_ohlcv", return_value=20)
     @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
-    def test_excludes_nan_and_zero_signals(self, mock_write_bt, mock_write_ohlcv):
+    def test_excludes_nan_and_zero_signals(self, mock_write_bt):
         """NaN and 0 values are excluded from signal_series."""
         symbol = "BTCUSDT"
         n = 10
@@ -654,9 +700,8 @@ class TestPersistBacktest:
         assert len(signal_series) == 5
         assert 0.0 not in signal_series.values
 
-    @patch("librae.db.timescale_writer.write_ohlcv", return_value=10)
     @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
-    def test_persists_every_configured_symbol(self, mock_write_bt, mock_write_ohlcv):
+    def test_stored_bars_cover_every_configured_symbol(self, mock_write_bt):
         timestamps = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
         index = pd.MultiIndex.from_product(
             [["AAA", "BBB"], timestamps],
@@ -690,22 +735,33 @@ class TestPersistBacktest:
         output = MagicMock()
         output.run_metadata.primary_subscriptions = _config_subscriptions(config)
 
-        counts = save_strategy_results(output, df, config)
+        save_strategy_results(output, df, config, store_bars=True)
 
-        assert mock_write_ohlcv.call_count == 2
-        assert {call.args[1].symbol for call in mock_write_ohlcv.call_args_list} == {
-            "AAA",
-            "BBB",
-        }
+        bars = mock_write_bt.call_args.kwargs["bars_by_symbol"]
+        assert set(bars) == {"AAA", "BBB"}
+        # Bars only: a feature or signal column is not a bar the run saw.
+        assert list(bars["BBB"].columns) == ["open", "high", "low", "close", "volume"]
+        assert bars["BBB"].index.name == "ts"
+        assert len(bars["BBB"]) == 3
         assert "BBB" in mock_write_bt.call_args.kwargs["signal_series_by_symbol"]
-        assert counts["ohlcv"] == 20
 
-    @patch("librae.db.timescale_writer.write_ohlcv", return_value=3)
+    @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
+    def test_input_bars_are_not_copied_by_default(self, mock_write_bt):
+        """The run's metadata names the exact series and range it used;
+        copying the inputs is for a chart and must be asked for."""
+        df, _symbol = self._make_featured_df()
+        config = _test_cfg()
+        output = MagicMock()
+        output.run_metadata.primary_subscriptions = _config_subscriptions(config)
+
+        save_strategy_results(output, df, config)
+
+        assert mock_write_bt.call_args.kwargs["bars_by_symbol"] is None
+
     @patch("librae.db.timescale_writer.save_backtest_output", return_value={})
     def test_persists_per_instrument_data_source_identity(
         self,
         mock_write_bt,
-        mock_write_ohlcv,
     ) -> None:
         df, symbol = self._make_featured_df(n=3)
         config = _test_cfg(
@@ -727,9 +783,6 @@ class TestPersistBacktest:
         save_strategy_results(output, df, config)
 
         assert mock_write_bt.call_args.kwargs["data_source_by_symbol"] == {symbol: "ibkr"}
-        subscription = mock_write_ohlcv.call_args.args[1]
-        assert subscription.data_source == "ibkr"
-        assert subscription.instrument_type == "spot"
 
 
 class TestSaveSignalResults:
@@ -737,14 +790,14 @@ class TestSaveSignalResults:
 
     @patch("librae.db.timescale_writer.write_run_metadata")
     @patch("librae.db.timescale_writer._claim_backtest_cache_key", return_value=False)
-    @patch("librae.db.timescale_writer.write_ohlcv")
+    @patch("librae.db.timescale_writer.write_run_bars")
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
     def test_losing_config_hash_writer_exits_without_partial_rows(
         self,
         mock_conn_ctx,
         mock_exec_values,
-        mock_ohlcv,
+        mock_run_bars,
         mock_claim,
         mock_write_metadata,
     ) -> None:
@@ -775,6 +828,7 @@ class TestSaveSignalResults:
             run_id="racing-run",
             config=config,
             backtest_revision="revision-a",
+            store_bars=True,
         )
 
         assert counts == {"backtest_runs": 0}
@@ -787,14 +841,11 @@ class TestSaveSignalResults:
         )
         mock_write_metadata.assert_not_called()
         mock_exec_values.assert_not_called()
-        mock_ohlcv.assert_not_called()
+        mock_run_bars.assert_not_called()
 
-    @patch("librae.db.timescale_writer.write_ohlcv", return_value=10)
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
-    def test_writes_signal_events_without_backtest(
-        self, mock_conn_ctx, mock_exec_values, mock_ohlcv
-    ):
+    def test_writes_signal_events_without_backtest(self, mock_conn_ctx, mock_exec_values):
         """Can write signals without BacktestOutput."""
         mock_conn = MagicMock()
         mock_cur = MagicMock()
@@ -826,20 +877,16 @@ class TestSaveSignalResults:
             primary_subscription=_subscription(data_source="binance_spot"),
         )
 
-        assert counts["signal_events"] == 4  # indices 0,5,10,15
-        assert counts["ohlcv"] == 10
+        assert counts == {"signal_events": 4}  # indices 0,5,10,15
         # Verify DELETE was called
         assert mock_cur.execute.call_count >= 1
         # Verify batch INSERT was called
         mock_exec_values.assert_called_once()
 
     @patch("librae.db.timescale_writer.require_current_schema")
-    @patch("librae.db.timescale_writer.write_ohlcv", return_value=10)
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
-    def test_delete_scoped_to_own_run_id(
-        self, mock_conn_ctx, mock_exec_values, mock_ohlcv, _mock_schema
-    ):
+    def test_delete_scoped_to_own_run_id(self, mock_conn_ctx, mock_exec_values, _mock_schema):
         """Regression test: re-running save_signal_results for the same
         (strategy, symbol, timeframe) over an overlapping date range must
         only clear its own run's prior signal_events rows, not silently
@@ -882,10 +929,9 @@ class TestSaveSignalResults:
         assert "run_id IS NOT DISTINCT FROM" in sql
         assert params[0] == "run-A"
 
-    @patch("librae.db.timescale_writer.write_ohlcv", return_value=0)
     @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
     @patch("librae.db.timescale_writer.get_conn")
-    def test_handles_multiindex_df(self, mock_conn_ctx, mock_exec_values, mock_ohlcv):
+    def test_handles_multiindex_df(self, mock_conn_ctx, mock_exec_values):
         """Works with MultiIndex (symbol, datetime) DataFrames."""
         mock_conn = MagicMock()
         mock_cur = MagicMock()
@@ -923,3 +969,121 @@ class TestSaveSignalResults:
 
         # 1.0, -1.0, 1.0, 1.0, -0.5 = 5 non-zero non-NaN
         assert counts["signal_events"] == 5
+
+    def test_storing_bars_needs_a_run(self) -> None:
+        with pytest.raises(ValueError, match="store_bars=True requires run_id"):
+            save_signal_results(
+                pd.DataFrame(),
+                "BTCUSDT",
+                "H1",
+                "test_strategy",
+                "binance_spot",
+                primary_subscription=_subscription(data_source="binance_spot"),
+                store_bars=True,
+            )
+
+    @patch("librae.db.timescale_writer.require_current_schema")
+    @patch("librae.db.timescale_writer.write_run_bars", return_value=5)
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
+    def test_stored_bars_join_the_run_in_its_transaction(
+        self, mock_conn_ctx, _exec_values, mock_run_bars, _schema
+    ) -> None:
+        """run_bars rows need their run row, so they are written on the cursor
+        that registered it, after the run's earlier bars are cleared."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn_ctx.return_value = mock_conn
+        idx = pd.date_range("2024-01-01", periods=5, freq="1h", tz="UTC")
+        df = pd.DataFrame(
+            {
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 10.0,
+                "entry_signal": 1.0,
+            },
+            index=idx,
+        )
+        subscription = _subscription(data_source="binance_spot")
+
+        counts = save_signal_results(
+            df,
+            "BTCUSDT",
+            "H1",
+            "test_strategy",
+            "binance_spot",
+            run_id="run-A",
+            primary_subscription=subscription,
+            store_bars=True,
+        )
+
+        assert counts["run_bars"] == 5
+        run_id, written_subscription, bars = mock_run_bars.call_args.args
+        assert (run_id, written_subscription) == ("run-A", subscription)
+        assert list(bars.columns) == ["open", "high", "low", "close", "volume"]
+        assert mock_run_bars.call_args.kwargs["cur"] is mock_cur
+        mock_cur.execute.assert_any_call("DELETE FROM run_bars WHERE run_id = %s", ("run-A",))
+
+
+class TestSaveBacktestOutputBars:
+    @staticmethod
+    def _output(config: RunConfig) -> MagicMock:
+        output = MagicMock()
+        output.run_metadata.run_id = "run-1"
+        output.run_metadata.timeframe = "H1"
+        output.run_metadata.auxiliary_subscriptions = ()
+        output.run_metadata.primary_subscriptions = _config_subscriptions(config)
+        output.position_events = ()
+        output.financing_cash_flows = ()
+        output.account.equity_curve = ()
+        return output
+
+    @pytest.mark.parametrize(
+        "bars_by_symbol",
+        [{"ETHUSDT": pd.DataFrame()}, {}],
+        ids=["outside the run", "missing a run symbol"],
+    )
+    def test_bars_must_cover_exactly_the_run_before_connecting(self, bars_by_symbol) -> None:
+        """Bars for some symbols only would leave the others' positions
+        silently unpriced in every mark."""
+        output = self._output(_test_cfg())
+
+        with (
+            patch("librae.db.timescale_writer.get_conn") as get_conn,
+            pytest.raises(ValueError, match="cover exactly the run symbols"),
+        ):
+            save_backtest_output(output, bars_by_symbol=bars_by_symbol)
+
+        get_conn.assert_not_called()
+
+    @patch("librae.db.timescale_writer.write_strategy_performance")
+    @patch("librae.db.timescale_writer.write_run_metadata")
+    @patch("librae.db.timescale_writer.write_run_bars", return_value=3)
+    @patch("librae.db.timescale_writer.get_conn")
+    def test_a_resave_replaces_the_runs_bars_in_one_transaction(
+        self, mock_conn_ctx, mock_run_bars, _metadata, _performance
+    ) -> None:
+        """Re-saving a run replaces its rows: old bars left behind would
+        disagree with the new results, and DO NOTHING would keep them."""
+        connection = MagicMock()
+        connection.__enter__ = MagicMock(return_value=connection)
+        connection.__exit__ = MagicMock(return_value=False)
+        mock_conn_ctx.return_value = connection
+        cursor = connection.cursor.return_value
+        config = _test_cfg()
+        bars = pd.DataFrame({"open": [1.0]})
+
+        counts = save_backtest_output(self._output(config), bars_by_symbol={"BTCUSDT": bars})
+
+        statements = [call.args[0] for call in cursor.execute.call_args_list]
+        assert "DELETE FROM run_bars WHERE run_id = %s" in statements
+        assert counts["run_bars"] == 3
+        run_id, subscription, written = mock_run_bars.call_args.args
+        assert (run_id, subscription) == ("run-1", _config_subscriptions(config)[0])
+        assert written is bars
+        assert mock_run_bars.call_args.kwargs["cur"] is cursor

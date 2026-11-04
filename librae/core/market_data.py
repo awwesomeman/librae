@@ -27,6 +27,8 @@ CAN_BUY_COLUMN = "can_buy"
 CAN_SELL_COLUMN = "can_sell"
 SIDE_TRADABILITY_COLUMNS = (CAN_BUY_COLUMN, CAN_SELL_COLUMN)
 AVAILABLE_AT_COLUMN = "available_at"
+# When a sim/live engine received a bar version: wall clock, not a bar clock.
+OBSERVED_AT_COLUMN = "observed_at"
 
 
 def _detach_object_features(frame: pd.DataFrame) -> pd.DataFrame:

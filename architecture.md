@@ -159,6 +159,23 @@ store must declare `restart_durable = True`; the persistence methods alone are
 satisfied by a dictionary, so live fails closed on a store that declares
 nothing rather than reaching order-capable startup with no recovery state.
 
+The bars a run saw are evidence of that run, not market data, and the engine
+never reads them back to decide. Sim and live store in `run_bars`, keyed by
+run and with when the engine received each version: for each symbol a
+decision advances, its primary-subscription bar and the part of the window
+behind it that no earlier decision of that symbol read; every later version
+of a bar already decided; and, after a restart, the bars already decided as
+re-read. Auxiliary subscriptions are not stored, and the bars a batch feature
+reads for a symbol the event does not advance are stored only once a decision
+of that symbol reads them. A backtest
+records the exact subscriptions and range it used in `backtest_runs`; it
+copies its input bars only when saved with `store_bars=True`, for charts.
+Collected market data — its table (`ohlcv` by convention), its revisions, and
+its naming rule (exchange-native id plus `data_source` plus `instrument_type`)
+— belongs to the caller. A run's `symbol` is the engine's code for the
+instrument within that run, an alias the caller maps to its own naming, never
+a market-data key.
+
 Database-backed backtest reuse is opt-in. `config_hash` identifies resolved
 engine configuration only; it does not identify caller-owned strategy code or
 input data. A caller that wants cache reuse supplies one immutable
@@ -673,7 +690,8 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_position_event` | `on_position_event(event, sequence)` — an `OrderEvent` plus its restart-stable sequence; fires on open/add/reduce/close, only after a checkpoint holds the fill. A failed call propagates by default. A sink that declares `durable_position_event_delivery = True` instead has a failed event kept in memory and offered again, in sequence order, every later cycle, so it must be idempotent on `sequence`; the queue is not checkpointed, so a crash drops it. The first refusal sets `position_event_delivery_degraded` and alerts once; the flag clears after `POSITION_EVENT_RECOVERY_CYCLES` clean poll cycles, and only then can it alert again. An event refused for `MAX_POSITION_EVENT_ATTEMPTS` poll cycles, or the oldest once the queue passes `MAX_PENDING_POSITION_EVENTS`, is dropped, so one event the sink never accepts cannot hold back later ones. A dropped sequence is always logged and listed in `dropped_position_event_sequences` for the process; it is also offered as a runtime event, which a runtime-event sink on the same unavailable database will not keep |
 | `on_financing_cash_flow` | `on_financing_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
 | `on_runtime_event` | `on_runtime_event(event)` — a `RuntimeEvent`; operational audit trail (state restoration, skipped decisions, halts, halt resets, group failures), not a fill. A halt, reset or group failure is offered only after it has happened, stamped with the wall clock, and a failed call for one is logged, never raised |
-| `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — audit projection; `bar` includes OHLCV and `available_at`. Best-effort by default: a failed call is logged and not retried. A sink that declares `durable_ohlcv_delivery = True` instead gets at-least-once delivery — the row is queued in the checkpoint before it is offered and dropped only once the call returns, so a failed write or a crash replays it. Sinks must be idempotent either way, and the queue is bounded: reaching the bound drops loudly — each dropped identity is recorded and `ohlcv_audit_degraded` reports it — rather than halting the book for data that is re-fetchable |
+| `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — audit projection; `bar` includes OHLCV, `available_at`, and `observed_at`, when the engine first received that version. Best-effort by default: a failed call is logged and not retried. A sink that declares `durable_ohlcv_delivery = True` instead gets at-least-once delivery — the row is queued in the checkpoint before it is offered and dropped only once the call returns, so a failed write or a crash replays it. Sinks must be idempotent either way, and the queue is bounded: reaching the bound drops loudly — each dropped identity is recorded and `ohlcv_audit_degraded` reports it — rather than halting the book for data that is re-fetchable |
+| `on_ohlcv_batch` | `on_ohlcv_batch(symbol, timeframe, bars)` — optional many-bar path of the same sink, `bars` being `(ts, bar)` pairs in ts order; the engine uses it for a decision's unrecorded window and a restart's re-read, which can run to thousands of bars, and otherwise sends them through `on_ohlcv` one by one. Only valid with `on_ohlcv`. Best-effort: a failure is logged and the rest skipped |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
 | `on_performance` | `on_performance(run_id, account_id)` after a close/reduce/funding event and the current equity callback |
@@ -732,8 +750,9 @@ tables and nothing else, and
 when a table has no such reader or writer.
 
 Everything else is the caller's, however many of the caller's projects share
-it: third-party factors, ingestion coverage bookkeeping, inventories of what
-has been collected, a persisted instrument master (the engine resolves
+it: collected market data (`ohlcv`), third-party factors, ingestion coverage
+bookkeeping, inventories of what has been collected, a persisted instrument
+master (the engine resolves
 instruments from `librae.config.symbols`, never from a table),
 instrument-specific stores. The caller defines those
 tables, migrates them, and writes their read and write functions, then hands
@@ -751,7 +770,7 @@ an existing database to it is the deployment's job, specified by the diff of
 flowchart TD
     subgraph backtest["Backtest result writes"]
         save_signal["save_signal_results()"] --> b_signal_events[("signal_events")]
-        save_signal --> b_ohlcv[("ohlcv")]
+        save_signal -- store_bars --> b_run_bars[("run_bars")]
 
         save_strategy["save_strategy_results()"] --> b_backtest_runs[("backtest_runs")]
         save_strategy --> b_equity_curve[("equity_curve")]
@@ -759,7 +778,7 @@ flowchart TD
         save_strategy --> b_funding[("financing_cash_flows")]
         save_strategy --> b_strategy_perf[("strategy_performance")]
         save_strategy --> b_signal_events
-        save_strategy --> b_ohlcv
+        save_strategy -- store_bars --> b_run_bars
     end
 
     subgraph live["sim/live real-time writes"]
@@ -767,7 +786,7 @@ flowchart TD
         callbacks -- on_financing_cash_flow --> l_funding[("financing_cash_flows")]
         callbacks -- on_signal_outcome --> l_signal_events[("signal_events")]
         callbacks -- on_bar --> l_equity_curve[("equity_curve")]
-        callbacks -- on_ohlcv --> l_ohlcv[("ohlcv")]
+        callbacks -- on_ohlcv --> l_run_bars[("run_bars")]
         checkpoint["LiveStateStore.save"] --> l_runtime[("execution_runtime_state")]
         checkpoint --> l_orders[("broker_orders")]
     end
@@ -779,24 +798,25 @@ flowchart TD
 
 | Type | Rule | Example |
 |---|---|---|
-| Discrete event/record table (each row is one independently-occurring event or record) | plural | `backtest_runs`, `position_events`, `signal_events`, `runtime_events` |
-| Domain term for a continuous time series as a whole (each row is one point in the series, but the table name refers to the series itself) | keep the domain's conventional singular term | `equity_curve`, `ohlcv` |
+| Discrete event/record table (each row is one independently-occurring event or record) | plural | `backtest_runs`, `position_events`, `signal_events`, `runtime_events`, `run_bars` |
+| Domain term for a continuous time series as a whole (each row is one point in the series, but the table name refers to the series itself) | keep the domain's conventional singular term | `equity_curve` |
 | Singleton state table (one current snapshot per key) | singular | `execution_runtime_state` |
 
 ### Timestamp naming rules
 
-**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `ohlcv`/`equity_curve`/`position_events`/`financing_cash_flows`/`signal_events`). For OHLCV it is the canonical UTC bar start; `available_at` records the earliest safe observation time of the currently persisted row version and is the causal as-of frontier.
-**Every other point-in-time metadata field uses the `_at` suffix**, consistently — even when it's a query range filter parameter (e.g. `load_ohlcv(started_at=..., ended_at=...)`), to avoid the same root word being called `ts` in one function signature and something else in another.
+**`ts` is reserved exclusively for a hypertable's time dimension column** (the partition key on `run_bars`/`equity_curve`/`position_events`/`financing_cash_flows`/`signal_events`). For a bar it is the canonical UTC bar start; `available_at` records the earliest safe observation time of that row version and is the causal as-of frontier.
+**Every other point-in-time metadata field uses the `_at` suffix**, consistently — even when it's a query range filter parameter, to avoid the same root word being called `ts` in one function signature and something else in another.
 
 | Field | Meaning | Where it appears |
 |---|---|---|
-| `started_at` | start of a run's data range | `backtest_runs`, `RunMetadata`, `load_ohlcv()` query params |
+| `started_at` | start of a run's data range | `backtest_runs`, `RunMetadata` |
 | `ended_at` | end of a run's data range | same as above |
 | `run_at` | when the run was executed/created | `backtest_runs`, `RunMetadata` |
 | `entry_at` | when a position was entered | `position_events`, `Position`, `PositionState`, `TradeResult`, `PositionEvent`, `PositionEventRecord` |
 | `exit_at` | when a trade was exited | `TradeResult` |
 | `last_heartbeat_at` | last time the running process reported itself alive | `backtest_runs` |
-| `available_at` | earliest safe observation time of the current OHLCV row version; late corrections may be non-monotonic across `ts` | `ohlcv` and normalized market-data artifacts |
+| `available_at` | earliest safe observation time of one bar version; late corrections may be non-monotonic across `ts` | `run_bars`, the `on_ohlcv` bar, normalized market-data artifacts |
+| `observed_at` | wall-clock time a sim/live engine received one bar version, kept by a queued row across retries and restarts; a bar first stored by a restart's re-read carries the restart's time; NULL for bars a backtest stored, which it replayed rather than observed | `run_bars`, the `on_ohlcv` bar |
 
 ### Current tables
 
@@ -808,16 +828,16 @@ flowchart TD
 | `financing_cash_flows` | applied financing (perpetual funding or short borrow) rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, kind, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `runtime_events` | operational audit trail (restarts, skipped decisions, halts, halt resets, group failures) — not a fill; `event_type` is a small, deliberately closed set (`RuntimeEventType` in `librae/core/executor.py`), with the specific skip reason as a free string in `detail` | unique `(run_id, ts, event_type, COALESCE(symbol, ''))`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
-| `ohlcv` | shared market data, keyed by the six-field immutable subscription identity and carrying `available_at` | no FK; unique `(ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type)` | yes (`ts`) |
+| `run_bars` | the bars one run saw, under the run's six-field subscription identity: for sim/live the primary bars behind each decision and later versions of decided bars (see [Data acquisition and ownership boundary](#data-acquisition-and-ownership-boundary)); a backtest's inputs only when saved with `store_bars=True` | unique `(run_id, symbol, ts, available_at, open, high, low, close, volume)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
 | `librae_schema_revision` | authoritative reference-schema revision; writable only by the table owner | singleton PK | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
 | `broker_orders` | durable broker order lifecycle records, with the error a failed placement raised | PK `state_key` + `client_order_id` | no |
 
 `backtest_runs.symbols` is a JSON array and is the run-universe SSOT;
-`primary_subscriptions` maps that ordered universe to exact raw-data identities.
-Legacy metadata that cannot supply every identity dimension is never widened
-into an OHLCV query. There is
+`primary_subscriptions` maps that ordered universe to exact raw-data identities,
+which with `started_at`/`ended_at` is how a backtest that stored no bars names
+the series and range it used. There is
 no separate primary-symbol column. Single-asset convenience remains
 `RunConfig.symbol` in memory. The table stores `params`, `execution_policy`,
 and `risk_policy` in separate JSONB columns so strategy logic, fill
@@ -828,7 +848,9 @@ nullable unique `backtest_cache_key` is the only backtest deduplication
 identity. Sim state uses `sim:config_hash`; live state additionally binds the
 adapter-observed execution-identity digest.
 
-`signal_events` and `ohlcv` are the source facts for signal-quality analysis.
+`signal_events` and the run's `run_bars` are the source facts for
+signal-quality analysis, so a backtest feeds the signal dashboard only when
+saved with `store_bars=True`.
 Forward return, MFE, and MAE are derived on demand: local callers use
 `compute_signal_outcomes()` on one symbol at a time, while the optional Grafana
 dashboard uses its PostgreSQL query path. Both follow the same observed-bar,
@@ -871,10 +893,16 @@ replaces the prior canonical run for that cache key in the same transaction,
 so rollback restores the prior run if the replacement fails. A null key means
 cache reuse is disabled and does not serialize otherwise equal configurations.
 
-`write_ohlcv()` accepts one complete `MarketDataSubscription` and validates
-`available_at` against the provable completion floor. On identity conflict,
-only a strictly later `available_at` replaces the stored OHLCV values and
-version time; equal or older versions are no-ops.
+`write_run_bars()` stores rows under one run and one complete
+`MarketDataSubscription`, and validates bar starts and `available_at` against
+the provable completion floor. A version is `(ts, available_at)` with the
+bar's values, since a source can revise a closed bar without moving its
+`available_at`. Each is stored once, and a repeat keeps the first
+`observed_at`, so a replayed delivery cannot move when a version was received.
+A correction is a new row beside the version it corrects. Each row says when
+the engine received that version, so the versions a decision read are, per
+bar, the latest received before it; readers that want one row per bar take the
+one received last (`load_run_bars()`, the dashboards).
 
 ## Maintenance rules
 

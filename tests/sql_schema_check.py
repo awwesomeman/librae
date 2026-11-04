@@ -28,7 +28,7 @@ _NOT_A_COLUMN = frozenset({"constraint", "primary", "unique", "foreign", "check"
 _SQL_KEYWORDS = """
     all and as asc between by case cross current desc distinct else end epoch exists false
     filter following from full group having in inner intersect interval is join lateral left
-    like limit not null offset on or order outer over partition preceding right rows select
+    last like limit not null nulls offset on or order outer over partition preceding right rows select
     then true union unnest using when where window with
 """
 SQL_WORDS = frozenset(_SQL_KEYWORDS.split())

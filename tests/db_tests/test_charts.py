@@ -50,17 +50,18 @@ def test_df_to_position_events_matches_reader_shape() -> None:
 
 
 @pytest.mark.parametrize(
-    "ohlcv",
+    "bars",
     [
         pd.DataFrame(),
         pd.DataFrame(columns=["_time", "symbol", "open", "high", "low", "close", "volume"]),
     ],
 )
-def test_plot_trades_by_run_id_returns_none_when_run_has_no_prices(
-    ohlcv: pd.DataFrame,
+def test_plot_trades_by_run_id_returns_none_when_run_stored_no_bars(
+    bars: pd.DataFrame,
 ) -> None:
+    """A backtest saved without store_bars=True has nothing to draw."""
     with (
-        patch("librae.db.charts.load_ohlcv", return_value=ohlcv),
+        patch("librae.db.charts.load_run_bars", return_value=bars),
         patch("librae.db.charts.load_position_events") as load_events,
         patch("librae.db.charts.plot_kbars") as render,
     ):
@@ -74,9 +75,58 @@ def test_plot_trades_by_run_id_returns_none_when_run_has_no_prices(
 def test_plot_trades_by_run_id_propagates_reader_errors() -> None:
     with (
         patch(
-            "librae.db.charts.load_ohlcv",
+            "librae.db.charts.load_run_bars",
             side_effect=RuntimeError("database unavailable"),
         ),
         pytest.raises(RuntimeError, match="database unavailable"),
     ):
         plot_trades_by_run_id("failed-run", block=False)
+
+
+def test_plot_trades_by_run_id_draws_only_the_chosen_symbols_bars() -> None:
+    """The renderer takes one symbol's candles; a portfolio run stores several."""
+    times = pd.to_datetime(["2026-03-01T10:00Z", "2026-03-01T11:00Z"], utc=True)
+    bars = pd.DataFrame(
+        {
+            "_time": list(times) * 2,
+            "symbol": ["BTCUSDT", "BTCUSDT", "ETHUSDT", "ETHUSDT"],
+            "open": [1.0, 2.0, 10.0, 20.0],
+            "high": [1.0, 2.0, 10.0, 20.0],
+            "low": [1.0, 2.0, 10.0, 20.0],
+            "close": [1.0, 2.0, 10.0, 20.0],
+            "volume": [1.0, 1.0, 1.0, 1.0],
+        }
+    )
+    with (
+        patch("librae.db.charts.load_run_bars", return_value=bars),
+        patch("librae.db.charts.load_position_events", return_value=pd.DataFrame()),
+        patch("librae.db.charts.plot_kbars") as render,
+    ):
+        plot_trades_by_run_id("portfolio-run", symbol="ETHUSDT", block=False)
+
+    drawn, _events, symbol = render.call_args.args
+    assert symbol == "ETHUSDT"
+    assert drawn["close"].tolist() == [10.0, 20.0]
+    assert list(drawn.index) == list(times)
+
+
+def test_plot_trades_by_run_id_returns_none_for_a_symbol_with_no_stored_bars() -> None:
+    bars = pd.DataFrame(
+        {
+            "_time": pd.to_datetime(["2026-03-01T10:00Z"], utc=True),
+            "symbol": ["BTCUSDT"],
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [1.0],
+        }
+    )
+    with (
+        patch("librae.db.charts.load_run_bars", return_value=bars),
+        patch("librae.db.charts.load_position_events", return_value=pd.DataFrame()),
+        patch("librae.db.charts.plot_kbars") as render,
+    ):
+        assert plot_trades_by_run_id("run", symbol="ETHUSDT", block=False) is None
+
+    render.assert_not_called()

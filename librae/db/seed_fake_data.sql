@@ -12,22 +12,19 @@
 -- position_events/signal_events deliberately have no FK to backtest_runs
 -- (`ff9baf4c "unify field naming"` — standalone queryability without
 -- joining backtest_runs), so deleting backtest_runs does NOT cascade to
--- them; they're cleaned up explicitly below along with ohlcv, which never
--- had a run_id column to cascade from.
+-- them; they're cleaned up explicitly below.
 --
--- Manual cleanup (equity_curve/strategy_performance cascade with backtest_runs):
+-- Manual cleanup (equity_curve/run_bars/strategy_performance cascade with backtest_runs):
 --   psql "$TIMESCALE_DSN" -c "
 --     DELETE FROM backtest_runs WHERE run_id = 'seed_test_run';
 --     DELETE FROM position_events WHERE run_id = 'seed_test_run';
 --     DELETE FROM signal_events WHERE run_id = 'seed_test_run';
 --     DELETE FROM runtime_events WHERE run_id = 'seed_test_run';
---     DELETE FROM ohlcv WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
 --   "
 
 DELETE FROM position_events WHERE run_id = 'seed_test_run';
 DELETE FROM signal_events WHERE run_id = 'seed_test_run';
-DELETE FROM ohlcv WHERE symbol IN ('BTCUSDT', 'ETHUSDT', 'SOLUSDT');
--- Cascades to equity_curve/strategy_performance (real FK ON DELETE CASCADE).
+-- Cascades to equity_curve/run_bars/strategy_performance (real FK ON DELETE CASCADE).
 DELETE FROM backtest_runs WHERE run_id = 'seed_test_run';
 
 INSERT INTO backtest_runs
@@ -47,20 +44,23 @@ VALUES
      md5('seed_test_run'))
 ON CONFLICT (run_id) DO NOTHING;
 
--- Hourly OHLCV over the full 14-day window — smooth trend + small noise, one
--- per symbol. Only feeds Price Trend/Entry-Exit Signals; Position Weight
--- reads position_events.price directly, so this doesn't need to line up with
--- the trade narrative below.
-INSERT INTO ohlcv (
-    ts, symbol, timeframe, calendar_id, data_source, available_at,
-    open, high, low, close, volume
+-- Hourly bars the run stored over the full 14-day window — smooth trend +
+-- small noise, one per symbol. Only feeds Price Trend/Entry-Exit Signals;
+-- Position Weight reads position_events.price directly, so this doesn't need
+-- to line up with the trade narrative below.
+INSERT INTO run_bars (
+    ts, run_id, symbol, timeframe, calendar_id, session_mode, data_source,
+    instrument_type, available_at, open, high, low, close, volume
 )
 SELECT
     ts,
+    'seed_test_run',
     sym.symbol,
     'H1',
     '24/7',
+    'extended',
     'binance_spot',
+    'spot',
     ts + INTERVAL '1 hour',
     base * (1 + 0.08 * sin(i / 18.0) + (random() - 0.5) * 0.01) AS open,
     base * (1 + 0.08 * sin(i / 18.0) + (random() - 0.5) * 0.01) * 1.004 AS high,
@@ -75,9 +75,7 @@ FROM generate_series(0, 14 * 24 - 1) AS i,
      (VALUES ('BTCUSDT', 60000.0, 150.0),
              ('ETHUSDT', 3000.0, 500.0),
              ('SOLUSDT', 130.0, 900.0)) AS sym(symbol, base, base_vol)
-ON CONFLICT (
-    ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type
-) DO NOTHING;
+ON CONFLICT (run_id, symbol, ts, available_at, open, high, low, close, volume) DO NOTHING;
 
 -- Hourly equity_curve over the same window — mild uptrend with one
 -- drawdown dip, so Equity Curve/Drawdown/Sharpe-type panels have something
