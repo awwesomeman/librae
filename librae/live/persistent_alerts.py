@@ -80,6 +80,12 @@ class PersistentAlerts:
             f"seen {_times(problem.seen)}",
         )
 
+    def hold(self, key: Hashable) -> None:
+        """Record that open problem ``key`` holds now without alerting, restarting its hold-down."""
+        problem = self._open.get(key)
+        if problem is not None:
+            problem.clear_since = None
+
     def clear(self, key: Hashable) -> None:
         """Record that problem ``key`` did not hold now; it resolves once clear for ``REPEAT_INTERVAL``."""
         problem = self._open.get(key)

@@ -904,7 +904,8 @@ class LiveTrader:
         # while a flatten waits for the venue to confirm its cancels.
         self._report_alerts = PersistentAlerts(self._send_alert, self._utc_now)
         self._flatten_alert = PersistentAlerts(self._send_alert, self._utc_now)
-        # The order pass of each tracked order's latest unappliable answer.
+        # The order pass of each tracked order's latest unappliable answer,
+        # alerted or not.
         self._report_failed_pass: dict[str, int] = {}
         # Consecutive cycles a pending flatten found orders still tracked
         # after its cancels. Venues that confirm a cancel a cycle later make
@@ -2178,9 +2179,9 @@ class LiveTrader:
         )
 
     def _alert_report_not_applied(self, tracked: TrackedOrder, message: str) -> None:
-        client_order_id = tracked.request.client_order_id
-        self._report_failed_pass[client_order_id] = self._order_pass
-        self._report_alerts.fire(client_order_id, "Order Report Not Applied", message)
+        self._report_alerts.fire(
+            tracked.request.client_order_id, "Order Report Not Applied", message
+        )
 
     def _alert_unapplied_while_halted(self, exc: ReportNotAppliedError) -> None:
         """Alert, without failing the cycle: a halted account does no order work to protect."""
@@ -4707,6 +4708,7 @@ class LiveTrader:
                 # and the next poll retries it here.
                 if not polled:
                     raise
+                self._note_unappliable(tracked)
                 failure = _report_failure(request, tracked.order_id or report.order_id, exc)
                 if not submit_planned:
                     # A restore at startup fails closed, naming the order.
@@ -5049,6 +5051,9 @@ class LiveTrader:
             cancel_report = self._send_cancel(tracked, order_id)
             self._apply_order_report(tracked, cancel_report)
         except Exception as exc:
+            if isinstance(exc, ValueError):
+                # The venue answered, with something that does not apply.
+                self._note_unappliable(tracked)
             # The cancel attempt itself failed — still unknown broker state.
             self._halt_live(
                 title="Order Timeout Cancellation Failed",
@@ -5071,6 +5076,17 @@ class LiveTrader:
             tracked.status = cancel_report.status
             self._persist_state(tracked)
             self._halt_live(title="Order Timeout Cancellation Unresolved", message=message)
+
+    def _note_unappliable(self, tracked: TrackedOrder) -> None:
+        """Record an answer met that does not apply, whether or not it is alerted.
+
+        Some are only logged or folded into a halt's alert, and still must
+        not let an applied answer in the same pass, or an earlier one, read
+        as the problem gone.
+        """
+        client_order_id = tracked.request.client_order_id
+        self._report_failed_pass[client_order_id] = self._order_pass
+        self._report_alerts.hold(client_order_id)
 
     def _apply_order_report(
         self,
@@ -5271,6 +5287,8 @@ class LiveTrader:
         of its cancel. The order stays tracked until a report that applies
         ends it. A cancel this process sent that still stands is not sent again.
         """
+        # Before the cancel below, whose answer may apply.
+        self._note_unappliable(tracked)
         request = tracked.request
         failure = _report_failure(request, order_id, error)
         standing = self._cancel_outcome_so_far(tracked)

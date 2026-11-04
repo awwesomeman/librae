@@ -350,6 +350,113 @@ class TestAReportThatKeepsFailingToApply:
         [rejected] = _exactly(alerts, "Order Rejected")
         assert f"AAA order_id={aaa.order_id}" in rejected["message"]
 
+    def test_one_open_when_a_halt_ends_the_order_on_its_cancel_is_not_resolved(self):
+        """The halt's read still fails, so a fill it claims is not booked: nothing cleared."""
+        adapter = _resting_adapter()
+        trader, alerts, now = _trader(adapter)
+        aaa = _buy_aaa(trader)
+        adapter.get_order.side_effect = lambda order_id, _s: _unappliable("order_id", order_id)
+        for _ in range(2):
+            trader._poll_cycle()
+            now[0] += timedelta(minutes=5)
+
+        trader.request_halt("desk asked to stop")
+        for _ in range(2):
+            trader._poll_cycle()
+            now[0] += timedelta(minutes=5)
+
+        assert trader._halted is True
+        assert aaa not in trader._active_orders, "its cancel's own answer ended it"
+        assert aaa.filled_quantity == 0.0
+        assert len(_exactly(alerts, "Halt Cancellation Completed")) == 1
+        assert _exactly(alerts, "Resolved") == []
+
+    def test_one_seen_clear_then_failing_in_the_halt_that_ends_it_is_not_resolved(self):
+        adapter, trader, alerts, now, aaa = self._polled_until_it_fails()
+        failing = lambda order_id, _s: _unappliable("filled_backwards", order_id)  # noqa: E731
+        adapter.get_order.side_effect = failing
+        trader._poll_cycle()
+        now[0] += timedelta(minutes=5)
+        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(order_id)
+        trader._poll_cycle()
+        now[0] += timedelta(minutes=5)
+
+        adapter.get_order.side_effect = failing
+        adapter.cancel_order.side_effect = lambda order_id, _s: _partly_filled(order_id, "canceled")
+        trader.request_halt("desk asked to stop")
+        for _ in range(2):
+            trader._poll_cycle()
+            now[0] += timedelta(minutes=5)
+
+        assert trader._halted is True
+        assert aaa not in trader._active_orders
+        assert _exactly(alerts, "Resolved") == [], "the halt's read failed again"
+
+    def test_one_whose_failure_a_halt_only_logs_is_not_resolved_while_it_fails(self):
+        """A halt's cancel pass raises its first failure; a later order's is only logged.
+
+        Two placed orders are built directly: that later order's reads keep
+        failing while its cancel's answers apply, so it must stay open.
+        """
+        adapter = _resting_adapter()
+        trader, alerts, now = _trader(adapter)
+        trader._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="AAA", quantity=1.0),
+                OrderIntent(action="long", symbol="BBB", quantity=1.0),
+            ],
+            _bars(),
+            TEST_CLOCK_NOW,
+        )
+        aaa, bbb = trader._active_orders
+        adapter.get_order.side_effect = lambda order_id, _s: _unappliable("order_id", order_id)
+        trader._poll_cycle()
+        assert len(_titled_not_applied(alerts)) == 1, "AAA, the polled head"
+        bbb.placement_attempted = True
+        bbb.placement_attempted_at = TEST_CLOCK_NOW
+        bbb.order_id = bbb.request.client_order_id
+        bbb.status = "accepted"
+        trader._active_orders = [bbb, aaa]
+        # A venue with no pending-cancel state: each pass sends the cancel again.
+        adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id)
+
+        with pytest.raises(RuntimeError, match=r"BBB order_id=.* not applied"):
+            trader.halt("desk asked to stop")
+        for _ in range(8):
+            now[0] += timedelta(minutes=10)
+            trader._poll_cycle()
+
+        assert trader._active_orders == [bbb, aaa], "neither cancel is confirmed"
+        named = f"AAA order_id={aaa.order_id}"
+        assert [alert for alert in _exactly(alerts, "Resolved") if named in alert["message"]] == []
+
+    def test_one_whose_timeout_cancel_answer_does_not_apply_is_not_resolved_by_the_halt(self):
+        """The halt that follows reads the order ended, in a pass after the failed answer."""
+        adapter = _resting_adapter()
+        adapter.place_order.side_effect = lambda signal: _partly_filled(signal["client_order_id"])
+        now = [TEST_CLOCK_NOW]
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        trader, _, alerts = _timeout_trader(adapter, store, now)
+        aaa = _buy_aaa(trader)
+        adapter.get_order.side_effect = lambda order_id, _s: _unappliable("order_id", order_id)
+        trader._poll_cycle()
+        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(order_id)
+        trader._poll_cycle()
+
+        now[0] += timedelta(seconds=30)
+        adapter.cancel_order.side_effect = lambda _order_id, _s: _partly_filled(
+            "another-order", "canceled"
+        )
+        reads = iter(["open", "canceled"])
+        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(order_id, next(reads))
+        trader._poll_cycle()
+        assert trader._halted is True
+        assert len(_exactly(alerts, "Order Timeout Cancellation Failed")) == 1
+        assert aaa not in trader._active_orders, "the halt's read found it cancelled"
+        trader._poll_cycle()
+
+        assert _exactly(alerts, "Resolved") == []
+
 
 def _titled_not_applied(alerts) -> list[dict]:
     return _exactly(alerts, NOT_APPLIED)
