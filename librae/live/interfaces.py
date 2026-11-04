@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -119,8 +119,13 @@ type BarCallback = Callable[
 type PositionEventCallback = Callable[[PositionEvent, int], None]
 # Best-effort audit projection: fetched history may repeat after restart, while
 # a delivery failure is not guaranteed to retry. Sinks must be idempotent on
-# the exact subscription plus the row's (ts, available_at) version.
+# the exact subscription plus the row's (ts, available_at) version. The bar
+# carries OHLCV, available_at, and observed_at, when the engine received it.
 type OhlcvCallback = Callable[[str, str, dict[str, object], datetime], None]
+# The same sink's path for many bars of one symbol at once, as (ts, bar) pairs
+# in ts order: a start's window or a restart's re-read, one write instead of one
+# per bar. Optional; without it those bars go through OhlcvCallback one by one.
+type OhlcvBatchCallback = Callable[[str, str, Sequence[tuple[datetime, dict[str, object]]]], None]
 type HeartbeatCallback = Callable[[str], None]
 type FinancingCashFlowCallback = Callable[[FinancingCashFlow], None]
 type RuntimeEventCallback = Callable[[RuntimeEvent], None]

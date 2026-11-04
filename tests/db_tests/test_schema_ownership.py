@@ -155,8 +155,18 @@ def test_the_walk_sees_the_engine_tables() -> None:
     assert {"execution_runtime_state", "broker_orders", "librae_schema_revision"} <= (
         _engine_tables()
     )
-    assert {"position_events", "ohlcv"} <= _engine_tables()  # via timescale_writer helpers
+    assert {"position_events", "run_bars"} <= _engine_tables()  # via timescale_writer helpers
     assert "positions" not in _engine_tables()  # a dashboard CTE, not a table
+
+
+def test_collected_market_data_is_the_callers() -> None:
+    """ohlcv holds collected market data, which the engine never reads: a run
+    keeps the bars it saw in run_bars instead. Defining it here again, or a
+    librae path that reads or writes it, would hand its naming and its
+    revisions back to the engine."""
+    assert "ohlcv" not in _schema_tables()
+    assert "ohlcv" not in _engine_tables()
+    assert "ohlcv" not in _helpers()["write_run_bars"][0]
 
 
 def test_every_create_table_spelling_is_checked() -> None:

@@ -23,12 +23,12 @@ CREATE TABLE IF NOT EXISTS librae_schema_revision (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO librae_schema_revision (singleton, revision)
-VALUES (TRUE, 6)
+VALUES (TRUE, 7)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
-    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 6 THEN
-        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 6';
+    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 7 THEN
+        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 7';
     END IF;
 END
 $$;
@@ -364,40 +364,42 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 -- ============================================================
--- ohlcv — 共用市場資料 (hypertable)
+-- run_bars — the bars one run saw (hypertable, FK CASCADE)
 -- ============================================================
--- instrument_type: contract expiry structure, orthogonal to continuous
--- rolling-alias handling (see librae/config/symbols.yaml). Keeps e.g.
--- Binance spot BTCUSDT and a same-named perpetual from silently colliding
--- under the same (symbol, data_source) key.
-CREATE TABLE IF NOT EXISTS ohlcv (
+-- Run evidence, not a market-data store: collected market data is the
+-- caller's. symbol is the run's own code for the instrument; the other
+-- identity columns name the series it stood for in this run.
+-- One row per bar version: every bar a sim/live decision read, and any later
+-- version of a decided bar. A correction carries a later available_at and is
+-- stored beside the version it corrects, so what a decision saw is never
+-- overwritten; a repeat of a stored version is ignored and keeps the time it
+-- was first received.
+-- observed_at is when a sim/live engine received the version; NULL for bars a
+-- backtest stored, which it replayed rather than observed.
+CREATE TABLE IF NOT EXISTS run_bars (
     ts              TIMESTAMPTZ NOT NULL,
+    run_id          TEXT NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
     symbol          TEXT NOT NULL,
     timeframe       TEXT NOT NULL,
-    -- Caller-selectable axis — the same symbol legitimately has multiple
-    -- valid values (research: 'yahoo', live: 'ibkr'), so it is chosen per call.
-    data_source     TEXT NOT NULL,
-    instrument_type instrument_type_t NOT NULL DEFAULT 'spot',
     calendar_id     TEXT NOT NULL,
-    session_mode    TEXT NOT NULL DEFAULT 'extended',
+    session_mode    TEXT NOT NULL,
+    data_source     TEXT NOT NULL,
+    instrument_type instrument_type_t NOT NULL,
     available_at    TIMESTAMPTZ NOT NULL,
-    open            DOUBLE PRECISION,
-    high            DOUBLE PRECISION,
-    low             DOUBLE PRECISION,
-    close           DOUBLE PRECISION,
-    volume          DOUBLE PRECISION,
-    CONSTRAINT chk_ohlcv_session_mode CHECK (session_mode IN ('regular', 'extended')),
-    CONSTRAINT chk_ohlcv_available_at CHECK (available_at >= ts)
+    observed_at     TIMESTAMPTZ,
+    open            DOUBLE PRECISION NOT NULL,
+    high            DOUBLE PRECISION NOT NULL,
+    low             DOUBLE PRECISION NOT NULL,
+    close           DOUBLE PRECISION NOT NULL,
+    volume          DOUBLE PRECISION NOT NULL,
+    CONSTRAINT chk_run_bars_session_mode CHECK (session_mode IN ('regular', 'extended')),
+    CONSTRAINT chk_run_bars_available_at CHECK (available_at >= ts)
 );
-SELECT create_hypertable('ohlcv', 'ts', if_not_exists => TRUE);
-CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol
-    ON ohlcv(
-        symbol, timeframe, calendar_id, session_mode, data_source, instrument_type, ts DESC
-    );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_ohlcv_unique
-    ON ohlcv (
-        ts, symbol, timeframe, calendar_id, session_mode, data_source, instrument_type
-    );
+SELECT create_hypertable('run_bars', 'ts', if_not_exists => TRUE);
+-- A run maps each symbol to exactly one subscription (primary_subscriptions),
+-- so the symbol stands for the whole identity within the run.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_bars_unique
+    ON run_bars (run_id, symbol, ts, available_at);
 
 -- ============================================================
 -- signal_events — 訊號品質監控 (hypertable, 獨立)
@@ -432,6 +434,7 @@ BEGIN
        OR to_regclass('public.broker_orders') IS NULL
        OR to_regclass('public.position_events') IS NULL
        OR to_regclass('public.runtime_events') IS NULL
+       OR to_regclass('public.run_bars') IS NULL
        OR NOT EXISTS (
            SELECT 1
            FROM information_schema.columns
@@ -439,7 +442,7 @@ BEGIN
              AND table_name = 'backtest_runs'
              AND column_name = 'execution_identity'
        ) THEN
-        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 6';
+        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 7';
     END IF;
 END
 $$;

@@ -14,7 +14,6 @@ from librae.app.grafana.generate_dashboards import (
     render_unified_dashboard,
 )
 from librae.core.executor import RuntimeEventType
-from librae.core.market_data import MarketDataSubscription
 from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS
 from librae.core.utils import make_event_id
 
@@ -178,40 +177,46 @@ class TestRenderUnifiedDashboard:
         assert "notional / NULLIF(price * fill_quantity, 0)" in sql
         assert '"Weight"' in sql
 
-    def test_every_ohlcv_panel_joins_the_exact_run_subscription(self):
-        subscription = MarketDataSubscription(
-            symbol="BTCUSDT",
-            timeframe="H1",
-            calendar_id="24/7",
-            session_mode="regular",
-            data_source="fixture",
-            instrument_type="spot",
-        )
+    def test_every_price_panel_reads_the_selected_runs_latest_bar_versions(self):
+        """run_bars keeps each version of a bar it stores. A panel that skipped the
+        latest-version filter would count a corrected bar twice and shift
+        every forward-return OFFSET after it."""
         dashboards = (
             render_unified_dashboard(),
             render_account_overview_dashboard(),
             render_signal_monitor(),
         )
-        ohlcv_targets = [
+        targets = [
             (panel["title"], target["rawSql"])
             for dashboard in dashboards
             for panel in dashboard["panels"]
             for target in panel.get("targets", [])
-            if "ohlcv" in target.get("rawSql", "").lower()
         ]
+        bar_targets = [(title, sql) for title, sql in targets if "run_bars" in sql]
 
-        assert ohlcv_targets
-        for title, sql in ohlcv_targets:
-            assert "primary_subscriptions" in sql, title
-            for field_name in subscription.to_dict():
-                assert f"route.{field_name}" in sql, (title, field_name)
-            assert "data_source = 'multi'" not in sql, title
+        assert bar_targets
+        assert not [title for title, sql in targets if "ohlcv" in sql.lower()]
+        for title, sql in bar_targets:
+            uses = sql.count("FROM run_bars b")
+            assert uses, title
+            assert sql.count("b.run_id = '${run_id}'") == uses, title
+            assert sql.count("newer.available_at > b.available_at") == uses, title
 
-    def test_ohlcv_dashboards_explain_legacy_empty_subscription_metadata(self):
+    def test_price_dashboards_say_a_backtest_stores_bars_only_when_asked(self):
         for dashboard in (render_unified_dashboard(), render_signal_monitor()):
-            description = dashboard["description"]
-            assert "primary_subscriptions=[]" in description
-            assert "recreate the run or explicitly migrate" in description
+            assert "store_bars=True" in dashboard["description"]
+
+    def test_a_run_without_stored_bars_is_not_reported_flat(self):
+        """A backtest saved without its bars still holds its positions; with
+        no mark the P&L is unknown, and the snapshot still lists them."""
+        d = render_unified_dashboard()
+        pnl = next(p for p in d["panels"] if p["title"] == "Unrealized P&L")
+        snapshot = next(p for p in d["panels"] if p["title"] == "Position Snapshot")
+
+        pnl_sql = pnl["targets"][0]["rawSql"]
+        assert "WHEN NOT EXISTS (SELECT 1 FROM positions WHERE remaining_quantity > 0)" in pnl_sql
+        assert "COALESCE" not in pnl_sql
+        assert "positions p LEFT JOIN marks mk" in snapshot["targets"][0]["rawSql"]
 
     def test_position_snapshot_reconstructs_state_as_of_time_range_end(self):
         """Every 'latest' lookup (position, mark, equity) must be bounded by
@@ -439,7 +444,7 @@ class TestRenderSignalMonitor:
         for p in ts_panels:
             sqls = [t["rawSql"] for t in p["targets"]]
             combined = " ".join(sqls)
-            assert "signal_events" in combined or "ohlcv" in combined
+            assert "signal_events" in combined or "run_bars" in combined
 
     def test_run_id_selector_is_not_gated_on_a_sparse_event_table(self):
         """run_id must resolve from backtest_runs alone — gating it on

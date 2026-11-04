@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import fields
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -36,14 +35,6 @@ def _parse_primary_subscriptions(value: object) -> tuple[MarketDataSubscription,
     if len(symbols) != len(set(symbols)):
         raise ValueError("primary_subscriptions must contain one identity per symbol")
     return subscriptions
-
-
-def _query_timestamp(value: object, *, field_name: str) -> datetime:
-    """Normalize one query frontier while rejecting ambiguous local time."""
-    timestamp = pd.Timestamp(value)
-    if timestamp.tzinfo is None:
-        raise ValueError(f"{field_name} must be timezone-aware")
-    return timestamp.tz_convert("UTC").to_pydatetime()
 
 
 def get_run_by_backtest_cache_key(
@@ -327,102 +318,26 @@ def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     return df
 
 
-def load_ohlcv(
-    run_id: str | None = None,
-    *,
-    subscription: MarketDataSubscription | None = None,
-    started_at: str | datetime | None = None,
-    ended_at: str | datetime | None = None,
-    as_of: str | datetime | None = None,
-    dsn: str | None = None,
-) -> pd.DataFrame:
-    """Load OHLCV by one exact subscription or authoritative run metadata.
+def load_run_bars(run_id: str, dsn: str | None = None) -> pd.DataFrame:
+    """Load the bars one run stored, the latest version of each.
 
-    ``as_of`` filters by ``available_at`` and is the causal frontier for DB
-    warmup/as-of consumers. Legacy runs without complete subscriptions fail
-    closed instead of falling back to partial run-level metadata.
+    A sim or live run stores the bars its decisions read; a backtest stores its inputs
+    only when saved with ``store_bars=True``, so an empty frame is the normal
+    answer for one that was not. Earlier versions of a corrected bar stay in
+    ``run_bars`` for audit; this returns the one the run ended with.
     """
-    if run_id is not None and subscription is not None:
-        raise ValueError("pass either run_id or subscription, not both")
-    frontier = _query_timestamp(as_of, field_name="as_of") if as_of is not None else None
-    if subscription is not None:
-        if not isinstance(subscription, MarketDataSubscription):
-            raise TypeError("subscription must be a MarketDataSubscription")
-        sql = """
-            SELECT ts AS _time, symbol, timeframe, calendar_id, session_mode,
-                   data_source, instrument_type, available_at,
-                   open, high, low, close, volume
-            FROM ohlcv
-            WHERE symbol = %s AND timeframe = %s AND calendar_id = %s
-              AND session_mode = %s AND data_source = %s AND instrument_type = %s
-        """
-        params: list[object] = list(subscription.to_dict().values())
-        if started_at:
-            sql += " AND ts >= %s"
-            params.append(_query_timestamp(started_at, field_name="started_at"))
-        if ended_at:
-            sql += " AND ts <= %s"
-            params.append(_query_timestamp(ended_at, field_name="ended_at"))
-        if frontier is not None:
-            sql += " AND available_at <= %s"
-            params.append(frontier)
-        sql += " ORDER BY ts"
-    elif run_id:
-        with get_conn(dsn) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """SELECT primary_subscriptions, started_at, ended_at
-                   FROM backtest_runs WHERE run_id = %s""",
-                (run_id,),
-            )
-            metadata = cur.fetchone()
-            cur.close()
-        if metadata is None:
-            return pd.DataFrame()
-        subscriptions = _parse_primary_subscriptions(metadata[0])
-        if not subscriptions:
-            raise ValueError(
-                f"run {run_id!r} has no exact primary_subscriptions; "
-                "recreate or explicitly migrate the legacy run metadata"
-            )
-        placeholders = ",".join(["(%s,%s,%s,%s,%s,%s)"] * len(subscriptions))
-        sql = """
-            SELECT ts AS _time, o.symbol, o.timeframe, o.calendar_id, o.session_mode,
-                   o.data_source, o.instrument_type, o.available_at,
-                   open, high, low, close, volume
-            FROM ohlcv o
-            JOIN (VALUES {placeholders}) AS route(
-                symbol, timeframe, calendar_id, session_mode, data_source, instrument_type
-            )
-              ON o.symbol = route.symbol
-             AND o.timeframe = route.timeframe
-             AND o.calendar_id = route.calendar_id
-             AND o.session_mode = route.session_mode
-             AND o.data_source = route.data_source
-             AND o.instrument_type::text = route.instrument_type
-        """
-        sql = sql.format(placeholders=placeholders)
-        params = [value for item in subscriptions for value in item.to_dict().values()]
-        predicates: list[str] = []
-        if metadata[1] is not None:
-            predicates.append("o.ts >= %s")
-            params.append(metadata[1])
-        if metadata[2] is not None:
-            predicates.append("o.ts <= %s")
-            params.append(metadata[2])
-        if frontier is not None:
-            predicates.append("o.available_at <= %s")
-            params.append(frontier)
-        if predicates:
-            sql += " WHERE " + " AND ".join(predicates)
-        sql += " ORDER BY ts, o.symbol"
-    else:
-        return pd.DataFrame()
-
+    sql = """
+        SELECT DISTINCT ON (symbol, ts)
+               ts AS _time, symbol, timeframe, calendar_id, session_mode,
+               data_source, instrument_type, available_at, observed_at,
+               open, high, low, close, volume
+        FROM run_bars
+        WHERE run_id = %s
+        ORDER BY symbol, ts, available_at DESC
+    """
     with get_conn(dsn) as conn:
-        df = pd.read_sql(sql, conn, params=params)
-    if not df.empty and "_time" in df.columns:
-        df["_time"] = pd.to_datetime(df["_time"], utc=True)
-        if "available_at" in df.columns:
-            df["available_at"] = pd.to_datetime(df["available_at"], utc=True)
+        df = pd.read_sql(sql, conn, params=[run_id])
+    if not df.empty:
+        for column in ("_time", "available_at", "observed_at"):
+            df[column] = pd.to_datetime(df[column], utc=True)
     return df

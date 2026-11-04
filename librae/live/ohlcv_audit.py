@@ -16,7 +16,11 @@ from datetime import UTC, datetime
 import pandas as pd
 
 from librae.core.executor import RuntimeEvent
-from librae.core.market_data import AVAILABLE_AT_COLUMN, MarketDataSubscription
+from librae.core.market_data import (
+    AVAILABLE_AT_COLUMN,
+    OBSERVED_AT_COLUMN,
+    MarketDataSubscription,
+)
 
 from .interfaces import OhlcvCallback, RuntimeEventCallback
 from .state import MAX_PENDING_OHLCV, PendingOhlcvDelivery
@@ -119,6 +123,7 @@ def _enqueue(
             if available_at is not None
             else ts
         ),
+        observed_at=pd.Timestamp(bar[OBSERVED_AT_COLUMN]).to_pydatetime().astimezone(UTC),
         bar={
             field: float(bar[field])
             for field in ("open", "high", "low", "close", "volume")
@@ -150,9 +155,10 @@ def _drop_audit_row(
     """Drop one audit row loudly, without stopping the book.
 
     This queue holds OHLCV bars, the most recoverable data in the system:
-    a gap is closed by re-fetching from the source, and nothing in the
-    book depends on it. Halting cancels live orders and stops trading,
-    which has real market cost, to protect data that can be rebuilt.
+    a gap's values can be re-fetched from the source, though not when the
+    run received them, and nothing in the book depends on it. Halting
+    cancels live orders and stops trading, which has real market cost, to
+    protect data that is mostly rebuildable.
 
     Reaching the bound is not an outage either. The checkpoint and these
     rows share one database, so a database refusing this many OHLCV writes
@@ -205,9 +211,8 @@ def flush_pending(
 ) -> bool:
     """Offer queued rows in order, keeping whatever is not acknowledged.
 
-    Order matters per subscription: the writer accepts only a strictly
-    later row version, so replaying a correction before the bar it
-    corrects would drop it.
+    The first refusal stops the drain: the rows behind it go to the same
+    database, and offering them anyway would only multiply the failure.
 
     Acknowledged rows leave ``pending`` in place, before ``persist`` runs,
     so the checkpoint records the queue the sink actually accepted.
@@ -220,6 +225,7 @@ def flush_pending(
     for row in list(pending):
         bar = dict(row.bar)
         bar[AVAILABLE_AT_COLUMN] = row.available_at
+        bar[OBSERVED_AT_COLUMN] = row.observed_at
         try:
             on_ohlcv(row.subscription.symbol, row.subscription.timeframe, bar, row.ts)
         except Exception:

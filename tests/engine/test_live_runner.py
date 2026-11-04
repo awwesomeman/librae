@@ -2362,7 +2362,10 @@ class TestLiveTrader:
             for timestamp in timestamps
         ]
 
-    def test_restart_audit_delivery_failure_is_not_implicitly_retried(self):
+    def test_restart_audit_delivery_failure_is_logged_not_raised_or_retried(self, caplog):
+        """An audit write is observability: its refusal must not abort the
+        fetch the cycle's decision depends on (architecture.md, failure
+        handling policy)."""
         timestamp = datetime(2025, 1, 1, tzinfo=UTC)
         history = _make_ohlcv_at([timestamp])
         history["available_at"] = [timestamp + timedelta(hours=1)]
@@ -2375,9 +2378,11 @@ class TestLiveTrader:
         failing_sink = MagicMock(side_effect=RuntimeError("sink unavailable"))
         runner._on_ohlcv = failing_sink
 
-        with pytest.raises(RuntimeError, match="sink unavailable"):
-            runner._fetch_runtime_frames()
+        with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
+            results = runner._fetch_runtime_frames()
 
+        assert results["BTCUSDT"].outcome == "success"
+        assert "restart re-read failed" in caplog.text
         retry_sink = MagicMock()
         runner._on_ohlcv = retry_sink
         runner._fetch_runtime_frames()

@@ -494,7 +494,7 @@ source, including regular hours; `regular` excludes prints outside the venue's
 regular session. It is part of `config_hash`, so backtest caches cannot reuse a
 run built from the other bar set. The implicit/default `extended` value retains
 the legacy hash so an unchanged live run can recover its existing checkpoint.
-Market-data artifacts and database OHLCV rows carry all six
+Market-data artifacts and stored run bars carry all six
 dimensions; run metadata stores the exact primary identities so readers never
 fall back to a broad run-level source/type match. Built-in IBKR wiring maps
 the generic session value to IBKR's `useRTH` request
@@ -675,9 +675,11 @@ plot_trades_by_run_id(
 )  # or: skip rerunning the backtest, read a persisted run straight from the DB
 ```
 
-`librae.db.charts.plot_trades_by_run_id` reads persisted `position_events` and `ohlcv`
-rows through `librae.db.timescale_reader`. The database adapter then calls the same
-format-neutral renderer as the in-memory form and does not rerun the strategy.
+`librae.db.charts.plot_trades_by_run_id` reads persisted `position_events` and the
+run's `run_bars` through `librae.db.timescale_reader`. The database adapter then calls
+the same format-neutral renderer as the in-memory form and does not rerun the strategy.
+A backtest stores bars only when saved with `store_bars=True`; without them the call
+returns `None`.
 
 ## Trade outcome analysis
 
@@ -1414,11 +1416,22 @@ A sink that declares `durable_ohlcv_delivery = True` gets at-least-once
 delivery. The row is queued in the checkpoint before it is offered and removed
 only once the call returns, so a failed write retries on the next cycle and a
 crash between acceptance and acknowledgement replays after restart. Duplicate
-delivery is harmless because the writer accepts only a strictly later row
-version. Queued rows are offered in order, since replaying a correction before
-the bar it corrects would drop it. The first-party TimescaleDB path declares
-this; a retry never re-runs a strategy decision or a broker order, because it
-is a persistence concern only.
+delivery is harmless because the writer stores each row version once. Each
+queued row carries `observed_at`, when the engine first received that version,
+so a retry or a replay after restart records when the bar arrived rather than
+when the database came back. The first-party TimescaleDB path declares this
+and writes `run_bars`; a retry never re-runs a strategy decision or a broker
+order, because it is a persistence concern only.
+
+Each decision also offers the bars of its window that no earlier decision
+read: the whole window at a start, bars that arrived while warmup was short,
+catch-up bars a live run stepped over. After a restart, the fetch offers the
+bars already decided, to backfill rows a crash kept from the table. Neither is
+queued, since either can run to thousands of rows; they go to `on_ohlcv_batch`
+as one call per symbol when the sink provides it. A refusal is logged, the
+rest is skipped, and the cycle still decides its new bar. A later version of a
+bar already decided is rare and is what the audit keeps, so it rides the
+queue.
 
 Any other callback keeps the documented best-effort contract: it is invoked,
 its failure is logged, and nothing is queued. The engine cannot acknowledge on
@@ -1434,9 +1447,9 @@ Each dropped row is recorded as a `decision_skipped` runtime event with reason
 `ohlcv_audit_delivery_failed` and its full identity, an alert fires once, and
 `LiveTrader.ohlcv_audit_degraded` reports the condition until delivery catches
 up. Trading continues: these are OHLCV bars, the most recoverable data in the
-system — a gap is closed by re-fetching from the source and nothing in the
-book depends on it, so stopping the book to protect it would cost more than it
-saves.
+system — a gap's values can be re-fetched from the source, though not when the
+run received them, and nothing in the book depends on it, so stopping the book
+to protect it would cost more than it saves.
 
 Both the stale alert and the not-ready alert are edge-triggered: one
 diagnostic when the condition starts and one when it clears, not one per poll

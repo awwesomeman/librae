@@ -123,25 +123,24 @@ def _account_metric_sql(column: str) -> str:
     )
 
 
-def _subscription_filter(meta_alias: str, ohlcv_alias: str) -> str:
-    """Match a raw bar to one exact run-owned subscription identity."""
+def _latest_run_bar(alias: str) -> str:
+    """Select the run's bars, one row per bar: the latest version it received.
+
+    run_bars keeps each version of a bar it stores, so a query without the second
+    condition counts a corrected bar twice and shifts every OFFSET after it.
+    """
     return (
-        "EXISTS (SELECT 1 FROM jsonb_to_recordset("
-        f"{meta_alias}.primary_subscriptions) AS route("
-        "symbol text, timeframe text, calendar_id text, session_mode text, "
-        "data_source text, instrument_type text)"
-        f" WHERE {ohlcv_alias}.symbol = route.symbol"
-        f" AND {ohlcv_alias}.timeframe = route.timeframe"
-        f" AND {ohlcv_alias}.calendar_id = route.calendar_id"
-        f" AND {ohlcv_alias}.session_mode = route.session_mode"
-        f" AND {ohlcv_alias}.data_source = route.data_source"
-        f" AND {ohlcv_alias}.instrument_type::text = route.instrument_type)"
+        f"{alias}.run_id = '${{run_id}}'"
+        " AND NOT EXISTS (SELECT 1 FROM run_bars newer"
+        f" WHERE newer.run_id = {alias}.run_id AND newer.symbol = {alias}.symbol"
+        f" AND newer.ts = {alias}.ts AND newer.available_at > {alias}.available_at)"
     )
 
 
-_LEGACY_SUBSCRIPTION_NOTICE = (
-    "Legacy runs with primary_subscriptions=[] have no resolvable OHLCV identity, "
-    "so price panels remain empty; recreate the run or explicitly migrate its metadata."
+_STORED_BARS_NOTICE = (
+    "Price panels read the bars the run stored: a sim or live run stores the bars its "
+    "decisions read, a backtest only when saved with store_bars=True, so a backtest's "
+    "price panels are otherwise empty."
 )
 
 
@@ -472,7 +471,7 @@ BASE_PANELS_DEF: list[dict] = [
         "targets": [
             _stat_target(
                 "WITH meta AS ("
-                " SELECT primary_subscriptions, mode, ended_at"
+                " SELECT mode, ended_at"
                 " FROM backtest_runs WHERE run_id='${run_id}'"
                 "),\n"
                 "positions AS (\n"
@@ -483,11 +482,11 @@ BASE_PANELS_DEF: list[dict] = [
                 f"  {_latest_position_event_order()}\n"
                 "),\n"
                 "marks AS (\n"
-                "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS mark\n"
-                "  FROM ohlcv o, meta m\n"
-                f"  WHERE {_subscription_filter('m', 'o')}\n"
-                "    AND o.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n"
-                "  ORDER BY o.symbol, o.ts DESC\n"
+                "  SELECT DISTINCT ON (b.symbol) b.symbol, b.close AS mark\n"
+                "  FROM run_bars b, meta m\n"
+                f"  WHERE {_latest_run_bar('b')}\n"
+                "    AND b.ts <= CASE WHEN m.mode = 'backtest' THEN m.ended_at ELSE now() END\n"
+                "  ORDER BY b.symbol, b.ts DESC\n"
                 "),\n"
                 "pnl AS (\n"
                 "  SELECT SUM((CASE WHEN p.side='long' THEN mk.mark - p.entry_price\n"
@@ -500,11 +499,14 @@ BASE_PANELS_DEF: list[dict] = [
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "  ORDER BY ts DESC LIMIT 1\n"
                 ")\n"
-                "SELECT COALESCE(\n"
-                "  ROUND(pnl.value::numeric,0)::text || ' / ' ||\n"
-                "    ROUND((pnl.value/NULLIF(e.equity,0)*100)::numeric,1)::text || '%',\n"
-                "  'Flat'\n"
-                ') AS "Unrealized P&L"\n'
+                # Flat only without open positions: a run that stored no bars
+                # has positions and no marks, which is unknown, not flat.
+                "SELECT CASE\n"
+                "  WHEN NOT EXISTS (SELECT 1 FROM positions WHERE remaining_quantity > 0)"
+                " THEN 'Flat'\n"
+                "  ELSE ROUND(pnl.value::numeric,0)::text || ' / ' ||\n"
+                "    ROUND((pnl.value/NULLIF(e.equity,0)*100)::numeric,1)::text || '%'\n"
+                'END AS "Unrealized P&L"\n'
                 "FROM pnl CROSS JOIN equity e"
             )
         ],
@@ -663,23 +665,21 @@ BASE_PANELS_DEF: list[dict] = [
         "_x": 0,
         "_dy": 0,
         "title": "Price Trend — ${symbol}",
-        "description": "Close price for the selected symbol's exact run subscription.",
+        "description": (
+            "Close price of the selected symbol as the run saw it. Empty for a "
+            "backtest saved without store_bars=True."
+        ),
         "type": "timeseries",
         "h": 10,
         "w": 12,
         "targets": [
             _target(
-                "WITH meta AS ("
-                " SELECT primary_subscriptions, started_at, ended_at"
-                " FROM backtest_runs WHERE run_id = '${run_id}')"
-                ' SELECT o.ts AS time, o.close AS "${symbol}"'
-                " FROM ohlcv o, meta m"
-                " WHERE o.symbol = '${symbol}'"
-                f" AND {_subscription_filter('m', 'o')}"
-                " AND (m.started_at IS NULL OR o.ts >= m.started_at)"
-                " AND (m.ended_at IS NULL OR o.ts <= m.ended_at)"
-                " AND $__timeFilter(o.ts)"
-                " ORDER BY o.ts",
+                'SELECT b.ts AS time, b.close AS "${symbol}"'
+                " FROM run_bars b"
+                " WHERE b.symbol = '${symbol}'"
+                f" AND {_latest_run_bar('b')}"
+                " AND $__timeFilter(b.ts)"
+                " ORDER BY b.ts",
                 "A",
             ),
         ],
@@ -921,11 +921,7 @@ BASE_PANELS_DEF: list[dict] = [
         "w": 24,
         "targets": [
             _target(
-                "WITH meta AS ("
-                " SELECT primary_subscriptions"
-                " FROM backtest_runs WHERE run_id='${run_id}'"
-                "),\n"
-                "equity AS (\n"
+                "WITH equity AS (\n"
                 "  SELECT equity FROM equity_curve\n"
                 "  WHERE run_id = '${run_id}' AND account_id IN (${account_id:sqlstring})\n"
                 "    AND ts <= $__timeTo()\n"
@@ -942,11 +938,11 @@ BASE_PANELS_DEF: list[dict] = [
                 f"  {_latest_position_event_order()}\n"
                 "),\n"
                 "marks AS (\n"
-                "  SELECT DISTINCT ON (o.symbol) o.symbol, o.close AS market_price\n"
-                "  FROM ohlcv o, meta m\n"
-                f"  WHERE {_subscription_filter('m', 'o')}\n"
-                "    AND o.ts <= $__timeTo()\n"
-                "  ORDER BY o.symbol, o.ts DESC\n"
+                "  SELECT DISTINCT ON (b.symbol) b.symbol, b.close AS market_price\n"
+                "  FROM run_bars b\n"
+                f"  WHERE {_latest_run_bar('b')}\n"
+                "    AND b.ts <= $__timeTo()\n"
+                "  ORDER BY b.symbol, b.ts DESC\n"
                 "),\n"
                 "sized AS (\n"
                 "  SELECT p.symbol, p.side, p.remaining_quantity, p.entry_price, p.entry_at,\n"
@@ -954,11 +950,13 @@ BASE_PANELS_DEF: list[dict] = [
                 "    mk.market_price, p.multiplier,\n"
                 "    (CASE WHEN p.side='long' THEN 1 ELSE -1 END)\n"
                 "      * p.remaining_quantity * mk.market_price * p.multiplier AS signed_notional\n"
-                "  FROM positions p JOIN marks mk ON mk.symbol = p.symbol\n"
+                # LEFT JOIN: a position stays listed when the run stored no bars
+                # to mark it; its market columns are then empty.
+                "  FROM positions p LEFT JOIN marks mk ON mk.symbol = p.symbol\n"
                 "  WHERE p.remaining_quantity > 0\n"
                 ")\n"
                 "SELECT ROW_NUMBER() OVER"
-                ' (ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC) AS "#",\n'
+                ' (ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC NULLS LAST) AS "#",\n'
                 '  s.entry_at AS "Time",\n'
                 '  s.symbol AS "Symbol", s.side AS "Side",\n'
                 '  ROUND((s.signed_notional / NULLIF(e.equity,0))::numeric,4) AS "Weight",\n'
@@ -982,7 +980,7 @@ BASE_PANELS_DEF: list[dict] = [
                 "  s.symbol || ' @ ' || to_char(s.entry_at, 'YYYY-MM-DD HH24:MI:SS')"
                 ' AS "Trade ID"\n'
                 "FROM sized s CROSS JOIN equity e\n"
-                "ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC",
+                "ORDER BY ABS(s.signed_notional / NULLIF(e.equity,0)) DESC NULLS LAST",
                 "A",
                 "table",
             )
@@ -1394,7 +1392,7 @@ def render_unified_dashboard() -> dict:
         "title": "Strategy",
         "description": (
             "Unified strategy dashboard — generated by generate_dashboards.py. "
-            f"{_LEGACY_SUBSCRIPTION_NOTICE}"
+            f"{_STORED_BARS_NOTICE}"
         ),
         "tags": [],
         "timezone": "browser",
@@ -1568,31 +1566,27 @@ def render_account_overview_dashboard() -> dict:
 # Signal Monitor Dashboard
 # ======================================================================
 
-# WHY: common SQL fragments for signal_events LATERAL JOIN to ohlcv.
-# These are reused across multiple panels to compute forward return, MFE, MAE.
-# All filtering uses run_id — exact primary subscriptions come from backtest_runs.
-# _META_INNER is a single lookup that all CTEs inject as their first WITH clause,
-# so the run-owned subscription mapping is resolved once instead of once per column.
+# WHY: common SQL fragments for signal_events LATERAL JOIN to run_bars.
+# These are reused across multiple panels to compute forward return, MFE, MAE
+# over the bars the selected run stored for the signal's symbol.
 _SIG_WHERE = "s.run_id = '${run_id}' AND s.signal_type = '${signal_type}'"
-_META_INNER = " SELECT primary_subscriptions FROM backtest_runs WHERE run_id='${run_id}'"
-_OHLCV_WHERE = f"ohlcv.symbol = s.symbol AND {_subscription_filter('meta', 'ohlcv')}"
+_BAR_WHERE = f"b.symbol = s.symbol AND {_latest_run_bar('b')}"
 _ENTRY_BAR = (
-    f"SELECT $fill_price_field AS entry_price FROM ohlcv, meta"
-    f" WHERE {_OHLCV_WHERE} AND ts > s.ts"
-    f" ORDER BY ts LIMIT 1"
+    f"SELECT b.$fill_price_field AS entry_price FROM run_bars b"
+    f" WHERE {_BAR_WHERE} AND b.ts > s.ts"
+    f" ORDER BY b.ts LIMIT 1"
 )
 _EXIT_BAR = (
-    f"SELECT close FROM ohlcv, meta"
-    f" WHERE {_OHLCV_WHERE} AND ts > s.ts"
-    f" ORDER BY ts LIMIT 1 OFFSET $n"
+    f"SELECT b.close FROM run_bars b"
+    f" WHERE {_BAR_WHERE} AND b.ts > s.ts"
+    f" ORDER BY b.ts LIMIT 1 OFFSET $n"
 )
 _FWD_CTE = (
-    f"WITH meta AS ({_META_INNER}),\n"
-    f"fwd AS (\n"
+    f"WITH fwd AS (\n"
     f"  SELECT s.ts,\n"
     f"    $expected_direction * (exit_bar.close - entry_bar.entry_price)"
     f" / NULLIF(entry_bar.entry_price, 0) AS ret\n"
-    f"  FROM signal_events s, meta\n"
+    f"  FROM signal_events s\n"
     f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
     f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
     f"  WHERE {_SIG_WHERE}\n"
@@ -1600,31 +1594,30 @@ _FWD_CTE = (
     f")\n"
 )
 _EXC_CTE = (
-    f"WITH meta AS ({_META_INNER}),\n"
-    f"exc AS (\n"
+    f"WITH exc AS (\n"
     f"  SELECT s.ts, exc.mfe, exc.mae,\n"
     f"    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
-    f"  FROM signal_events s, meta\n"
+    f"  FROM signal_events s\n"
     f"  JOIN LATERAL (\n"
-    f"    SELECT $fill_price_field AS entry_price, ts AS entry_at FROM ohlcv\n"
-    f"    WHERE {_OHLCV_WHERE} AND ts > s.ts\n"
-    f"    ORDER BY ts LIMIT 1\n"
+    f"    SELECT b.$fill_price_field AS entry_price, b.ts AS entry_at FROM run_bars b\n"
+    f"    WHERE {_BAR_WHERE} AND b.ts > s.ts\n"
+    f"    ORDER BY b.ts LIMIT 1\n"
     f"  ) entry_bar ON true\n"
     f"  JOIN LATERAL (\n"
     f"    SELECT\n"
     f"      MAX(GREATEST(0.0, CASE WHEN $expected_direction = 1"
-    f" THEN (b.high - entry_bar.entry_price)"
-    f" ELSE (entry_bar.entry_price - b.low)"
+    f" THEN (w.high - entry_bar.entry_price)"
+    f" ELSE (entry_bar.entry_price - w.low)"
     f" END / NULLIF(entry_bar.entry_price, 0))) AS mfe,\n"
     f"      MAX(GREATEST(0.0, CASE WHEN $expected_direction = 1"
-    f" THEN (entry_bar.entry_price - b.low)"
-    f" ELSE (b.high - entry_bar.entry_price)"
+    f" THEN (entry_bar.entry_price - w.low)"
+    f" ELSE (w.high - entry_bar.entry_price)"
     f" END / NULLIF(entry_bar.entry_price, 0))) AS mae\n"
     f"    FROM (\n"
-    f"      SELECT high, low FROM ohlcv\n"
-    f"      WHERE {_OHLCV_WHERE} AND ts > entry_bar.entry_at\n"
-    f"      ORDER BY ts LIMIT $n\n"
-    f"    ) b\n"
+    f"      SELECT b.high, b.low FROM run_bars b\n"
+    f"      WHERE {_BAR_WHERE} AND b.ts > entry_bar.entry_at\n"
+    f"      ORDER BY b.ts LIMIT $n\n"
+    f"    ) w\n"
     f"  ) exc ON true\n"
     f"  WHERE {_SIG_WHERE}\n"
     f"    AND $__timeFilter(s.ts)\n"
@@ -1650,13 +1643,12 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     _stat_panel(
         "Unrealized PnL",
         (
-            f"WITH meta AS ({_META_INNER}),\n"
-            "latest_signal AS (\n"
+            "WITH latest_signal AS (\n"
             "  SELECT ts, signal_value,\n"
-            f"    (SELECT close FROM ohlcv, meta WHERE {_OHLCV_WHERE}"
-            " ORDER BY ts DESC LIMIT 1) AS current_close,\n"
-            f"    (SELECT $fill_price_field FROM ohlcv, meta WHERE {_OHLCV_WHERE}"
-            " AND ts > s.ts ORDER BY ts LIMIT 1) AS signal_price\n"
+            f"    (SELECT b.close FROM run_bars b WHERE {_BAR_WHERE}"
+            " ORDER BY b.ts DESC LIMIT 1) AS current_close,\n"
+            f"    (SELECT b.$fill_price_field FROM run_bars b WHERE {_BAR_WHERE}"
+            " AND b.ts > s.ts ORDER BY b.ts LIMIT 1) AS signal_price\n"
             f"  FROM signal_events s\n  WHERE {_SIG_WHERE}\n"
             "  ORDER BY ts DESC LIMIT 1\n)\n"
             "SELECT $expected_direction * (current_close - signal_price)"
@@ -1735,16 +1727,21 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
     {
         "_type": "half",
         "title": "Price & Signals",
-        "description": "Price (left axis) with signal firing points (right axis, orange dots).",
+        "description": (
+            "Price (left axis, one line per symbol) of the symbols the selected "
+            "signals fired on, with signal firing points (right axis, orange dots)."
+        ),
         "type": "timeseries",
         "h": 8,
         "w": 12,
         "targets": [
             _target(
-                f"WITH meta AS ({_META_INNER})"
-                f' SELECT ts AS time, close AS "Close" FROM ohlcv, meta'
-                f" WHERE {_OHLCV_WHERE}"
-                f" AND $__timeFilter(ts) ORDER BY ts",
+                # One series per symbol, named by the metric column, so a run
+                # with signals on several symbols does not join their prices.
+                "SELECT b.ts AS time, b.symbol AS metric, b.close FROM run_bars b"
+                f" WHERE b.symbol IN (SELECT s.symbol FROM signal_events s WHERE {_SIG_WHERE})"
+                f" AND {_latest_run_bar('b')}"
+                " AND $__timeFilter(b.ts) ORDER BY b.ts",
                 "price",
             ),
             _target(
@@ -1797,13 +1794,12 @@ SIGNAL_MONITOR_PANELS: list[dict] = [
         "w": 12,
         "targets": [
             _target(
-                f"WITH meta AS ({_META_INNER}),\n"
-                "fwd AS (\n"
+                "WITH fwd AS (\n"
                 "  SELECT s.ts,\n"
                 "    $expected_direction * (exit_bar.close - entry_bar.entry_price)"
                 " / NULLIF(entry_bar.entry_price, 0) AS adj_return,\n"
                 "    ROW_NUMBER() OVER (ORDER BY s.ts) AS rn\n"
-                "  FROM signal_events s, meta\n"
+                "  FROM signal_events s\n"
                 f"  JOIN LATERAL ({_ENTRY_BAR}) entry_bar ON true\n"
                 f"  JOIN LATERAL ({_EXIT_BAR}) exit_bar ON true\n"
                 f"  WHERE {_SIG_WHERE} AND $__timeFilter(s.ts)\n"
@@ -1901,7 +1897,7 @@ def render_signal_monitor() -> dict:
         "title": "Signal",
         "description": (
             "Signal quality monitoring — generated by generate_dashboards.py. "
-            f"{_LEGACY_SUBSCRIPTION_NOTICE}"
+            f"{_STORED_BARS_NOTICE}"
         ),
         "tags": [],
         "timezone": "utc",

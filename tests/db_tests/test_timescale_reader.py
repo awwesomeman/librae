@@ -7,10 +7,9 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
-import pytest
 from librae.backtest.schema import RunMetadata, StrategyMetrics
 from librae.core.market_data import MarketDataSubscription
-from librae.db.timescale_reader import get_run, load_ohlcv, row_to_strategy_metrics
+from librae.db.timescale_reader import get_run, load_run_bars, row_to_strategy_metrics
 
 
 def _mock_conn(mock_cur: MagicMock) -> MagicMock:
@@ -81,107 +80,38 @@ class TestGetRun:
         assert get_run("missing-run") is None
 
 
-class TestLoadOhlcvSessionIdentity:
-    @patch("librae.db.timescale_reader.pd.read_sql", return_value=pd.DataFrame())
+class TestLoadRunBars:
+    @patch("librae.db.timescale_reader.pd.read_sql")
     @patch("librae.db.timescale_reader.get_conn")
-    def test_direct_read_filters_requested_session(self, mock_conn_ctx, mock_read_sql):
+    def test_reads_one_run_and_keeps_the_latest_version_of_each_bar(
+        self, mock_conn_ctx, mock_read_sql
+    ):
+        """The table keeps each version of a bar; a chart wants one per bar."""
         mock_conn_ctx.return_value = _mock_conn(MagicMock())
-
-        subscription = MarketDataSubscription(
-            symbol="AAPL",
-            timeframe="H1",
-            calendar_id="XNYS",
-            session_mode="regular",
-            data_source="ibkr",
-            instrument_type="spot",
-        )
         mock_read_sql.return_value = pd.DataFrame(
             {
                 "_time": ["2026-01-02T14:30:00-05:00"],
                 "available_at": ["2026-01-02T21:05:00+01:00"],
+                "observed_at": ["2026-01-02T21:05:03+01:00"],
             }
         )
 
-        result = load_ohlcv(subscription=subscription)
+        result = load_run_bars("run-1")
 
-        sql = mock_read_sql.call_args.args[0]
-        params = mock_read_sql.call_args.kwargs["params"]
-        assert "calendar_id = %s" in sql
-        assert "instrument_type = %s" in sql
-        assert params == list(subscription.to_dict().values())
-        assert str(result["_time"].dt.tz) == "UTC"
-        assert str(result["available_at"].dt.tz) == "UTC"
-
-    @patch("librae.db.timescale_reader.pd.read_sql", return_value=pd.DataFrame())
-    @patch("librae.db.timescale_reader.get_conn")
-    def test_run_read_uses_every_persisted_identity_dimension(self, mock_conn_ctx, mock_read_sql):
-        mock_cur = MagicMock()
-        mock_cur.fetchone.return_value = (
-            json.dumps([_subscription(instrument_type="contract_monthly").to_dict()]),
-            datetime(2026, 1, 1, tzinfo=UTC),
-            datetime(2026, 1, 2, tzinfo=UTC),
-        )
-        mock_conn_ctx.return_value = _mock_conn(mock_cur)
-
-        load_ohlcv(run_id="run-1")
-
-        sql = mock_read_sql.call_args.args[0]
-        params = mock_read_sql.call_args.kwargs["params"]
-        assert "JOIN (VALUES" in sql
-        assert "o.symbol = route.symbol" in sql
-        assert "o.timeframe = route.timeframe" in sql
-        assert "o.calendar_id = route.calendar_id" in sql
-        assert "o.session_mode = route.session_mode" in sql
-        assert "o.data_source = route.data_source" in sql
-        assert "o.instrument_type::text = route.instrument_type" in sql
-        assert params[:6] == list(
-            _subscription(instrument_type="contract_monthly").to_dict().values()
-        )
+        sql = " ".join(mock_read_sql.call_args.args[0].split())
+        assert "FROM run_bars WHERE run_id = %s" in sql
+        assert "DISTINCT ON (symbol, ts)" in sql
+        assert "ORDER BY symbol, ts, available_at DESC" in sql
+        assert mock_read_sql.call_args.kwargs["params"] == ["run-1"]
+        for column in ("_time", "available_at", "observed_at"):
+            assert str(result[column].dt.tz) == "UTC"
 
     @patch("librae.db.timescale_reader.pd.read_sql", return_value=pd.DataFrame())
     @patch("librae.db.timescale_reader.get_conn")
-    def test_as_of_filters_by_availability_not_bar_label(self, mock_conn_ctx, mock_read_sql):
+    def test_a_run_that_stored_no_bars_reads_empty(self, mock_conn_ctx, _read_sql):
         mock_conn_ctx.return_value = _mock_conn(MagicMock())
 
-        load_ohlcv(
-            subscription=_subscription(),
-            as_of=datetime(2026, 1, 2, tzinfo=UTC),
-        )
-
-        sql = mock_read_sql.call_args.args[0]
-        params = mock_read_sql.call_args.kwargs["params"]
-        assert "available_at <= %s" in sql
-        assert params[-1] == datetime(2026, 1, 2, tzinfo=UTC)
-
-    @patch("librae.db.timescale_reader.pd.read_sql", return_value=pd.DataFrame())
-    @patch("librae.db.timescale_reader.get_conn")
-    def test_same_symbol_spot_and_future_use_distinct_exact_queries(
-        self, mock_conn_ctx, mock_read_sql
-    ):
-        mock_conn_ctx.return_value = _mock_conn(MagicMock())
-        spot = _subscription()
-        future = _subscription(instrument_type="contract_monthly")
-
-        load_ohlcv(subscription=spot)
-        load_ohlcv(subscription=future)
-
-        spot_params = mock_read_sql.call_args_list[0].kwargs["params"]
-        future_params = mock_read_sql.call_args_list[1].kwargs["params"]
-        assert spot_params[:-1] == future_params[:-1]
-        assert spot_params[-1] == "spot"
-        assert future_params[-1] == "contract_monthly"
-
-    @patch("librae.db.timescale_reader.pd.read_sql")
-    @patch("librae.db.timescale_reader.get_conn")
-    def test_legacy_run_without_exact_identity_fails_closed(self, mock_conn_ctx, mock_read_sql):
-        mock_cur = MagicMock()
-        mock_cur.fetchone.return_value = ("[]", None, None)
-        mock_conn_ctx.return_value = _mock_conn(mock_cur)
-
-        with pytest.raises(ValueError, match="recreate or explicitly migrate"):
-            load_ohlcv(run_id="legacy-run")
-
-        mock_read_sql.assert_not_called()
+        assert load_run_bars("backtest-without-bars").empty
 
 
 class TestRowToStrategyMetrics:

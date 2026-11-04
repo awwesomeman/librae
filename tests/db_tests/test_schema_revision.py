@@ -87,4 +87,4 @@ def test_the_instrument_type_domain_survives_a_rerun() -> None:
     block = schema[schema.rindex("DO $$", 0, start) : schema.index("END $$;", start)]
 
     assert "EXCEPTION WHEN duplicate_object" in block
-    assert start < schema.index("CREATE TABLE IF NOT EXISTS ohlcv")
+    assert start < schema.index("CREATE TABLE IF NOT EXISTS run_bars")

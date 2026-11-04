@@ -34,6 +34,8 @@ from librae.backtest.cache import build_backtest_cache_key, normalize_backtest_r
 from librae.backtest.schema import BacktestOutput
 from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
+    OBSERVED_AT_COLUMN,
+    OHLCV_COLUMNS,
     MarketDataSubscription,
     normalize_bar_times,
     subscription_from_instrument,
@@ -341,6 +343,7 @@ def save_backtest_output(
     data_source_by_symbol: Mapping[str, str] | None = None,
     backtest_revision: str | None = None,
     replace_existing: bool = False,
+    bars_by_symbol: Mapping[str, pd.DataFrame] | None = None,
     dsn: str | None = None,
 ) -> dict:
     """Write a complete BacktestOutput to TimescaleDB.
@@ -357,6 +360,9 @@ def save_backtest_output(
         backtest_revision: Optional caller-owned strategy_name-code and input-data
             revision. Cache reuse is disabled when omitted.
         replace_existing: Replace the canonical run for the derived cache key.
+        bars_by_symbol: Input bars to keep in ``run_bars`` for this run's
+            charts, one frame per run symbol. Omitted, the run keeps no bars:
+            its metadata already names the exact subscriptions and range it used.
         dsn: TimescaleDB DSN.
 
     Returns:
@@ -375,6 +381,15 @@ def save_backtest_output(
     backtest_cache_key = build_backtest_cache_key(config_hash, revision)
     if replace_existing and backtest_cache_key is None:
         raise ValueError("replace_existing=True requires backtest_revision")
+    subscription_by_symbol = {item.symbol: item for item in meta.primary_subscriptions}
+    # All or none: a run with bars for some symbols reads as fully priced while
+    # its unpriced positions drop out of every mark.
+    if bars_by_symbol is not None and set(bars_by_symbol) != set(subscription_by_symbol):
+        raise ValueError(
+            "bars_by_symbol must cover exactly the run symbols; "
+            f"missing={sorted(set(subscription_by_symbol) - set(bars_by_symbol))}, "
+            f"extra={sorted(set(bars_by_symbol) - set(subscription_by_symbol))}"
+        )
 
     # WHY: single transaction for atomicity — partial writes on failure
     # would leave DB in inconsistent state (e.g. trades without metadata).
@@ -420,6 +435,13 @@ def save_backtest_output(
         cur.execute("DELETE FROM position_events WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM financing_cash_flows WHERE run_id = %s", (meta.run_id,))
         cur.execute("DELETE FROM strategy_performance WHERE run_id = %s", (meta.run_id,))
+        cur.execute("DELETE FROM run_bars WHERE run_id = %s", (meta.run_id,))
+
+        if bars_by_symbol:
+            counts["run_bars"] = sum(
+                write_run_bars(meta.run_id, subscription_by_symbol[symbol], bars, cur=cur)
+                for symbol, bars in bars_by_symbol.items()
+            )
 
         # equity_curve (batch)
         account = output.account
@@ -647,111 +669,110 @@ def save_backtest_output(
     return counts
 
 
-def write_ohlcv(
-    df: pd.DataFrame,
+_RUN_BARS_INSERT_SQL = """INSERT INTO run_bars (
+           ts, run_id, symbol, timeframe, calendar_id, session_mode,
+           data_source, instrument_type, available_at, observed_at,
+           open, high, low, close, volume)
+       VALUES %s
+       ON CONFLICT (run_id, symbol, ts, available_at) DO NOTHING
+       RETURNING 1"""
+
+
+def write_run_bars(
+    run_id: str,
     subscription: MarketDataSubscription,
+    bars: pd.DataFrame,
+    *,
+    cur: PgCursor | None = None,
     dsn: str | None = None,
 ) -> int:
-    """Write OHLCV DataFrame to TimescaleDB ohlcv table.
+    """Record bars that one run saw for one of its subscriptions.
 
-    Expects df with DatetimeIndex (or 'ts'/'timestamp' column) and
-    columns: open, high, low, close, volume. ``subscription`` is the whole
-    immutable row identity; partial scalar keys are deliberately unsupported.
-    ``available_at`` is validated against the calendar/fixed completion floor
-    and derived only when that floor is provable.  It versions the current
-    row: only a strictly later availability may replace stored OHLCV values;
-    equal or older versions are idempotent no-ops.
+    ``bars`` has a DatetimeIndex or a ``ts`` column, the OHLCV columns, and
+    optionally ``available_at`` (derived only when the calendar proves the
+    bar's close) and ``observed_at`` (stored NULL when absent, as for a
+    backtest's inputs). Each ``(ts, available_at)`` version is stored once: a
+    repeat is a no-op that keeps the first ``observed_at``, so a replayed
+    delivery cannot move when a version was received.
 
     The whole batch is refused, with ``BarTimestampError``, if any ``ts`` is
     not a bar start on the subscription's calendar (``validate_bar_starts``).
-    A misstamped feed otherwise stores cleanly and is only noticed by whoever
-    reads the bars months later.
 
-    Returns the number of inserted or strictly newer row versions accepted.
+    If ``cur`` is provided, executes on that cursor (caller owns the
+    transaction). Returns the number of versions inserted.
     """
     if not isinstance(subscription, MarketDataSubscription):
         raise TypeError("subscription must be a MarketDataSubscription")
-    if df is None or df.empty:
+    if bars is None or bars.empty:
         return 0
 
-    validate_ohlcv_values(df, context="OHLCV write")
-    identity = subscription.to_dict()
-    for name, expected in identity.items():
-        if name not in df:
-            continue
-        observed = set(df[name].dropna().astype(str))
-        if df[name].isna().any() or observed != {expected}:
-            raise ValueError(
-                f"OHLCV {name} column must contain only {expected!r}, got {sorted(observed)!r}"
-            )
-
-    # Normalise index -> ts column (reset_index returns a new DataFrame)
-    if "ts" not in df.columns and "timestamp" not in df.columns:
-        if not isinstance(df.index, pd.DatetimeIndex):
-            raise ValueError("OHLCV write requires a ts column or DatetimeIndex")
-        index_name = df.index.name or "index"
-        df = df.reset_index().rename(columns={index_name: "ts"})
-    ts_col = "ts" if "ts" in df.columns else "timestamp"
+    validate_ohlcv_values(bars, context="run bars write")
+    if "ts" not in bars.columns:
+        if not isinstance(bars.index, pd.DatetimeIndex):
+            raise ValueError("run bars write requires a ts column or DatetimeIndex")
+        bars = bars.rename_axis("ts").reset_index()
     validate_bar_starts(
-        df[ts_col],
+        bars["ts"],
         subscription.timeframe,
         subscription.calendar_id,
         session_mode=subscription.session_mode,
-        context=f"OHLCV write for {subscription.symbol!r} {subscription.data_source!r}",
+        context=f"run bars write for {subscription.symbol!r} {subscription.data_source!r}",
     )
-    df = df.sort_values(ts_col, kind="stable").reset_index(drop=True)
+    bars = bars.sort_values("ts", kind="stable").reset_index(drop=True)
     timestamps, available_at = normalize_bar_times(
-        df[ts_col],
-        df.get(AVAILABLE_AT_COLUMN),
+        bars["ts"],
+        bars.get(AVAILABLE_AT_COLUMN),
         subscription,
     )
     if timestamps.duplicated().any():
-        raise ValueError("OHLCV write requires unique timestamps per subscription")
+        raise ValueError("run bars write requires unique timestamps per subscription")
+    observed_at = (
+        [_to_dt(value) for value in bars[OBSERVED_AT_COLUMN]]
+        if OBSERVED_AT_COLUMN in bars
+        else [None] * len(bars)
+    )
 
     rows = list(
         zip(
             timestamps.to_pydatetime(),
-            [subscription.symbol] * len(df),
-            [subscription.timeframe] * len(df),
-            [subscription.calendar_id] * len(df),
-            [subscription.session_mode] * len(df),
-            [subscription.data_source] * len(df),
-            [subscription.instrument_type] * len(df),
+            [run_id] * len(bars),
+            [subscription.symbol] * len(bars),
+            [subscription.timeframe] * len(bars),
+            [subscription.calendar_id] * len(bars),
+            [subscription.session_mode] * len(bars),
+            [subscription.data_source] * len(bars),
+            [subscription.instrument_type] * len(bars),
             available_at.to_pydatetime(),
-            df["open"].astype(float),
-            df["high"].astype(float),
-            df["low"].astype(float),
-            df["close"].astype(float),
-            df["volume"].astype(float),
+            observed_at,
+            bars["open"].astype(float),
+            bars["high"].astype(float),
+            bars["low"].astype(float),
+            bars["close"].astype(float),
+            bars["volume"].astype(float),
             strict=True,
         )
     )
-
-    with get_conn(dsn) as conn:
-        cur = conn.cursor()
-        accepted = psycopg2.extras.execute_values(
-            cur,
-            """INSERT INTO ohlcv (
-                   ts, symbol, timeframe, calendar_id, session_mode,
-                   data_source, instrument_type, available_at,
-                   open, high, low, close, volume)
-               VALUES %s
-               ON CONFLICT (
-                   ts, symbol, timeframe, calendar_id, session_mode,
-                   data_source, instrument_type)
-                   DO UPDATE SET
-                 available_at=EXCLUDED.available_at,
-                 open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
-                 close=EXCLUDED.close, volume=EXCLUDED.volume
-               WHERE EXCLUDED.available_at > ohlcv.available_at
-               RETURNING 1""",
-            rows,
-            page_size=2000,
-            fetch=True,
+    if cur is not None:
+        return len(
+            psycopg2.extras.execute_values(
+                cur, _RUN_BARS_INSERT_SQL, rows, page_size=2000, fetch=True
+            )
         )
-        cur.close()
+    with get_conn(dsn) as conn:
+        c = conn.cursor()
+        inserted = psycopg2.extras.execute_values(
+            c, _RUN_BARS_INSERT_SQL, rows, page_size=2000, fetch=True
+        )
+        c.close()
+    return len(inserted)
 
-    return len(accepted)
+
+def _input_bars(symbol_df: pd.DataFrame) -> pd.DataFrame:
+    """The bar columns of one symbol's backtest input, for ``write_run_bars``."""
+    columns = list(OHLCV_COLUMNS)
+    if AVAILABLE_AT_COLUMN in symbol_df:
+        columns.append(AVAILABLE_AT_COLUMN)
+    return symbol_df[columns].rename_axis("ts")
 
 
 def write_signal_event(
@@ -1346,12 +1367,17 @@ def save_signal_results(
     primary_subscription: MarketDataSubscription | None = None,
     replace_existing: bool = False,
     backtest_revision: str | None = None,
+    store_bars: bool = False,
 ) -> dict:
-    """Write signal history + OHLCV to DB. Independent of backtest engine.
+    """Write signal history to DB. Independent of backtest engine.
 
     Use this for signal quality analysis without running a full backtest.
     When config is provided, stores its execution identity and policies.
+    ``store_bars`` also keeps the input bars in ``run_bars``, which the signal
+    dashboard's price and forward-return panels read; it needs a ``run_id``.
     """
+    if store_bars and run_id is None:
+        raise ValueError("store_bars=True requires run_id: run_bars rows belong to a run")
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
     exit_signal_series = _extract_exit_signals(df, symbol)
     tf = to_canonical(timeframe)
@@ -1459,14 +1485,15 @@ def save_signal_results(
                 psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, exit_rows, page_size=1000)
                 sig_count += len(exit_rows)
             counts["signal_events"] = sig_count
+
+            if run_id is not None:
+                cur.execute("DELETE FROM run_bars WHERE run_id = %s", (run_id,))
+                if store_bars:
+                    counts["run_bars"] = write_run_bars(
+                        run_id, resolved_subscription, _input_bars(symbol_df), cur=cur
+                    )
             cur.close()
 
-    ohlcv_columns = ["open", "high", "low", "close", "volume"]
-    if AVAILABLE_AT_COLUMN in symbol_df:
-        ohlcv_columns.append(AVAILABLE_AT_COLUMN)
-    ohlcv_df = symbol_df[ohlcv_columns]
-    ohlcv_df.index.name = "ts"
-    counts["ohlcv"] = write_ohlcv(ohlcv_df, resolved_subscription)
     return counts
 
 
@@ -1478,11 +1505,14 @@ def save_strategy_results(
     *,
     replace_existing: bool = False,
     backtest_revision: str | None = None,
+    store_bars: bool = False,
 ) -> dict:
     """Write strategy_name backtest results + signal history to DB.
 
     Writes: backtest_runs, equity_curve, position_events, financing_cash_flows,
-    strategy_performance, signal_events, ohlcv.
+    strategy_performance, signal_events. The input bars are not copied: the
+    run's metadata names the exact subscriptions and range it used.
+    ``store_bars=True`` also keeps them in ``run_bars``, for price charts.
     """
     from librae.config.symbols import resolve_symbol
 
@@ -1512,7 +1542,7 @@ def save_strategy_results(
         signal_series_by_symbol[symbol] = signal_series
         exit_signal_series_by_symbol[symbol] = _extract_exit_signals(df, symbol)
 
-    counts = save_backtest_output(
+    return save_backtest_output(
         output,
         signal_series_by_symbol=signal_series_by_symbol,
         exit_signal_series_by_symbol=exit_signal_series_by_symbol,
@@ -1523,16 +1553,9 @@ def save_strategy_results(
         data_source_by_symbol=data_source_by_symbol,
         backtest_revision=backtest_revision,
         replace_existing=replace_existing,
+        bars_by_symbol=(
+            {symbol: _input_bars(frame) for symbol, frame in symbol_frames.items()}
+            if store_bars
+            else None
+        ),
     )
-
-    ohlcv_count = 0
-    subscription_by_symbol = {item.symbol: item for item in subscriptions}
-    for symbol, symbol_df in symbol_frames.items():
-        ohlcv_columns = ["open", "high", "low", "close", "volume"]
-        if AVAILABLE_AT_COLUMN in symbol_df:
-            ohlcv_columns.append(AVAILABLE_AT_COLUMN)
-        ohlcv_df = symbol_df[ohlcv_columns]
-        ohlcv_df.index.name = "ts"
-        ohlcv_count += write_ohlcv(ohlcv_df, subscription_by_symbol[symbol])
-    counts["ohlcv"] = ohlcv_count
-    return counts

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pandas as pd
 import pytest
 from librae.core.market_data import MarketDataSubscription
 from librae.live.state import LiveRuntimeState, PendingOhlcvDelivery
@@ -34,10 +35,12 @@ def _subscription(timeframe: str = "H1") -> MarketDataSubscription:
 
 
 def _pending(ts: str = "2025-01-01T00:00Z", available_at: str = "2025-01-01T01:00Z"):
+    available = datetime.fromisoformat(available_at.replace("Z", "+00:00"))
     return PendingOhlcvDelivery(
         subscription=_subscription(),
         ts=datetime.fromisoformat(ts.replace("Z", "+00:00")),
-        available_at=datetime.fromisoformat(available_at.replace("Z", "+00:00")),
+        available_at=available,
+        observed_at=available + timedelta(seconds=3),
         bar={"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1_000.0},
     )
 
@@ -50,6 +53,7 @@ def _pending_sequence(count: int) -> list[PendingOhlcvDelivery]:
             subscription=_subscription(),
             ts=base + timedelta(hours=index),
             available_at=base + timedelta(hours=index + 1),
+            observed_at=base + timedelta(hours=index + 1, seconds=3),
             bar={"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1_000.0},
         )
         for index in range(count)
@@ -72,6 +76,7 @@ class TestPendingIdentity:
             subscription=_subscription("D1"),
             ts=hourly.ts,
             available_at=hourly.available_at,
+            observed_at=hourly.observed_at,
             bar=dict(hourly.bar),
         )
 
@@ -107,9 +112,7 @@ class TestTheQueueRidesWithTheCheckpoint:
         assert self._state().pending_ohlcv == []
 
     def test_ordering_is_preserved_per_subscription(self) -> None:
-        """A new bar and a same-ts correction must not be reordered: the
-        writer only accepts a strictly later version, so replaying them out of
-        order would drop the correction."""
+        """A new bar and a same-ts correction keep the order they arrived in."""
         first = _pending(ts="2025-01-01T00:00Z")
         correction = _pending(ts="2025-01-01T00:00Z", available_at="2025-01-01T02:00Z")
         later = _pending(ts="2025-01-01T01:00Z", available_at="2025-01-01T02:00Z")
@@ -279,6 +282,23 @@ class TestDurableSinkIsRetried:
 
         assert recovered.accepted, "a crash before acknowledgement must not lose the row"
 
+    def test_a_restart_keeps_the_queue_it_restored(self) -> None:
+        """Without a new bar the restart's refetch delivers nothing new, so only
+        the restored queue carries the row the crashed process accepted."""
+        from librae.live.state import MemoryLiveStateStore
+
+        store = MemoryLiveStateStore()
+        failing = _DurableSink()
+        failing.fail = True
+        crashed = _runner(failing, store=store)
+        crashed._poll_cycle()
+        queued = [row.identity for row in crashed._pending_ohlcv]
+
+        restarted = _runner(_DurableSink(), store=store)
+
+        assert queued
+        assert [row.identity for row in restarted._pending_ohlcv] == queued
+
     def test_retries_do_not_replay_strategy_decisions(self) -> None:
         """The retry is a persistence concern. Re-running the strategy would
         turn an audit failure into duplicate orders."""
@@ -312,6 +332,60 @@ class TestDurableSinkIsRetried:
         runner._poll_cycle()
 
         assert evaluated == first, "a retry cycle must not re-evaluate an old bar"
+
+
+class TestARefusedReReadDoesNotSkipTheDecision:
+    """A restart re-reads bars already decided and offers them to the sink
+    while fetching. If the sink is down, that must not abort the cycle and
+    leave the new bar undecided until the next poll."""
+
+    @staticmethod
+    def _restart_while_the_sink_is_down():
+        from librae.core.strategy import Strategy
+        from librae.live.state import MemoryLiveStateStore
+
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+
+        evaluated: list = []
+
+        class Count(Strategy):
+            def on_bar(self, ctx):
+                evaluated.append(ctx.ts)
+                return []
+
+        store = MemoryLiveStateStore()
+        bars = {"n": 6}
+
+        def runner(sink):
+            return make_live_runner(
+                strategy=Count(),
+                config=_test_cfg(mode="sim", warmup_periods=1),
+                state_store=store,
+                fetcher=lambda _s, _tf, limit, **_k: _frame(bars["n"]).tail(limit),
+                on_ohlcv=sink,
+            )
+
+        runner(_DurableSink())._poll_cycle()
+        bars["n"] = 7
+        down = _DurableSink()
+        down.fail = True
+        restarted = runner(down)
+        evaluated.clear()
+        return restarted, evaluated
+
+    def test_the_new_bar_is_still_decided(self) -> None:
+        restarted, evaluated = self._restart_while_the_sink_is_down()
+
+        restarted._poll_cycle()
+
+        assert evaluated == [datetime(2025, 1, 1, 6, tzinfo=UTC)]
+
+    def test_the_decided_bar_waits_in_the_queue(self) -> None:
+        restarted, _ = self._restart_while_the_sink_is_down()
+
+        restarted._poll_cycle()
+
+        assert [row.ts for row in restarted._pending_ohlcv] == [datetime(2025, 1, 1, 6, tzinfo=UTC)]
 
 
 class TestBestEffortStaysBestEffort:
@@ -452,7 +526,7 @@ class TestTheReferencePathActuallyRetries:
         bar = {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1_000.0}
 
         with (
-            patch("librae.db.timescale_writer.write_ohlcv", boom),
+            patch("librae.db.timescale_writer.write_run_bars", boom),
             pytest.raises(RuntimeError, match="timescale unavailable"),
         ):
             callbacks.on_ohlcv("BTCUSDT", "H1", bar, datetime(2025, 1, 1, tzinfo=UTC))
@@ -482,8 +556,8 @@ class TestTheReferencePathActuallyRetries:
         config, callbacks = self._callbacks()
         accepted: list = []
 
-        def record(df, subscription, *_args, **_kwargs):
-            accepted.append((subscription.symbol, len(df)))
+        def record(run_id, subscription, df, *_args, **_kwargs):
+            accepted.append((run_id, subscription.symbol, len(df)))
             return len(df)
 
         def boom(*_args, **_kwargs):
@@ -497,15 +571,16 @@ class TestTheReferencePathActuallyRetries:
             on_ohlcv=callbacks.on_ohlcv,
         )
 
-        with patch("librae.db.timescale_writer.write_ohlcv", boom):
+        with patch("librae.db.timescale_writer.write_run_bars", boom):
             runner._poll_cycle()
         assert runner._pending_ohlcv, "a failed reference write must stay pending"
 
         bars["n"] = 7
-        with patch("librae.db.timescale_writer.write_ohlcv", record):
+        with patch("librae.db.timescale_writer.write_run_bars", record):
             runner._poll_cycle()
 
         assert accepted, "the row the failed write dropped must reach the writer"
+        assert {run_id for run_id, _symbol, _rows in accepted} == {"r1"}
         assert runner._pending_ohlcv == []
 
 
@@ -555,8 +630,6 @@ class TestTheCheckpointRecordsWhatTheSinkAccepted:
         checkpointed = self._flush(pending, sink)
 
         assert accepted == 1
-        # Order matters: the writer accepts only a strictly later row version,
-        # so replaying a correction before the bar it corrects would drop it.
         assert checkpointed == expected_tail
 
     def test_a_sink_that_takes_nothing_writes_no_checkpoint(self) -> None:
@@ -568,3 +641,324 @@ class TestTheCheckpointRecordsWhatTheSinkAccepted:
 
         assert self._flush(pending, sink) is None
         assert [row.identity for row in pending] == untouched
+
+
+class _RecordingDurableSink(_DurableSink):
+    """A durable sink that keeps each delivered bar, clocks included."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bars: list[tuple[datetime, dict]] = []
+
+    def __call__(self, symbol, timeframe, bar, ts) -> None:
+        super().__call__(symbol, timeframe, bar, ts)
+        self.bars.append((ts, dict(bar)))
+
+
+class TestTheAuditRowSaysWhenTheBarWasReceived:
+    """observed_at is when the engine received a version, not when it was stored.
+
+    A failed write and the retry that lands are different moments. Stamped at
+    the retry, the row would say the run saw the bar after it traded on it.
+    """
+
+    RECEIVED = datetime(2025, 1, 1, 10, tzinfo=UTC)
+    LAST_BAR = datetime(2025, 1, 1, 5, tzinfo=UTC)
+
+    @classmethod
+    def _runner(cls, sink, clock, *, store=None, frame=None):
+        from librae.live.state import MemoryLiveStateStore
+
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+
+        return make_live_runner(
+            config=_test_cfg(mode="sim", warmup_periods=1),
+            state_store=store or MemoryLiveStateStore(),
+            fetcher=lambda *a, **k: frame["bars"] if frame else _frame(6),
+            on_ohlcv=sink,
+            clock=lambda: clock["now"],
+        )
+
+    def test_the_decided_bar_carries_its_receipt_time(self) -> None:
+        sink = _RecordingDurableSink()
+        runner = self._runner(sink, {"now": self.RECEIVED})
+
+        runner._poll_cycle()
+
+        ts, bar = sink.bars[-1]
+        assert ts == self.LAST_BAR
+        assert bar["observed_at"] == self.RECEIVED
+        assert bar["available_at"] == self.LAST_BAR + timedelta(hours=1)
+
+    def test_a_retried_row_keeps_the_time_it_was_received(self) -> None:
+        sink = _RecordingDurableSink()
+        sink.fail = True
+        clock = {"now": self.RECEIVED}
+        runner = self._runner(sink, clock)
+        runner._poll_cycle()
+
+        clock["now"] = self.RECEIVED + timedelta(minutes=30)
+        sink.fail = False
+        runner._poll_cycle()
+
+        assert [bar["observed_at"] for ts, bar in sink.bars if ts == self.LAST_BAR] == [
+            self.RECEIVED
+        ]
+
+    def test_a_restart_replays_the_time_the_crashed_process_received_it(self) -> None:
+        from librae.live.state import MemoryLiveStateStore
+
+        store = MemoryLiveStateStore()
+        failing = _RecordingDurableSink()
+        failing.fail = True
+        self._runner(failing, {"now": self.RECEIVED}, store=store)._poll_cycle()
+
+        recovered = _RecordingDurableSink()
+        restarted_at = self.RECEIVED + timedelta(hours=2)
+        self._runner(recovered, {"now": restarted_at}, store=store)._poll_cycle()
+
+        # The queued row comes first, so a writer that keeps the first copy of
+        # a version keeps this one; the restart's re-read follows it.
+        stamps = [bar["observed_at"] for ts, bar in recovered.bars if ts == self.LAST_BAR]
+        assert stamps[0] == self.RECEIVED
+        assert set(stamps[1:]) <= {restarted_at}
+
+    def test_a_version_fetched_again_keeps_its_first_receipt(self) -> None:
+        clock = {"now": self.RECEIVED}
+        runner = self._runner(None, clock)
+        runner._fetch_with_cache_unchecked("BTCUSDT")
+        clock["now"] = self.RECEIVED + timedelta(minutes=5)
+        runner._fetch_with_cache_unchecked("BTCUSDT")
+
+        latest = runner._ohlcv_cache["BTCUSDT"].iloc[-1]
+        assert runner._observed_at("BTCUSDT", latest["ts"], latest["available_at"]) == (
+            self.RECEIVED
+        )
+
+    def test_a_correction_is_a_new_version_received_when_it_arrives(self) -> None:
+        sink = _RecordingDurableSink()
+        clock = {"now": self.RECEIVED}
+        frame = {"bars": _frame(6)}
+        runner = self._runner(sink, clock, frame=frame)
+        runner._poll_cycle()
+
+        corrected = _frame(6)
+        corrected["available_at"] = corrected["ts"] + pd.Timedelta(hours=1)
+        corrected.loc[5, ["close", "available_at"]] = [100.5, self.RECEIVED + timedelta(minutes=15)]
+        frame["bars"] = corrected
+        clock["now"] = self.RECEIVED + timedelta(minutes=30)
+        runner._poll_cycle()
+
+        versions = [
+            (bar["available_at"], bar["observed_at"], bar["close"])
+            for ts, bar in sink.bars
+            if ts == self.LAST_BAR
+        ]
+        assert versions == [
+            (self.LAST_BAR + timedelta(hours=1), self.RECEIVED, 100.0),
+            (self.RECEIVED + timedelta(minutes=15), self.RECEIVED + timedelta(minutes=30), 100.5),
+        ]
+
+    @staticmethod
+    def _warmup_runner(sink, clock, frame):
+        from librae.live.state import MemoryLiveStateStore
+
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+
+        return make_live_runner(
+            config=_test_cfg(mode="sim", warmup_periods=5),
+            state_store=MemoryLiveStateStore(),
+            fetcher=lambda *a, **k: frame["bars"],
+            on_ohlcv=sink,
+            clock=lambda: clock["now"],
+        )
+
+    def test_the_first_decision_records_the_window_it_read(self) -> None:
+        """Bars a decision read but did not decide on would otherwise reach
+        the table only at a later restart, stamped with its time."""
+        sink = _RecordingDurableSink()
+        runner = self._warmup_runner(sink, {"now": self.RECEIVED}, {"bars": _frame(6)})
+
+        runner._poll_cycle()
+
+        assert sorted(ts for ts, _bar in sink.bars) == [
+            self.LAST_BAR - timedelta(hours=hours) for hours in range(4, -1, -1)
+        ]
+        assert {bar["observed_at"] for _ts, bar in sink.bars} == {self.RECEIVED}
+        assert sink.bars[0][0] == self.LAST_BAR, "the decided bar is recorded first"
+
+    def test_bars_that_arrive_while_warmup_is_short_are_recorded_by_the_decision(self) -> None:
+        """The first decision can come polls after the start; the window it
+        reads is recorded then, with when each bar was received."""
+        sink = _RecordingDurableSink()
+        clock = {"now": self.RECEIVED}
+        frame = {"bars": _frame(3)}
+        runner = self._warmup_runner(sink, clock, frame)
+        runner._poll_cycle()
+        assert sink.bars == [], "no decision while warmup is short"
+
+        frame["bars"] = _frame(8)
+        second_poll = self.RECEIVED + timedelta(hours=1)
+        clock["now"] = second_poll
+        runner._poll_cycle()
+
+        stamps = {ts: bar["observed_at"] for ts, bar in sink.bars}
+        decided = datetime(2025, 1, 1, 7, tzinfo=UTC)
+        assert sorted(stamps) == [decided - timedelta(hours=hours) for hours in range(4, -1, -1)]
+        assert stamps[decided - timedelta(hours=4)] == second_poll
+        assert stamps[decided] == second_poll
+
+    def test_steady_polls_record_only_the_decided_bar(self) -> None:
+        sink = _RecordingDurableSink()
+        clock = {"now": self.RECEIVED}
+        frame = {"bars": _frame(6)}
+        runner = self._warmup_runner(sink, clock, frame)
+        runner._poll_cycle()
+        recorded = len(sink.bars)
+
+        frame["bars"] = _frame(7)
+        clock["now"] = self.RECEIVED + timedelta(hours=1)
+        runner._poll_cycle()
+
+        assert [ts for ts, _bar in sink.bars[recorded:]] == [self.LAST_BAR + timedelta(hours=1)]
+
+    def test_a_sink_that_takes_batches_gets_the_window_in_one_call(self) -> None:
+        """One write per bar would hold a many-symbol start up for minutes."""
+        from librae.live.state import MemoryLiveStateStore
+
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+
+        sink = _RecordingDurableSink()
+        batches: list[tuple[str, list[datetime]]] = []
+        runner = make_live_runner(
+            config=_test_cfg(mode="sim", warmup_periods=5),
+            state_store=MemoryLiveStateStore(),
+            fetcher=lambda *a, **k: _frame(6),
+            on_ohlcv=sink,
+            on_ohlcv_batch=lambda symbol, _tf, bars: batches.append(
+                (symbol, [ts for ts, _bar in bars])
+            ),
+            clock=lambda: self.RECEIVED,
+        )
+
+        runner._poll_cycle()
+
+        assert [ts for ts, _bar in sink.bars] == [self.LAST_BAR]
+        assert batches == [
+            ("BTCUSDT", [self.LAST_BAR - timedelta(hours=hours) for hours in range(4, 0, -1)])
+        ]
+
+    def test_a_batch_path_without_its_sink_is_refused(self) -> None:
+        """Window bars go to on_ohlcv_batch only alongside on_ohlcv; alone it
+        would be silently ignored."""
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+
+        with pytest.raises(ValueError, match="pass both"):
+            make_live_runner(
+                config=_test_cfg(mode="sim"),
+                on_ohlcv=None,
+                on_ohlcv_batch=lambda *args: None,
+            )
+
+    def test_the_window_waits_out_a_sink_that_refused_the_decided_bar(self) -> None:
+        """Offering it anyway would only wait on the same failing database."""
+        from librae.live.state import MemoryLiveStateStore
+
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+
+        sink = _RecordingDurableSink()
+        sink.fail = True
+        batches: list = []
+        runner = make_live_runner(
+            config=_test_cfg(mode="sim", warmup_periods=5),
+            state_store=MemoryLiveStateStore(),
+            fetcher=lambda *a, **k: _frame(6),
+            on_ohlcv=sink,
+            on_ohlcv_batch=lambda *args: batches.append(args),
+            clock=lambda: self.RECEIVED,
+        )
+
+        runner._poll_cycle()
+
+        assert runner._pending_ohlcv, "the decided bar stays queued"
+        assert batches == []
+
+    def test_a_batch_holds_one_version_per_bar(self) -> None:
+        """The writer refuses two versions of one bar in one batch."""
+        batches: list[list[datetime]] = []
+        runner = self._runner(_RecordingDurableSink(), {"now": self.RECEIVED})
+        runner._on_ohlcv_batch = lambda _symbol, _tf, bars: batches.append(
+            [ts for ts, _bar in bars]
+        )
+        first, second = self.LAST_BAR - timedelta(hours=1), self.LAST_BAR
+        rows = [
+            ("BTCUSDT", first, {}),
+            ("BTCUSDT", second, {}),
+            ("BTCUSDT", second, {}),
+        ]
+
+        runner._offer_audit_rows(rows, "test")
+
+        assert batches == [[first, second], [second]]
+
+    def test_a_correction_the_sink_refuses_waits_in_the_queue(self) -> None:
+        """A later version of a decided bar is what the audit keeps, so an
+        outage must not drop it the way it drops a best-effort re-read."""
+        sink = _RecordingDurableSink()
+        clock = {"now": self.RECEIVED}
+        frame = {"bars": _frame(6)}
+        runner = self._runner(sink, clock, frame=frame)
+        runner._poll_cycle()
+
+        corrected = _frame(6)
+        corrected["available_at"] = corrected["ts"] + pd.Timedelta(hours=1)
+        corrected_at = self.RECEIVED + timedelta(minutes=15)
+        corrected.loc[5, ["close", "available_at"]] = [100.5, corrected_at]
+        frame["bars"] = corrected
+        received = self.RECEIVED + timedelta(minutes=30)
+        clock["now"] = received
+        sink.fail = True
+        runner._poll_cycle()
+
+        assert [(row.available_at, row.observed_at) for row in runner._pending_ohlcv] == [
+            (corrected_at, received)
+        ]
+
+        sink.fail = False
+        clock["now"] = self.RECEIVED + timedelta(hours=1)
+        runner._poll_cycle()
+
+        assert runner._pending_ohlcv == []
+        ts, bar = sink.bars[-1]
+        assert (ts, bar["available_at"], bar["observed_at"]) == (
+            self.LAST_BAR,
+            corrected_at,
+            received,
+        )
+
+    def test_a_halted_simulation_still_records_the_bars_it_marks(self) -> None:
+        """Equity keeps being marked while halted; the price behind it must
+        be in the table too, or a dashboard marks positions at a stale bar."""
+        sink = _RecordingDurableSink()
+        clock = {"now": self.RECEIVED}
+        frame = {"bars": _frame(6)}
+        runner = self._runner(sink, clock, frame=frame)
+        runner._poll_cycle()
+        runner._halted = True
+
+        frame["bars"] = _frame(7)
+        clock["now"] = self.RECEIVED + timedelta(hours=1)
+        runner._poll_cycle()
+
+        assert sink.bars[-1][0] == self.LAST_BAR + timedelta(hours=1)
+        assert runner._pending_ohlcv == []
+
+    def test_the_stamps_are_pruned_with_the_cache(self) -> None:
+        """Kept only for the cached window, so a long run cannot grow them."""
+        clock = {"now": self.RECEIVED}
+        runner = self._runner(None, clock)
+        runner._fetch_with_cache_unchecked("BTCUSDT")
+
+        head = pd.Timestamp(runner._ohlcv_cache["BTCUSDT"]["ts"].iloc[0]).value
+        assert runner._bar_observed_at["BTCUSDT"]
+        assert all(ts >= head for ts, _available in runner._bar_observed_at["BTCUSDT"])
