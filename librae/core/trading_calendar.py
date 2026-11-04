@@ -33,6 +33,13 @@ _TAIFEX_CALENDARS = frozenset({TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR}
 _FULL_DAY_CALENDARS = _TAIFEX_CALENDARS | {ALWAYS_OPEN_CALENDAR}
 _TAIPEI = "Asia/Taipei"
 
+# First date a calendar is built from, or its bound_min if that is later.
+# Without it exchange_calendars builds only the last 20 years, counted from
+# the day the process starts, so a bar older than that reads as out of
+# session and the cutoff moves daily. Not earlier: a calendar keeps every
+# trading minute in memory, in every process that uses it.
+_CALENDAR_START = pd.Timestamp("2000-01-01")
+
 
 def _timestamp(value: object) -> pd.Timestamp:
     timestamp = pd.Timestamp(value)
@@ -54,9 +61,15 @@ def _exchange_calendar(calendar_id: str) -> ExchangeCalendar:
     if exchange_id == "XTAI":
         return _xtai_calendar()
     try:
-        return xcals.get_calendar(exchange_id)
+        return xcals.get_calendar(exchange_id, start=_CALENDAR_START)
     except InvalidCalendarName as exc:
         raise ValueError(f"unknown calendar_id={calendar_id!r}") from exc
+    except ValueError:
+        # The only way to learn a calendar's bound_min through the public API.
+        earliest = type(xcals.get_calendar(exchange_id)).bound_min()
+        if earliest is None or earliest <= _CALENDAR_START:
+            raise
+        return xcals.get_calendar(exchange_id, start=earliest)
 
 
 # Closures TWSE and TAIFEX announced that exchange_calendars' XTAI does not
@@ -81,7 +94,9 @@ _XTAI_CLOSURES_MISSING_UPSTREAM = (
 )
 
 
+@cache
 def _xtai_calendar() -> ExchangeCalendar:
+    """One instance shared by XTAI and the TAIFEX calendars, which use its sessions."""
     from exchange_calendars.exchange_calendar_xtai import XTAIExchangeCalendar
 
     class _XTAI(XTAIExchangeCalendar):
@@ -90,7 +105,7 @@ def _xtai_calendar() -> ExchangeCalendar:
             missing = [pd.Timestamp(day) for day in _XTAI_CLOSURES_MISSING_UPSTREAM]
             return [*super().adhoc_holidays, *missing]
 
-    return _XTAI()
+    return _XTAI(start=_CALENDAR_START)
 
 
 try:

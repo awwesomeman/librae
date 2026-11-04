@@ -421,6 +421,28 @@ class TestFetchOhlcv:
             adapter.fetch_ohlcv("TXFR1", "1h", end="2026-04-05", continuous_alias=True)
         adapter._api.kbars.assert_not_called()
 
+    def test_a_date_string_with_a_time_is_refused(self):
+        """Its date depends on a time zone; an aware datetime says which."""
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            adapter.fetch_ohlcv(
+                "TXFR1", "1h", start="2026-11-03T20:00:00+00:00", continuous_alias=True
+            )
+        adapter._api.kbars.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("start", "end"), [("1999-12-01", "2000-01-05"), ("2026-11-02", "2099-12-31")]
+    )
+    def test_a_daily_window_past_the_calendar_is_refused(self, start, end):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+
+        with pytest.raises(ValueError, match="session of calendar"):
+            adapter.fetch_ohlcv("TXFR1", "1d", start=start, end=end, continuous_alias=True)
+        adapter._api.kbars.assert_not_called()
+
     def test_short_range_issues_a_single_kbars_call(self):
         adapter = _make_adapter()
         adapter._api.kbars.return_value = _make_kbars_response()
