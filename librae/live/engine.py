@@ -6477,15 +6477,11 @@ class LiveTrader:
         if not self._executor.simulation and self._active_orders:
             # Exits queue behind working orders, so those are cancelled first;
             # a cancellation the venue has not confirmed retries next cycle.
-            # An order past its timeout is cancelled here like any other, and
-            # the account halts once, with this flatten's alert.
-            for tracked in self._active_orders:
-                if tracked.placement_attempted and self._live_order_timed_out(tracked):
-                    logger.warning(
-                        "%s order_id=%s is past its timeout; the operator flatten cancels it",
-                        tracked.request.symbol,
-                        tracked.order_id or "unassigned",
-                    )
+            timed_out = [
+                tracked
+                for tracked in self._active_orders
+                if tracked.placement_attempted and self._live_order_timed_out(tracked)
+            ]
             try:
                 self._cancel_active_orders()
             except ReportNotAppliedError as exc:
@@ -6500,6 +6496,17 @@ class LiveTrader:
                         exc.order, f"{exc}; the operator flatten waits for it"
                     )
                     return
+            finally:
+                # Ended here rather than by its timeout's cancel, it fails
+                # nothing: the account halts once, with this flatten's alert.
+                for tracked in timed_out:
+                    if tracked not in self._active_orders and tracked.status != "filled":
+                        logger.warning(
+                            "%s order_id=%s past its timeout ended %s in the operator flatten",
+                            tracked.request.symbol,
+                            tracked.order_id or "unassigned",
+                            tracked.status,
+                        )
             if self._active_orders:
                 self._flatten_waits += 1
                 summary = self._tracked_orders_summary()
@@ -6530,9 +6537,10 @@ class LiveTrader:
 
         Order work it is about to do is left to it, so an order is not
         cancelled twice in one cycle nor reported twice, and nothing halts the
-        account ahead of it. One requested while the cycle runs acts at the
-        start of the next; one requested as a flatten submits its exits leaves
-        them going out.
+        account ahead of it. A request that lands while the strategy's orders
+        go out stops them at the next order, for the next cycle's flatten to
+        drop; one that lands as a flatten submits its exits leaves them going
+        out.
         """
         with self._flatten_request_lock:
             requested = self._flatten_request is not None

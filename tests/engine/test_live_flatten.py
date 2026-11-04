@@ -698,7 +698,33 @@ class TestAPendingFlattenDoesTheCyclesOrderWork:
         assert bbb.status == "cancelled"
         assert _submitted(adapter) == ["BBB", "AAA"]
         _flattened_once(trader, events, alerts)
-        assert f"BBB order_id={bbb.order_id} is past its timeout" in caplog.text
+        [logged] = [record for record in caplog.records if "past its timeout" in record.message]
+        assert logged.message == (
+            f"BBB order_id={bbb.order_id} past its timeout ended cancelled in the operator flatten"
+        )
+
+    def test_a_timed_out_order_is_logged_once_it_ends_and_only_if_unfilled(self, caplog):
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        trader, _, _, bbb = _working_order_trader(adapter, now)
+        adapter.get_order.side_effect = lambda order_id, _symbol: _accepted(order_id)
+        adapter.cancel_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": "pending_cancel",
+        }
+        now[0] += timedelta(seconds=30)
+        trader.request_flatten("desk asked to close")
+
+        for _ in range(3):
+            trader._poll_cycle()
+        adapter.get_order.side_effect = lambda order_id, _symbol: _broker_report(
+            order_id=order_id, quantity=1.0
+        )
+        trader._poll_cycle()
+
+        assert bbb.status == "filled"
+        assert trader._halted is True
+        assert "past its timeout" not in caplog.text
 
     def test_an_order_restored_after_a_restart_is_cancelled_by_it_too(self):
         adapter = _adapter(below_minimum="")
@@ -797,6 +823,39 @@ class TestAPendingFlattenDoesTheCyclesOrderWork:
 
         assert aaa.status == "filled"
         assert bbb.placement_attempted is False
+        assert bbb.status == "cancelled"
+        assert _submitted(adapter) == ["AAA", "AAA"], "AAA's entry, then its exit; BBB never"
+        _flattened_once(trader, events, alerts)
+
+    def test_one_arriving_as_the_strategy_sends_its_orders_stops_them(self):
+        adapter = _adapter(below_minimum="")
+        trader, events, alerts = _trader(adapter)
+        trader._positions = {}
+
+        def place_order(signal):
+            trader.request_flatten("desk asked to close")
+            return _broker_report(order_id=signal["client_order_id"], quantity=signal["quantity"])
+
+        adapter.place_order.side_effect = place_order
+        complete = trader._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="AAA", quantity=1.0),
+                OrderIntent(action="long", symbol="BBB", quantity=1.0),
+            ],
+            _bars(),
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is False
+        assert _submitted(adapter) == ["AAA"]
+        [bbb] = trader._active_orders
+        assert bbb.placement_attempted is False
+
+        adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=signal["client_order_id"], quantity=signal["quantity"]
+        )
+        trader._poll_cycle()
+
         assert bbb.status == "cancelled"
         assert _submitted(adapter) == ["AAA", "AAA"], "AAA's entry, then its exit; BBB never"
         _flattened_once(trader, events, alerts)

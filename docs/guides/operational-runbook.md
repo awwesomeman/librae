@@ -354,8 +354,8 @@ To stop and close every position, call `trader.request_flatten(reason)`
 instead of halting and closing at the venue, which desynchronises the
 checkpoint. The loop cancels working orders, submits the exits, halts, and
 sends an **Operator Flatten** alert naming anything that remains open. An
-order that times out or ends at the venue meanwhile is cancelled or booked by
-the flatten without its own alert, and does not halt the account first. While
+order that times out, ends at the venue or fills past a risk limit meanwhile
+gets no alert of its own; check its `broker_orders` row. While
 the venue has not confirmed every cancelled order ended, it resends their
 cancels each cycle. A venue that confirms a cancel one cycle later makes one
 cycle's wait normal, so from the second cycle it sends **Operator Flatten
