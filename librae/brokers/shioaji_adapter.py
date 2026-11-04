@@ -339,9 +339,9 @@ class ShioajiAdapter:
                 same convention as CryptoAdapter.
             start/end: Taipei dates, as ``"YYYY-MM-DD"`` or a datetime (an
                 aware one counts by its Taipei date); ``end`` defaults to
-                today and needs ``start``. A daily window reaching past
-                either end of the trading calendar raises ``ValueError``
-                before any query: those dates have no sessions to place.
+                today and needs ``start``. A daily window the trading
+                calendar cannot place, at or past either end of its range,
+                raises ``ValueError`` before any query.
                 Returns only whole bars: intraday bars starting on these
                 dates and daily bars of these trading days, with the minutes
                 fetched as far either side as those bars reach (a TAIFEX

@@ -433,7 +433,7 @@ class TestFetchOhlcv:
         adapter._api.kbars.assert_not_called()
 
     @pytest.mark.parametrize(
-        ("start", "end"), [("1989-12-01", "1990-01-05"), ("2026-11-02", "2099-12-31")]
+        ("start", "end"), [("1999-12-01", "2000-01-05"), ("2026-11-02", "2099-12-31")]
     )
     def test_a_daily_window_past_the_calendar_is_refused(self, start, end):
         adapter = _make_adapter()

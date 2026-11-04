@@ -33,11 +33,12 @@ _TAIFEX_CALENDARS = frozenset({TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR}
 _FULL_DAY_CALENDARS = _TAIFEX_CALENDARS | {ALWAYS_OPEN_CALENDAR}
 _TAIPEI = "Asia/Taipei"
 
-# First date every calendar is built from. Without it exchange_calendars
-# builds only the last 20 years, counted from the day the process starts, so
-# a bar older than that reads as out of session and the cutoff moves daily.
-# Each calendar is built once per process.
-_CALENDAR_START = "1990-01-01"
+# First date a calendar is built from, or its bound_min if that is later.
+# Without it exchange_calendars builds only the last 20 years, counted from
+# the day the process starts, so a bar older than that reads as out of
+# session and the cutoff moves daily. Not earlier: a calendar keeps every
+# trading minute in memory, in every process that uses it.
+_CALENDAR_START = pd.Timestamp("2000-01-01")
 
 
 def _timestamp(value: object) -> pd.Timestamp:
@@ -64,9 +65,11 @@ def _exchange_calendar(calendar_id: str) -> ExchangeCalendar:
     except InvalidCalendarName as exc:
         raise ValueError(f"unknown calendar_id={calendar_id!r}") from exc
     except ValueError:
-        # The calendar records holidays only from a later date (its
-        # bound_min); the library's default window is what it can build.
-        return xcals.get_calendar(exchange_id)
+        # The only way to learn a calendar's bound_min through the public API.
+        earliest = type(xcals.get_calendar(exchange_id)).bound_min()
+        if earliest is None or earliest <= _CALENDAR_START:
+            raise
+        return xcals.get_calendar(exchange_id, start=earliest)
 
 
 # Closures TWSE and TAIFEX announced that exchange_calendars' XTAI does not
