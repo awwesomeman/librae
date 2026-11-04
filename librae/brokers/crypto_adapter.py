@@ -31,7 +31,7 @@ from librae.config.symbols import (
     SymbolInfo,
     canonicalize_price_to_increment,
 )
-from librae.core.utils import interval_to_timedelta, validate_contract_month
+from librae.core.utils import interval_to_timedelta, to_canonical, validate_contract_month
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import (
     BrokerUnavailableError,
@@ -42,7 +42,6 @@ from librae.live.executor import (
 
 from .base import (
     AdapterInfo,
-    drop_incomplete_ohlcv,
     find_position,
     validate_order_signal,
     validate_time_in_force,
@@ -187,6 +186,30 @@ def _walk_back(fetch_page: Callable[[int | None], list[list]], limit: int) -> li
 
 
 logger = logging.getLogger(__name__)
+
+
+def _drop_current_candle(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Drop the newest candle unless the period after it has ended too.
+
+    ccxt documents that the last (current) candle "may be incomplete until
+    the candle is closed (until the next candle starts)". This host's clock
+    cannot see when the venue starts the next one: a candle whose close has
+    passed here may still be filling there, behind clock offset or trade
+    aggregation. A later candle in the response shows that the one before it
+    closed; with none, the newest is held back for one more period.
+    """
+    if df.empty:
+        return df
+    canonical = to_canonical(timeframe)
+    period = (
+        pd.offsets.MonthBegin(int(canonical[2:]))
+        if canonical.startswith("MN")
+        else interval_to_timedelta(canonical)
+    )
+    newest = pd.Timestamp(df["ts"].iloc[-1])
+    if newest + period + period > pd.Timestamp(time.time(), unit="s", tz="UTC"):
+        return df.iloc[:-1]
+    return df
 
 
 def _decimal_places_tick(raw_precision: object) -> float | None:
@@ -616,9 +639,9 @@ class CryptoAdapter:
             timeframe: Candle interval (e.g. "1h", "1d").
             limit: Max number of candles to fetch.
             since: Start timestamp in milliseconds (CCXT convention).
-            drop_incomplete: If True, drop the last candle which may still
-                be forming. Essential for live monitoring to avoid computing
-                indicators on partial data.
+            drop_incomplete: If True, drop the venue's newest candle unless
+                the period after it has also ended, so only closed candles
+                are returned (see ``_drop_current_candle``).
             continuous_alias: Unsupported for this CCXT path; continuous
                 klines are research data, not an orderable identity.
             contract_month: Expected ``YYYYMM`` for a delivery-future symbol.
@@ -672,8 +695,8 @@ class CryptoAdapter:
                 timeframe,
             )
 
-        if drop_incomplete and len(df) > 0:
-            df = drop_incomplete_ohlcv(df, timeframe)
+        if drop_incomplete:
+            df = _drop_current_candle(df, timeframe)
 
         return df
 
