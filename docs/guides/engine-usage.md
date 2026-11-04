@@ -328,8 +328,9 @@ to unwind legs that already filled. A `PortfolioWeights` rebalance whose
 grouped leg fails that way stops whole without halting, because replanning
 it would send the same leg again. The strategy's decision on the next bar
 replans from the current book: on the bar where a rebalance stopped the
-strategy is not evaluated again, so a leg goes out at most once per bar,
-except that a restart before the bar is recorded may send it once more.
+strategy is not evaluated, so a leg goes out at most once per bar, except
+that a restart before the bar is recorded, or a store outage while the stop
+is written, may send it once more.
 If a broker adds native combo support in
 the future, use that adapter-specific capability instead. Before anything is
 submitted, live planning preflights each group as a whole: a grouped `close`

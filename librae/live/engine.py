@@ -4770,8 +4770,9 @@ class LiveTrader:
     ) -> bool:
         """Advance serial target legs using only one current market snapshot.
 
-        A leg that fails or is refused ends the rebalance short of its
-        targets; the bar is recorded, so that no decision on it replans them.
+        Returns whether the rebalance is complete. A leg that fails or is
+        refused ends it short of its targets, and the trader remembers the
+        bar, so that no decision on it replans them.
         """
         while self._live_rebalance is not None and not self._active_orders and not self._halted:
             if not self._queue_next_live_rebalance_order(
