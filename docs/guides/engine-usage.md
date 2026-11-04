@@ -326,8 +326,10 @@ times out, the engine cancels that group's remaining legs and alerts —
 unrelated groups and independent intents keep executing; it does not attempt
 to unwind legs that already filled. A `PortfolioWeights` rebalance whose
 grouped leg fails that way stops whole without halting, because replanning
-it would send the same leg again; the next decision replans from the
-current book. If a broker adds native combo support in
+it would send the same leg again. The strategy's decision on the next bar
+replans from the current book; a rebalance that stopped while continuing on a
+bar is not decided again on that bar, so a leg goes out at most once per bar.
+If a broker adds native combo support in
 the future, use that adapter-specific capability instead. Before anything is
 submitted, live planning preflights each group as a whole: a grouped `close`
 for a symbol with no open position, or a grouped leg with no reference
@@ -598,7 +600,7 @@ for example when a withdrawal left the account holding less than the ledger.
   once per cause and symbol until a check for that symbol passes or
   `reset_halt()`.
 - Nothing halts. The orders queued after it still go out, and a target
-  rebalance stops until the next decision.
+  rebalance stops until the next bar's decision.
 - A group is checked once, before its first leg is sent, since its legs go
   out serially and withholding a later leg would leave the earlier ones
   unhedged. Its entry legs are charged in full, and only the exits queued
@@ -1040,7 +1042,8 @@ adapter at submission.
   `persisted: false` when its checkpoint failed, and each order group failure
   that leaves the account trading records `group_failed`. `halted` and
   `group_failed` carry the alert's title as `reason` and its cause as
-  `message`. A refused reset stays a `decision_skipped` event
+  `message`; `group_failed` also says in `rebalance_stopped` whether it
+  stopped a target rebalance. A refused reset stays a `decision_skipped` event
   (`halt_reset_blocked`). How a failing sink is handled is in the
   [callback contract](../../architecture.md#livetrader-callback-signatures-writing-your-own-db-sink-or-notifier).
 - Threading: `halt()`, `reset_halt()` and `halt_reset_readiness()` are safe

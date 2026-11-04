@@ -255,12 +255,12 @@ class TestPausedOrders:
         assert trader._live_rebalance is not None
         assert _skips(events) == []
 
-        complete = trader._continue_live_rebalance(_thin_aaa_bars(), NEXT_BAR)
+        stopped = trader._continue_live_rebalance(_thin_aaa_bars(), NEXT_BAR)
 
-        assert complete is True
+        assert stopped is False
+        assert trader._live_rebalance is None
         assert _effects(adapter) == [("AAA", "reduce"), ("AAA", "close")]
         assert trader._positions == {}
-        assert trader._live_rebalance is None
         [skip] = _skips(events)
         assert skip.detail["symbols"] == ["BBB"]
 
@@ -326,9 +326,10 @@ class TestPausedOrders:
         trader.pause_entries("desk review")
 
         trader._advance_live_orders()
-        complete = trader._continue_live_rebalance(_thin_aaa_bars(), NEXT_BAR)
+        stopped = trader._continue_live_rebalance(_thin_aaa_bars(), NEXT_BAR)
 
-        assert complete is True
+        assert stopped is False
+        assert trader._live_rebalance is None
         assert _effects(adapter) == [("AAA", "reduce"), ("AAA", "close")]
         assert trader._positions == {}
         dropped, ended = _skips(events)
@@ -345,9 +346,10 @@ class TestPausedOrders:
         )
 
         trader.resume_entries()
-        complete = trader._continue_live_rebalance(_thin_aaa_bars(), NEXT_BAR)
+        stopped = trader._continue_live_rebalance(_thin_aaa_bars(), NEXT_BAR)
 
-        assert complete is True
+        assert stopped is False
+        assert trader._live_rebalance is None
         assert _effects(adapter) == [("AAA", "reduce"), ("AAA", "close"), ("BBB", "open")]
         assert set(trader._positions) == {"BBB"}
         assert _skips(events) == []

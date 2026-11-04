@@ -2344,16 +2344,17 @@ class LiveTrader:
             for sibling in list(self._active_orders):
                 if sibling.request.group_id == group_id:
                     self._cancel_tracked_order(sibling)
-        scope = "other groups unaffected"
-        if self._live_rebalance is not None:
+        rebalance_stopped = self._live_rebalance is not None
+        if rebalance_stopped:
             self._live_rebalance = None
             self._persist_state()
-            scope = "the target rebalance stopped"
-        logger.error("%s: %s", title, message)
+        scope = "the target rebalance stopped" if rebalance_stopped else "other groups unaffected"
+        outcome = f"{message}; group {group_id!r} cancelled, {scope}"
+        logger.error("%s: %s", title, outcome)
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}",
-            message=f"{message}; group {group_id!r} cancelled, {scope}.",
+            message=f"{outcome}.",
         )
         self._record_runtime_event(
             "group_failed",
@@ -2362,6 +2363,7 @@ class LiveTrader:
                 "group_id": group_id,
                 "client_order_id": request.client_order_id,
                 "message": message,
+                "rebalance_stopped": rebalance_stopped,
             },
             symbol=request.symbol,
         )
@@ -4605,11 +4607,8 @@ class LiveTrader:
                 decided_at=ts,
             )
             self._persist_state()
-            return self._continue_live_rebalance(
-                bars,
-                ts,
-                lagged_adv_by_symbol=lagged_adv_by_symbol,
-            )
+            self._continue_live_rebalance(bars, ts, lagged_adv_by_symbol=lagged_adv_by_symbol)
+            return self._live_rebalance is None and not self._active_orders and not self._halted
 
         try:
             requests = self._plan_live_orders(
@@ -4764,7 +4763,13 @@ class LiveTrader:
         *,
         lagged_adv_by_symbol: dict[str, float] | None = None,
     ) -> bool:
-        """Advance serial target legs using only one current market snapshot."""
+        """Advance serial target legs using only one current market snapshot.
+
+        Returns whether a leg it queued ended the rebalance short of its
+        targets, failing or refused (or halting the account), rather than the
+        rebalance finishing or waiting on a leg.
+        """
+        stopped = False
         while self._live_rebalance is not None and not self._active_orders and not self._halted:
             if not self._queue_next_live_rebalance_order(
                 bars,
@@ -4773,7 +4778,8 @@ class LiveTrader:
             ):
                 break
             self._advance_live_orders()
-        return self._live_rebalance is None and not self._active_orders and not self._halted
+            stopped = self._live_rebalance is None
+        return stopped
 
     def _timed_order_call[T](self, callback: Callable[[], T]) -> T:
         started = perf_counter()
@@ -5772,6 +5778,7 @@ class LiveTrader:
                 if not pd.isna(lagged_adv):
                     lagged_adv_by_symbol[symbol] = float(lagged_adv)
 
+        rebalance_stopped = False
         if (
             not execution_already_committed
             and not self._executor.simulation
@@ -5779,7 +5786,7 @@ class LiveTrader:
             and not self._active_orders
             and not self._halted
         ):
-            self._continue_live_rebalance(
+            rebalance_stopped = self._continue_live_rebalance(
                 raw_bars,
                 ts,
                 lagged_adv_by_symbol=lagged_adv_by_symbol,
@@ -5936,7 +5943,9 @@ class LiveTrader:
             self._commit_cycle_bars(audit_bars, audit_histories, ts)
             return feature_batch.as_of if feature_batch is not None else None
 
-        if live_rebalance_blocks_decisions:
+        # A rebalance stopped on this bar is replanned on the next one: the
+        # same bar and book would size the same leg and send it again.
+        if live_rebalance_blocks_decisions or rebalance_stopped:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
                     position.periods_held += 1
