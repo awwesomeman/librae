@@ -224,26 +224,33 @@ def validate_data_source_routes(
 ) -> None:
     """Refuse a run whose data source contradicts a symbol's route.
 
-    A registered symbol takes its ``instrument_type`` and ``venue_symbol``
-    from the registry unless overridden, and those two pick the market orders
-    go to. Moving it onto another source alone would read, say, perpetual
-    bars while trading spot, so the move must restate both. ``data_source``
-    names the run's one source, or ``"multi"`` for a mixed run, so it must
-    match what every symbol resolves to.
+    A registered symbol takes its ``data_source``, ``instrument_type`` and
+    ``venue_symbol`` from the registry unless overridden, and the last two
+    pick the market orders go to. Changing some of them while inheriting the
+    rest would read, say, spot bars while trading the perpetual, so an
+    override that changes any of the three must state all three.
+    ``data_source`` names the run's one source, or ``"multi"`` for a mixed
+    run, so it must match what every symbol resolves to; ``"multi"`` names no
+    source, so under it an unregistered symbol needs its own, and no symbol
+    may take ``"multi"`` as its own.
     """
     for symbol in symbols:
         registered = _BUILTIN_SYMBOLS.get(symbol)
         route = overrides.get(symbol, {})
         override_source = route.get("data_source")
-        if registered is not None and override_source not in (None, registered.data_source):
-            missing = [name for name in ("instrument_type", "venue_symbol") if name not in route]
-            if missing:
-                raise ValueError(
-                    f"instrument_overrides[{symbol!r}] moves registered symbol {symbol!r} "
-                    f"from data_source={registered.data_source!r} to {override_source!r} "
-                    f"but keeps its registered {missing}; set both instrument_type and "
-                    "venue_symbol there, since they pick where orders go"
-                )
+        if override_source == "multi":
+            raise ValueError(
+                f"instrument_overrides[{symbol!r}]['data_source']='multi' names no source; "
+                "set the source this symbol's bars come from"
+            )
+        if registered is not None:
+            _check_registered_route(symbol, registered, route)
+        elif override_source is None and data_source == "multi":
+            raise ValueError(
+                f"{symbol!r} is not registered and has no "
+                f"instrument_overrides[{symbol!r}]['data_source']; data_source='multi' "
+                "marks a run mixing sources and names none, so set the symbol's there"
+            )
         if data_source == "multi":
             continue
         resolved = override_source or (registered.data_source if registered else data_source)
@@ -260,6 +267,30 @@ def validate_data_source_routes(
                 f"routes to {resolved!r}; declare the matching data_source, or 'multi' "
                 f"for a run mixing sources{hint}"
             )
+
+
+_ROUTE_FIELDS = ("data_source", "instrument_type", "venue_symbol")
+
+
+def _check_registered_route(
+    symbol: str,
+    registered: SymbolInfo,
+    route: Mapping[str, object],
+) -> None:
+    changed = [
+        name for name in _ROUTE_FIELDS if name in route and route[name] != getattr(registered, name)
+    ]
+    missing = [name for name in _ROUTE_FIELDS if name not in route]
+    if changed and missing:
+        moved = ", ".join(f"{name}={route[name]!r}" for name in changed)
+        kept = ", ".join(f"{name}={getattr(registered, name)!r}" for name in missing)
+        raise ValueError(
+            f"instrument_overrides[{symbol!r}] changes registered symbol {symbol!r} to "
+            f"{moved} but inherits its registered {kept}; state all of data_source, "
+            "instrument_type and venue_symbol there, restating a registered value "
+            "where it still holds, since the source labels the bars and the other "
+            "two pick where orders go"
+        )
 
 
 @dataclass(frozen=True)
