@@ -4783,13 +4783,22 @@ class LiveTrader:
             self._cycle_order_seconds += perf_counter() - started
 
     def _advance_live_orders(self, *, submit_planned: bool = True) -> None:
-        """Poll or submit the head order; dependent orders stay serialized."""
+        """Poll or submit the head order; dependent orders stay serialized.
+
+        A requested flatten does this work itself, reading, booking and
+        cancelling every tracked order. Done here first, a timeout, a venue
+        cancel or a fill past a risk limit would halt the account, which then
+        refuses the flatten and leaves its positions open, and a queued order
+        would go out ahead of it.
+        """
         while self._active_orders and (
             not self._halted
             or self._has_active_recovery_orders()
             or self._active_orders[0].cancel_requested
             or self._active_orders[0].status == "cancel_pending"
         ):
+            if submit_planned and self._flatten_cancels_this_cycle():
+                return
             tracked = self._active_orders[0]
             request = tracked.request
             # The engine's own cancels finish here, as does any cancel of an
@@ -4800,8 +4809,6 @@ class LiveTrader:
                 and tracked.status == "cancel_pending"
                 and not _is_recovery_exit(request)
             ):
-                if submit_planned and self._flatten_cancels_this_cycle():
-                    return
                 try:
                     report = self._cancel_tracked_order(tracked)
                 except ReportNotAppliedError as exc:
@@ -4894,13 +4901,6 @@ class LiveTrader:
                             lambda request=request: self._executor.find_order(request)
                         )
                 except Exception as exc:
-                    if submit_planned and self._flatten_cancels_this_cycle():
-                        # Its pass reads the order again and cancels it by id.
-                        logger.exception(
-                            "Order status unavailable; left to the operator flatten: %s",
-                            request.client_order_id,
-                        )
-                        return
                     if not self._live_order_timed_out(tracked):
                         raise
                     logger.exception(
@@ -4937,9 +4937,6 @@ class LiveTrader:
                 # The venue answered with something that does not match the
                 # order, which may still be working: it stays tracked, under
                 # its timeout, and the rest of the cycle goes on.
-                if self._flatten_cancels_this_cycle():
-                    logger.error("%s; left to the operator flatten", failure)
-                    return
                 timed_out = self._live_order_timed_out(tracked)
                 self._alert_report_not_applied(
                     tracked,
@@ -6480,6 +6477,15 @@ class LiveTrader:
         if not self._executor.simulation and self._active_orders:
             # Exits queue behind working orders, so those are cancelled first;
             # a cancellation the venue has not confirmed retries next cycle.
+            # An order past its timeout is cancelled here like any other, and
+            # the account halts once, with this flatten's alert.
+            for tracked in self._active_orders:
+                if tracked.placement_attempted and self._live_order_timed_out(tracked):
+                    logger.warning(
+                        "%s order_id=%s is past its timeout; the operator flatten cancels it",
+                        tracked.request.symbol,
+                        tracked.order_id or "unassigned",
+                    )
             try:
                 self._cancel_active_orders()
             except ReportNotAppliedError as exc:
@@ -6520,14 +6526,22 @@ class LiveTrader:
         )
 
     def _flatten_cancels_this_cycle(self) -> bool:
-        """Whether a requested flatten will poll and cancel every tracked order this cycle.
+        """Whether a requested flatten will poll and cancel every tracked order.
 
         Order work it is about to do is left to it, so an order is not
-        cancelled twice in one cycle nor reported twice.
+        cancelled twice in one cycle nor reported twice, and nothing halts the
+        account ahead of it. One requested while the cycle runs acts at the
+        start of the next; one requested as a flatten submits its exits leaves
+        them going out.
         """
         with self._flatten_request_lock:
             requested = self._flatten_request is not None
-        return requested and not self._halted and not self._resume_unverified
+        return (
+            requested
+            and self._flatten_at is None
+            and not self._halted
+            and not self._resume_unverified
+        )
 
     def _clear_flatten_request(self, handled: tuple[int, str]) -> None:
         # A request that arrived after ``handled`` was read stays pending.

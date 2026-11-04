@@ -327,8 +327,8 @@ class TestAReportThatCannotBeAppliedStillCancels:
 
         def get_order(order_id, _symbol):
             polls.append(order_id)
-            # The flatten's own status read is the one answered about another order.
-            return _resting("another-order" if len(polls) == 2 else order_id)
+            # The flatten's status read, the cycle's first, is answered about another order.
+            return _resting("another-order" if len(polls) == 1 else order_id)
 
         adapter.get_order.side_effect = get_order
         trader.request_flatten("desk asked to close")
