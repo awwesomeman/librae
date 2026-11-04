@@ -6,6 +6,7 @@ All tests use mocks — no real API calls.
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -426,6 +427,69 @@ def test_fetch_ohlcv_drops_the_forming_bar_after_assembling_pages(monkeypatch):
     df = _paged_adapter(venue).fetch_ohlcv("BTC/USDT:USDT", "5m", limit=9000, drop_incomplete=True)
 
     assert _ms(df["ts"]) == venue.bar_ts[-9000:-1]
+
+
+def _candles_at(monkeypatch, now: str, starts: list[str], timeframe: str) -> list[str]:
+    """Fetch ``starts`` as the venue's newest candles at ``now``; return what survives."""
+    monkeypatch.setattr(
+        "librae.brokers.crypto_adapter.time",
+        SimpleNamespace(time=lambda: pd.Timestamp(now).timestamp()),
+    )
+    exchange = MagicMock()
+    exchange.fetch_ohlcv.return_value = [
+        [pd.Timestamp(start).value // 1_000_000, 1.0, 1.0, 1.0, 1.0, 1.0] for start in starts
+    ]
+    df = build_crypto_adapter(exchange).fetch_ohlcv(
+        "BTC/USDT:USDT", timeframe, limit=len(starts), drop_incomplete=True
+    )
+    return [ts.isoformat() for ts in df["ts"]]
+
+
+@pytest.mark.parametrize(
+    ("now", "starts", "kept"),
+    [
+        pytest.param(
+            "2026-09-21T00:12:30Z",
+            ["2026-09-21T00:05Z", "2026-09-21T00:10Z"],
+            ["2026-09-21T00:05:00+00:00"],
+            id="forming candle",
+        ),
+        pytest.param(
+            "2026-09-21T00:15:00.5Z",
+            ["2026-09-21T00:05Z", "2026-09-21T00:10Z"],
+            ["2026-09-21T00:05:00+00:00"],
+            id="closed here, but the venue has no later candle yet",
+        ),
+        pytest.param(
+            "2026-09-21T00:15:00.5Z",
+            ["2026-09-21T00:10Z", "2026-09-21T00:15Z"],
+            ["2026-09-21T00:10:00+00:00"],
+            id="a later candle shows the one before it closed",
+        ),
+        pytest.param(
+            "2026-09-21T00:20:00Z",
+            ["2026-09-21T00:05Z", "2026-09-21T00:10Z"],
+            ["2026-09-21T00:05:00+00:00", "2026-09-21T00:10:00+00:00"],
+            id="no candle for a whole period after it",
+        ),
+    ],
+)
+def test_drop_incomplete_holds_back_the_venues_current_candle(monkeypatch, now, starts, kept):
+    """A venue can still be filling a candle whose close has passed on this
+    host: sims recorded such candles with less volume than the venue's final
+    bar. Only a later candle, or a whole period without one, shows it closed."""
+    assert _candles_at(monkeypatch, now, starts, "5m") == kept
+
+
+@pytest.mark.parametrize(
+    ("now", "kept"),
+    [
+        ("2026-11-01T00:00:01Z", ["2026-09-01T00:00:00+00:00"]),
+        ("2026-12-01T00:00:00Z", ["2026-09-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00"]),
+    ],
+)
+def test_drop_incomplete_counts_a_monthly_period_in_calendar_months(monkeypatch, now, kept):
+    assert _candles_at(monkeypatch, now, ["2026-09-01T00:00Z", "2026-10-01T00:00Z"], "1M") == kept
 
 
 def test_fetch_ohlcv_warns_when_the_venue_has_less_history(monkeypatch, caplog):
