@@ -745,14 +745,14 @@ class TestDataSourceRoute:
             )
 
     @pytest.mark.parametrize(
-        ("supplied", "missing"),
+        ("supplied", "kept"),
         [
-            ({"instrument_type": "contract_perpetual"}, "venue_symbol"),
-            ({"venue_symbol": "BTC/USDT:USDT"}, "instrument_type"),
+            ({"instrument_type": "contract_perpetual"}, "venue_symbol='BTC/USDT'"),
+            ({"venue_symbol": "BTC/USDT:USDT"}, "instrument_type='spot'"),
         ],
     )
-    def test_source_override_needs_both_routing_fields(self, supplied, missing):
-        with pytest.raises(ValueError, match=rf"\['{missing}'\]"):
+    def test_source_override_needs_both_routing_fields_and_names_the_kept_one(self, supplied, kept):
+        with pytest.raises(ValueError, match=rf"keeps its registered {kept};"):
             self._cfg(
                 data_source="binance_perp",
                 overrides={"BTCUSDT": {"data_source": "binance_perp", **supplied}},
@@ -831,6 +831,56 @@ class TestDataSourceRoute:
         )
 
         assert resolve_symbol(config, "BTCUSDTPERP").data_source == "binance_perp"
+
+    def test_unregistered_symbol_without_a_source_in_a_mixed_run_is_refused(self):
+        with pytest.raises(ValueError, match=r"instrument_overrides\['FOO'\]\['data_source'\]"):
+            self._cfg(
+                ("BTCUSDT", "FOO"),
+                data_source="multi",
+                overrides={
+                    "FOO": {
+                        "instrument_type": "spot",
+                        "currency": "USDT",
+                        "data_adapter": "crypto",
+                    }
+                },
+            )
+
+    @pytest.mark.parametrize(
+        "moved",
+        [
+            {"instrument_type": "contract_perpetual"},
+            {"venue_symbol": "BTC/USDT:USDT"},
+            {"instrument_type": "contract_perpetual", "venue_symbol": "BTC/USDT:USDT"},
+        ],
+    )
+    def test_order_market_override_alone_is_refused(self, moved):
+        with pytest.raises(ValueError, match=r"keeps its registered data_source='binance_spot'"):
+            self._cfg(data_source="binance_spot", overrides={"BTCUSDT": moved})
+
+    def test_restating_the_registered_order_market_needs_no_source(self):
+        config = self._cfg(
+            data_source="binance_spot",
+            overrides={"BTCUSDT": {"instrument_type": "spot", "venue_symbol": "BTC/USDT"}},
+        )
+
+        assert resolve_symbol(config, "BTCUSDT").data_source == "binance_spot"
+
+    def test_order_market_override_with_a_stated_source_is_accepted(self):
+        config = self._cfg(
+            data_source="binance_spot",
+            overrides={
+                "BTCUSDT": {
+                    "data_source": "binance_spot",
+                    "instrument_type": "contract_perpetual",
+                    "venue_symbol": "BTC/USDT:USDT",
+                }
+            },
+        )
+
+        info = resolve_symbol(config, "BTCUSDT")
+
+        assert (info.data_source, info.instrument_type) == ("binance_spot", "contract_perpetual")
 
 
 class TestExecutablePriceIncrement:

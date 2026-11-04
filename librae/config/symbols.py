@@ -224,26 +224,28 @@ def validate_data_source_routes(
 ) -> None:
     """Refuse a run whose data source contradicts a symbol's route.
 
-    A registered symbol takes its ``instrument_type`` and ``venue_symbol``
-    from the registry unless overridden, and those two pick the market orders
-    go to. Moving it onto another source alone would read, say, perpetual
-    bars while trading spot, so the move must restate both. ``data_source``
-    names the run's one source, or ``"multi"`` for a mixed run, so it must
-    match what every symbol resolves to.
+    A registered symbol takes its ``data_source``, ``instrument_type`` and
+    ``venue_symbol`` from the registry unless overridden, and the last two
+    pick the market orders go to. Changing either side alone would read, say,
+    spot bars while trading the perpetual, so an override that moves the
+    source must restate both routing fields, and one that moves the order
+    market must restate the source. ``data_source`` names the run's one
+    source, or ``"multi"`` for a mixed run, so it must match what every
+    symbol resolves to, and under ``"multi"`` an unregistered symbol has no
+    source unless its override names one.
     """
     for symbol in symbols:
         registered = _BUILTIN_SYMBOLS.get(symbol)
         route = overrides.get(symbol, {})
         override_source = route.get("data_source")
-        if registered is not None and override_source not in (None, registered.data_source):
-            missing = [name for name in ("instrument_type", "venue_symbol") if name not in route]
-            if missing:
-                raise ValueError(
-                    f"instrument_overrides[{symbol!r}] moves registered symbol {symbol!r} "
-                    f"from data_source={registered.data_source!r} to {override_source!r} "
-                    f"but keeps its registered {missing}; set both instrument_type and "
-                    "venue_symbol there, since they pick where orders go"
-                )
+        if registered is not None:
+            _check_registered_route(symbol, registered, route)
+        elif override_source is None and data_source == "multi":
+            raise ValueError(
+                f"{symbol!r} is not registered and has no "
+                f"instrument_overrides[{symbol!r}]['data_source']; data_source='multi' "
+                "marks a run mixing sources and names none, so set the symbol's there"
+            )
         if data_source == "multi":
             continue
         resolved = override_source or (registered.data_source if registered else data_source)
@@ -260,6 +262,40 @@ def validate_data_source_routes(
                 f"routes to {resolved!r}; declare the matching data_source, or 'multi' "
                 f"for a run mixing sources{hint}"
             )
+
+
+_ORDER_ROUTE_FIELDS = ("instrument_type", "venue_symbol")
+
+
+def _check_registered_route(
+    symbol: str,
+    registered: SymbolInfo,
+    route: Mapping[str, object],
+) -> None:
+    override_source = route.get("data_source")
+    if override_source not in (None, registered.data_source):
+        missing = [name for name in _ORDER_ROUTE_FIELDS if name not in route]
+        if missing:
+            kept = ", ".join(f"{name}={getattr(registered, name)!r}" for name in missing)
+            raise ValueError(
+                f"instrument_overrides[{symbol!r}] moves registered symbol {symbol!r} "
+                f"from data_source={registered.data_source!r} to {override_source!r} "
+                f"but keeps its registered {kept}; set both instrument_type and "
+                "venue_symbol there, since they pick where orders go"
+            )
+    changed = [
+        name
+        for name in _ORDER_ROUTE_FIELDS
+        if name in route and route[name] != getattr(registered, name)
+    ]
+    if changed and override_source is None:
+        moved = ", ".join(f"{name}={route[name]!r}" for name in changed)
+        raise ValueError(
+            f"instrument_overrides[{symbol!r}] moves registered symbol {symbol!r} "
+            f"to {moved} but keeps its registered data_source="
+            f"{registered.data_source!r}, whose bars describe the registered "
+            "instrument; set data_source there too"
+        )
 
 
 @dataclass(frozen=True)

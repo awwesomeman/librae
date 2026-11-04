@@ -611,10 +611,14 @@ those names.
 
 `RunConfig.data_source` names the run's one source, or `multi` for a run
 mixing sources, and construction refuses it when a symbol resolves elsewhere,
-instead of letting the registry's value win unnoticed. A registered symbol
-keeps its registered `instrument_type` and `venue_symbol`, which pick the
-market orders go to, so an override moving it to another `data_source` must
-restate both: perpetual bars over the registered spot route would trade spot.
+instead of letting the registry's value win unnoticed. `multi` names no
+source, so under it an unregistered symbol must set its own `data_source` in
+`instrument_overrides`. A registered symbol keeps its registered
+`instrument_type` and `venue_symbol`, which pick the market orders go to, and
+its registered `data_source`, so an override that changes one side must
+restate the other: perpetual bars over the registered spot route would trade
+spot, and a perpetual route over the registered spot source would label spot
+bars as the perpetual's.
 
 `quantity_step`, `min_quantity`, `min_notional`, and a fixed `price_increment`
 are stable, cross-mode execution facts. The core rounds quantities down before
