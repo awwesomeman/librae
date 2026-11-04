@@ -447,6 +447,42 @@ class TestGroupFailureIsRecorded:
         assert _submitted(adapter) == ["AAA", "AAA"], "the next bar's decision sends it once"
         assert len(_of_type(events, "group_failed")) == 2
 
+    def test_a_bar_retried_after_the_stop_is_not_decided_on_either(self):
+        """A checkpoint failure after the stop leaves the bar for the next poll to retry."""
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = _refusing_aaa("rejected")
+        strategy = _SameTargets({"BBB": 0.0})
+        trader, events, _ = _trader(adapter, strategy=strategy)
+        bar_times = _continue_on_the_next_bar(trader, strategy.weights)
+        trader._positions = {
+            symbol: replace(_position(symbol), group_id="pair") for symbol in ("AAA", "BBB")
+        }
+        persist = trader._persist_state
+        failed: list[bool] = []
+
+        def persist_failing_once_the_bar_executed(*orders):
+            if not failed and trader._last_execution_bar_ts.get("AAA") == bar_times[-1]:
+                failed.append(True)
+                raise OSError(OUTAGE)
+            persist(*orders)
+
+        trader._persist_state = persist_failing_once_the_bar_executed
+        with pytest.raises(OSError, match=OUTAGE):
+            _next_bar(trader, bar_times)
+        trader._process_cycle(
+            {symbol: _make_ohlcv_at(bar_times) for symbol in SYMBOLS}, bar_times[-1]
+        )
+
+        assert failed == [True]
+        assert _submitted(adapter) == ["AAA"]
+        assert strategy.calls == 0
+        assert len(_of_type(events, "group_failed")) == 1
+
+        _next_bar(trader, bar_times)
+
+        assert strategy.calls == 1
+        assert _submitted(adapter) == ["AAA", "AAA"]
+
     def test_a_rebalance_an_unfunded_entry_stopped_is_not_decided_again_on_that_bar(self):
         adapter = _adapter(below_minimum="")
         adapter.get_balance.return_value = {"free": 0.0, "used": 0.0, "total": 0.0}
