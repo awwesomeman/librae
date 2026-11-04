@@ -444,8 +444,10 @@ only after its interval close; fixed-duration bars use `ts + timeframe`, while
 calendar-aligned bars use the actual segment/session close. Adapters drop a
 final still-forming interval. The crypto adapter also holds back a newest
 candle whose close has passed, until a later candle appears or one more period
-ends: the venue may still be filling it, and the engine keeps the first
-version of a bar it receives. A Shioaji date window returns whole bars only:
+ends: ccxt documents the last candle as possibly incomplete until the next one
+starts, and a decision taken on a short candle cannot be redone. A poll as
+long as the bar can then leave decisions a bar late. A Shioaji date window
+returns whole bars only:
 intraday bars that start on its dates and daily bars of its trading days, with
 the minutes fetched as far either side as those bars reach. Keeping the
 vendor's bar start avoids shifting shortened or session-ending bars to an

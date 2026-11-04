@@ -46,17 +46,16 @@ def _candle(start: datetime, volume: float) -> list[float]:
 
 
 def test_a_candle_the_venue_is_still_filling_is_neither_decided_nor_recorded(monkeypatch):
-    clock = {"now": CLOSE + timedelta(milliseconds=500)}
+    # Warm up mid-bar first, so the short candle reaches the steady-state poll.
+    clock = {"now": CLOSE - timedelta(minutes=2)}
     monkeypatch.setattr(
         "librae.brokers.crypto_adapter.time",
         SimpleNamespace(time=lambda: clock["now"].timestamp()),
     )
     venue = _FillingVenue()
     starts = [CLOSE - timedelta(minutes=5 * n) for n in range(4, 0, -1)]
-    # Half a second past the close here, the venue has not started the next
-    # candle and still lacks the last trades of this one.
     venue.candles = [_candle(start, FINAL_VOLUME) for start in starts[:-1]]
-    venue.candles.append(_candle(starts[-1], 90.0))
+    venue.candles.append(_candle(starts[-1], 40.0))
 
     decided: list[tuple[pd.Timestamp, float]] = []
     recorded: list[tuple[datetime, float]] = []
@@ -92,6 +91,12 @@ def test_a_candle_the_venue_is_still_filling_is_neither_decided_nor_recorded(mon
         clock=lambda: clock["now"],
     )
 
+    trader._poll_cycle()
+    assert trader.warmup_ready
+    # Half a second past the close here, the venue has not started the next
+    # candle and still lacks the last trades of this one.
+    clock["now"] = CLOSE + timedelta(milliseconds=500)
+    venue.candles[-1] = _candle(starts[-1], 90.0)
     trader._poll_cycle()
     clock["now"] = CLOSE + timedelta(seconds=30)
     venue.candles[-1] = _candle(starts[-1], FINAL_VOLUME)
