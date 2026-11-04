@@ -327,7 +327,8 @@ bars = binance.fetch_ohlcv(
 
 For a `RunConfig`, use `candidate.canonical_symbol`,
 `candidate.instrument_override()`, and `candidate.cost_override()` to build the
-two existing per-symbol maps programmatically. Discovery never guesses
+two existing per-symbol maps programmatically; `instrument_override()` names no
+`data_source`, so a run mixing sources adds it. Discovery never guesses
 commission, tax, margin policy, account, or trading calendar.
 
 ### Broker API compatibility
@@ -613,12 +614,12 @@ those names.
 mixing sources, and construction refuses it when a symbol resolves elsewhere,
 instead of letting the registry's value win unnoticed. `multi` names no
 source, so under it an unregistered symbol must set its own `data_source` in
-`instrument_overrides`. A registered symbol keeps its registered
-`instrument_type` and `venue_symbol`, which pick the market orders go to, and
-its registered `data_source`, so an override that changes one side must
-restate the other: perpetual bars over the registered spot route would trade
-spot, and a perpetual route over the registered spot source would label spot
-bars as the perpetual's.
+`instrument_overrides`, and no symbol may set `multi` there. A registered
+symbol's `data_source` labels its bars, and for a crypto symbol its
+`instrument_type` and `venue_symbol` pick the market orders go to, so an
+override that changes any of the three must state all three: the inherited
+ones would describe a different instrument than the overridden ones, and
+the bars, their label and the order market would disagree.
 
 `quantity_step`, `min_quantity`, `min_notional`, and a fixed `price_increment`
 are stable, cross-mode execution facts. The core rounds quantities down before
