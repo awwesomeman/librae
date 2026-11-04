@@ -843,11 +843,12 @@ class LiveExecutor:
                 raise ValueError("filled report is missing broker execution timestamp")
             if commission_raw is None:
                 raise ValueError("filled report is missing broker-confirmed commission/fee")
-            if filled_quantity < requested_quantity - EPSILON and status not in (
-                "cancelled",
-                "rejected",
-            ):
-                status = "partial"
+            if filled_quantity < requested_quantity - EPSILON:
+                # A partly filled order the venue is cancelling stays
+                # cancel_pending: read as partial, the engine would send its
+                # cancel again.
+                if status not in ("cancelled", "rejected", "cancel_pending"):
+                    status = "partial"
             elif status not in ("cancelled", "rejected"):
                 status = "filled"
         elif status in ("partial", "filled"):

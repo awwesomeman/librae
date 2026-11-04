@@ -14,7 +14,9 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from librae.core.run_config import RiskPolicy
 from librae.core.strategy import OrderIntent
+from librae.live.executor import LiveExecutor
 from librae.live.state import MemoryLiveStateStore
 
 from tests.engine.live_factories import TEST_CLOCK_NOW
@@ -384,3 +386,64 @@ class TestAHaltCancelsEveryUnconfirmedOrder:
         assert adapter.cancel_order.call_args.args[0] == aaa.order_id
         assert trader._active_orders == []
         assert len(_exactly(alerts, "Order Timeout")) == 1
+
+
+class TestAPartlyFilledOrderTheVenueIsCancelling:
+    """A part fill does not hide a pending cancel, nor a fill past a risk limit."""
+
+    def test_the_report_keeps_its_cancel_pending_status(self):
+        trader, _, _ = _trader(_resting_adapter())
+        aaa = _buy_aaa(trader)
+
+        pending = LiveExecutor.normalize_report(
+            aaa.request, _partly_filled(aaa.order_id, "PendingCancel")
+        )
+        whole = LiveExecutor.normalize_report(
+            aaa.request, {**_partly_filled(aaa.order_id, "PendingCancel"), "filled": 1.0}
+        )
+
+        assert (pending.status, pending.filled_quantity) == ("cancel_pending", 0.5)
+        assert whole.status == "filled"
+
+    def test_a_halt_sends_its_cancel_once_while_the_venue_finishes_it(self):
+        adapter = _resting_adapter()
+        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(order_id)
+        adapter.cancel_order.side_effect = lambda order_id, _s: _partly_filled(
+            order_id, "PendingCancel"
+        )
+        trader, alerts, _ = _trader(adapter)
+        aaa = _buy_aaa(trader)
+        trader.halt("desk asked to stop")
+        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(
+            order_id, "PendingCancel"
+        )
+
+        for _ in range(3):
+            trader._poll_cycle()
+
+        adapter.cancel_order.assert_called_once()
+        assert aaa.status == "cancel_pending"
+        assert trader._halt_cancels_pending is True
+
+        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(order_id, "canceled")
+        trader._poll_cycle()
+
+        assert trader._active_orders == []
+        assert trader._positions["AAA"].quantity == pytest.approx(0.5)
+        assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
+
+    @pytest.mark.parametrize("status", ["PendingCancel", "canceled"])
+    def test_a_fill_it_carries_past_a_risk_limit_halts(self, status):
+        adapter = _resting_adapter()
+        trader, alerts, _ = _trader(adapter)
+        aaa = _buy_aaa(trader)
+        trader._risk_policy = RiskPolicy(max_position_weight=0.0001)
+        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(order_id, status)
+        adapter.cancel_order.side_effect = lambda order_id, _s: _partly_filled(order_id, "canceled")
+
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        [breach] = _exactly(alerts, "Post-fill Risk Breach")
+        assert "AAA confirmed weight" in breach["message"]
+        assert aaa.filled_quantity == pytest.approx(0.5)

@@ -4953,6 +4953,19 @@ class LiveTrader:
                 if timed_out:
                     self._cancel_timed_out_order(tracked, None, status_error=exc)
                 return
+            # Whatever its status, a report can carry a fill: a cancel the venue
+            # has not finished, or one that ended the order part filled.
+            if (
+                report.filled_quantity > prior_filled_quantity + EPSILON
+                and request.position_effect in ("open", "add")
+            ):
+                risk_violation = self._post_fill_risk_violation()
+                if risk_violation is not None:
+                    self._halt_live(
+                        title="Post-fill Risk Breach",
+                        message=risk_violation,
+                    )
+                    return
             if report.status == "cancel_pending":
                 # The venue is cancelling it on its own; its outcome is polled,
                 # and one that reverts to working is under its timeout again.
@@ -4975,17 +4988,6 @@ class LiveTrader:
                 ):
                     return
                 continue
-            if (
-                report.filled_quantity > prior_filled_quantity + EPSILON
-                and request.position_effect in ("open", "add")
-            ):
-                risk_violation = self._post_fill_risk_violation()
-                if risk_violation is not None:
-                    self._halt_live(
-                        title="Post-fill Risk Breach",
-                        message=risk_violation,
-                    )
-                    return
             if report.status != "filled" and self._live_order_timed_out(tracked):
                 self._cancel_timed_out_order(tracked, report)
                 return
