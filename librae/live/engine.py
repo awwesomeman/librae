@@ -6538,9 +6538,8 @@ class LiveTrader:
         Order work it is about to do is left to it, so an order is not
         cancelled twice in one cycle nor reported twice, and nothing halts the
         account ahead of it. A request that lands while the strategy's orders
-        go out stops them at the next order, for the next cycle's flatten to
-        drop; one that lands as a flatten submits its exits leaves them going
-        out.
+        go out stops them at the next order, for the flatten to drop; one
+        that lands as a flatten submits its exits leaves them going out.
         """
         with self._flatten_request_lock:
             requested = self._flatten_request is not None
