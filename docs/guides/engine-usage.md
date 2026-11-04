@@ -442,7 +442,10 @@ Input timestamps must be timezone-aware and every adapter/ETL path must use
 the same convention: `ts` is the UTC bar-start instant. A bar becomes eligible
 only after its interval close; fixed-duration bars use `ts + timeframe`, while
 calendar-aligned bars use the actual segment/session close. Adapters drop a
-final still-forming interval. A Shioaji date window returns whole bars only:
+final still-forming interval. The crypto adapter also holds back a newest
+candle whose close has passed, until a later candle appears or one more period
+ends: the venue may still be filling it, and the engine keeps the first
+version of a bar it receives. A Shioaji date window returns whole bars only:
 intraday bars that start on its dates and daily bars of its trading days, with
 the minutes fetched as far either side as those bars reach. Keeping the
 vendor's bar start avoids shifting shortened or session-ending bars to an
