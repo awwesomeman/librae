@@ -339,7 +339,9 @@ class ShioajiAdapter:
                 same convention as CryptoAdapter.
             start/end: Taipei dates, as ``"YYYY-MM-DD"`` or a datetime (an
                 aware one counts by its Taipei date); ``end`` defaults to
-                today and needs ``start``.
+                today and needs ``start``. A daily window reaching past
+                either end of the trading calendar raises ``ValueError``
+                before any query: those dates have no sessions to place.
                 Returns only whole bars: intraday bars starting on these
                 dates and daily bars of these trading days, with the minutes
                 fetched as far either side as those bars reach (a TAIFEX
@@ -858,7 +860,12 @@ class ShioajiAdapter:
 def _to_date(dt: datetime | str) -> date:
     """The Taipei date of ``dt``; a naive datetime is read as Taipei time."""
     if isinstance(dt, str):
-        return datetime.strptime(dt[:10], "%Y-%m-%d").date()
+        # A string with a time would have to be read in some time zone; pass
+        # a datetime for that, so there is one rule for it.
+        try:
+            return date.fromisoformat(dt)
+        except ValueError:
+            raise ValueError(f"expected a 'YYYY-MM-DD' date string, got {dt!r}") from None
     if dt.tzinfo is not None:
         return pd.Timestamp(dt).tz_convert(_TAIPEI).date()
     return dt.date()
