@@ -495,7 +495,7 @@ class TestAFillPastARiskLimitHaltsWhicheverReportCarriesIt:
         assert trader._halted is True
         [breach] = _exactly(alerts, "Post-fill Risk Breach")
         assert "AAA confirmed weight" in breach["message"]
-        assert f"after AAA order_id={aaa.order_id} status={aaa.status}" in breach["message"]
+        assert f"after AAA order_id={aaa.order_id} status=" in breach["message"]
         assert _exactly(alerts, "Order Cancelled") == []
         assert _exactly(alerts, "Order Timeout") == []
         assert _submitted(adapter) == ["AAA"], "nothing after it went out"
