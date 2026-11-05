@@ -1442,7 +1442,7 @@ class LiveTrader:
     # How long past a bar's close the symbols that have it wait for a
     # required symbol due the same bar. A venue starts each symbol's next
     # candle at its own time, and an adapter releases a bar only then (58
-    # Binance perpetuals took 0.5 to 12 seconds after a close on 2026-11-05),
+    # Binance perpetuals took 0.8 to 12.2 seconds after a close on 2026-11-05),
     # so one poll can hold a bar for some symbols and not others. Deciding
     # then would read the rest a bar stale, which a backtest never does. Past
     # the hold the late symbols are decided on their own, a poll later.
@@ -3166,30 +3166,47 @@ class LiveTrader:
 
         A symbol is due the event when the bar after its newest one closes
         by the event's close on its own calendar, so a market that is shut
-        then does not hold the rest.
+        then does not hold the rest. Nothing is held when the next poll
+        comes after the following bar closes: live then keeps only each
+        symbol's newest bar and would skip the held one.
         """
         now = self._utc_now()
-        required = [symbol for symbol in frames if symbol not in self._optional_symbols]
+        next_poll = now + timedelta(seconds=self._poll_seconds)
+        closes = {
+            symbol: frame.set_index("ts")[AVAILABLE_AT_COLUMN] for symbol, frame in frames.items()
+        }
+
+        def next_close(symbol: str, after: pd.Timestamp) -> pd.Timestamp | None:
+            subscription = self._market_data_subscriptions[symbol]
+            try:
+                return pd.Timestamp(
+                    next_expected_close(
+                        after.to_pydatetime(),
+                        timeframe=subscription.timeframe,
+                        calendar_id=subscription.calendar_id,
+                    )
+                )
+            except ValueError:  # outside the calendar: nothing to wait for
+                return None
+
         for event_ts in sorted(candidates):
             released = candidates[event_ts]
             event = pd.Timestamp(event_ts)
-            event_close = min(
-                frames[symbol].set_index("ts").at[event, AVAILABLE_AT_COLUMN] for symbol in released
-            )
+            event_close = min(closes[symbol][event] for symbol in released)
             if now >= event_close + self.COHORT_HOLD:
                 continue
+            following = [
+                close for symbol in released if (close := next_close(symbol, event)) is not None
+            ]
+            if not following or next_poll >= min(following):
+                continue
             late = []
-            for symbol in required:
+            for symbol in frames:
                 newest = pd.Timestamp(frames[symbol]["ts"].iloc[-1])
-                if symbol in released or newest >= event:
+                if symbol in self._optional_symbols or symbol in released or newest >= event:
                     continue
-                subscription = self._market_data_subscriptions[symbol]
-                due = next_expected_close(
-                    newest.to_pydatetime(),
-                    timeframe=subscription.timeframe,
-                    calendar_id=subscription.calendar_id,
-                )
-                if due <= event_close:
+                due = next_close(symbol, newest)
+                if due is not None and due <= event_close:
                     late.append(symbol)
             if late:
                 logger.info(

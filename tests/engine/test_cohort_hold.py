@@ -28,8 +28,8 @@ class _Hold(Strategy):
         return []
 
 
-def _bars(through: pd.Timestamp, start: str = "2026-01-01T00:00Z") -> pd.DataFrame:
-    ts = pd.date_range(start, through, freq="h")
+def _bars(through: pd.Timestamp, start: str, freq: str) -> pd.DataFrame:
+    ts = pd.date_range(start, through, freq=freq)
     return pd.DataFrame(
         {"ts": ts, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0}
     )
@@ -42,6 +42,8 @@ def _trader(
     *,
     calendars: dict[str, str] | None = None,
     start: str = "2026-01-01T00:00Z",
+    timeframe: str = "H1",
+    poll_seconds: int = 0,
 ):
     symbols = ["A", "B"]
     calendars = calendars or {symbol: "24/7" for symbol in symbols}
@@ -64,6 +66,8 @@ def _trader(
         config=make_test_cfg(
             mode="sim",
             symbols=symbols,
+            timeframe=timeframe,
+            poll_seconds=poll_seconds,
             instrument_overrides={
                 symbol: {
                     "instrument_type": "spot",
@@ -77,7 +81,11 @@ def _trader(
         ),
         batch_feature_fn=features,
         adapter={
-            symbol: (lambda *_args, symbol=symbol, **_kwargs: _bars(newest[symbol], start))
+            symbol: (
+                lambda *_args, symbol=symbol, **_kwargs: _bars(
+                    newest[symbol], start, "min" if timeframe == "M1" else "h"
+                )
+            )
             for symbol in symbols
         },
         cost_model=CostModel.zero(),
@@ -137,3 +145,22 @@ def test_a_symbol_whose_market_is_shut_does_not_hold_the_rest():
     trader._poll_cycle()
 
     assert decided[-1] == (friday + pd.Timedelta(hours=1), ["A"])
+
+
+def test_nothing_is_held_when_the_next_poll_comes_after_the_next_bar_closes():
+    """Live keeps only each symbol's newest bar, so with minute bars and
+    55-second polls a bar held now would be skipped at the next poll."""
+    bar = pd.Timestamp("2026-01-01T02:00Z")
+    newest = {"A": bar - pd.Timedelta(minutes=1), "B": bar - pd.Timedelta(minutes=1)}
+    clock = {"now": (bar + pd.Timedelta(seconds=30)).to_pydatetime()}
+    decided: list = []
+    trader = _trader(
+        newest, clock, decided, start="2026-01-01T01:57Z", timeframe="M1", poll_seconds=55
+    )
+    trader._poll_cycle()
+
+    newest["A"] = bar
+    clock["now"] = (bar + pd.Timedelta(minutes=1, seconds=5)).to_pydatetime()
+    trader._poll_cycle()
+
+    assert decided[-1] == (bar, ["A"])
