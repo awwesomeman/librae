@@ -619,11 +619,14 @@ jobs:
               assert write_run_bars(sim_run, subscription, frame.drop(columns="entry_signal")) == 3
 
               # A backtest save must not take over, clear or relabel an engine's run.
-              for mode in ("backtest", "sim"):
+              # The backtest save reaches the database and is refused by the
+              # mode in the run's identity; the sim save is refused up front.
+              refusals = {"backtest": "different immutable identity", "sim": "stores backtest runs"}
+              for mode, refusal in refusals.items():
                   try:
                       save(sim_run, mode=mode, store_bars=True)
-                  except ValueError:
-                      pass
+                  except ValueError as error:
+                      assert refusal in str(error), error
                   else:
                       raise AssertionError(f"a {mode} save onto a sim run was accepted")
               cursor.execute("SELECT mode FROM backtest_runs WHERE run_id = %s", (sim_run,))
