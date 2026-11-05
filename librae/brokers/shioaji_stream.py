@@ -5,11 +5,11 @@ queries during the session, and live data is to come from the quote
 subscription, which costs no traffic
 (https://sinotrade.github.io/zh/tutor/limit/). So a live poll is answered
 from subscribed ticks, aggregated into the minutes ``kbars()`` would return,
-and ``kbars()`` is asked only for the minutes before the subscription and
-for minutes the stream may have missed. This is NautilusTrader's split of
-``request_bars`` for history and ``subscribe_bars`` for what follows, and
-Shioaji's own quote manager tutorial, whose tick callback only appends and
-whose bars are aggregated by the reader
+and ``kbars()`` settles only the minutes the stream cannot vouch for. This is
+NautilusTrader's request-then-subscribe split for bars
+(https://github.com/nautechsystems/nautilus_trader/blob/develop/docs/concepts/data/index.md),
+and Shioaji's quote manager tutorial, whose tick callback only appends and
+whose reader aggregates
 (https://sinotrade.github.io/zh/tutor/advanced/quote_manager_basic/).
 
 A trade belongs to the minute it happened in, start included and end
@@ -19,12 +19,16 @@ minute. Built that way from historical ticks, TXFR1 for the trading days
 2026-11-04 and 2026-11-05 and MXFR1 for 2026-11-05, all 3,414 minutes equal
 ``kbars()``.
 
-A minute is served as complete only when nothing can be missing from it, so
-before the subscription and after a gap it waits until ``kbars()`` has
-settled it. A gap shows as a tick whose cumulative volume does not follow
-the previous tick's, or as a lost connection. NautilusTrader's order-book
-recovery treats a sequence gap the same way: stop emitting, recover once
-from a snapshot, resume.
+A tick whose cumulative volume follows the previous tick's shows that no
+trade between them was missed. ``kbars()`` settles what that cannot show:
+the minutes before the subscription, the minutes around a tick that does not
+follow on or a lost connection, and each segment's last minutes, which no
+later tick of the segment follows. Until then a minute is not served as
+complete. NautilusTrader's order-book recovery treats a sequence gap the same
+way: stop emitting, recover once from a snapshot, resume
+(https://github.com/nautechsystems/nautilus_trader/blob/develop/docs/developer_guide/adapters.md).
+A trade missed after a thin contract's last tick shows only at its next
+tick, so its minute can be released short and is then revised.
 """
 
 from __future__ import annotations
@@ -51,14 +55,15 @@ _SETTLE_NS = SEGMENT_END_SETTLE.value
 _EPOCH = datetime(1970, 1, 1)
 _MICROSECOND = timedelta(microseconds=1)
 
-# A subscription delivers ticks from about when it is acknowledged. The first
-# minute it holds whole starts after that time plus this margin by the host
-# clock, so a clock somewhat off the exchange's cannot claim a minute early.
+# The stream is taken to hold every trade from the first minute starting this
+# long after the subscription is acknowledged by the host clock (assumed, not
+# measured). kbars() settles that minute before any streamed one is served,
+# so only a subscription starting a minute late would matter.
 _SUBSCRIBE_MARGIN_NS = 2 * 1_000_000_000
 
-# One contract refills at most this often, so a stream that keeps breaking
-# costs a few queries an hour rather than one a minute.
-_REFILL_SPACING_NS = 5 * _MINUTE_NS
+# kbars() refills, and retries of a failed seed, of one contract come at most
+# this often, so a stream that keeps breaking costs a few queries an hour.
+_QUERY_SPACING_NS = 5 * _MINUTE_NS
 
 # kbars() queries the streams of one session may spend in a Taipei day.
 # Shioaji allows 270 during the session for everything the account runs, a
@@ -70,9 +75,11 @@ _DAILY_KBARS_BUDGET = 100
 # volume check then reports as a gap.
 _INBOX_SIZE = 200_000
 
-# Solace session events Shioaji forwards: the session went down, failed to
-# connect, or is reconnecting (https://sinotrade.github.io/zh/tutor/callback/event_cb/).
+# Solace session events Shioaji forwards
+# (https://sinotrade.github.io/zh/tutor/callback/event_cb/): the session went
+# down, failed to connect, or is reconnecting; and a refused subscription.
 _CONNECTION_LOST_EVENTS = frozenset({1, 2, 12})
+_SUBSCRIPTION_REFUSED_EVENT = 4
 
 _COLUMNS = ["ts", "open", "high", "low", "close", "volume"]
 
@@ -82,9 +89,7 @@ def _now_ns() -> int:
 
 
 def _tick_ns(at: datetime) -> int:
-    """UTC epoch nanoseconds of a tick time, naive ones read as Taipei time."""
-    if at.tzinfo is not None:
-        return pd.Timestamp(at).as_unit("ns").value
+    """UTC epoch nanoseconds of a tick's naive Taipei wall-clock time."""
     return (at - _EPOCH) // _MICROSECOND * 1000 - _TAIPEI_UTC_OFFSET_NS
 
 
@@ -101,8 +106,7 @@ def _next_minute_after(at_ns: int) -> int:
 class _MinuteBook:
     """One contract's minutes: settled ones from ``kbars()``, then streamed ones."""
 
-    def __init__(self, contract: Any, stream_code: str, calendar_id: str) -> None:
-        self.contract = contract
+    def __init__(self, stream_code: str, calendar_id: str) -> None:
         self.stream_code = stream_code
         self.calendar_id = calendar_id
         self.first_day: date | None = None
@@ -111,6 +115,7 @@ class _MinuteBook:
         self.history: dict[int, tuple[float, ...]] = {}
         self.final_before: int | None = None
         self.last_refill_ns: int | None = None
+        self.seed_retry_ns: int | None = None  # set while a seed is owed
         # Minutes built from ticks. The stream holds every trade from
         # covered_from on; None while it holds none for certain.
         self.minutes: dict[int, list[float]] = {}
@@ -118,6 +123,7 @@ class _MinuteBook:
         self.last_total: int | None = None
         self.last_minute: int | None = None
         self.segment: tuple[int, int] | None = None  # (a minute in it, its close)
+        self.ended_segment: int | None = None  # close of the last segment handed to kbars()
 
     # -- ticks ---------------------------------------------------------------
 
@@ -127,7 +133,7 @@ class _MinuteBook:
 
     def _minute_of(self, at_ns: int) -> tuple[int | None, bool]:
         """The kbars() minute a trade at ``at_ns`` counts in, and whether it
-        is the first in a trading segment."""
+        is the first of its trading segment here (having ended the last)."""
         minute = at_ns - at_ns % _MINUTE_NS
         if self.segment is not None:
             seen, close = self.segment
@@ -135,14 +141,20 @@ class _MinuteBook:
                 return minute, False
             if close <= at_ns < close + _MINUTE_NS:
                 return close - _MINUTE_NS, False
-        start = pd.Timestamp(minute, tz=UTC)
-        try:
-            period_start(start, "1m", self.calendar_id)
-        except ValueError:
-            return None, False
-        close = segment_closes(pd.DatetimeIndex([start]), "1m", self.calendar_id)[0]
-        self.segment = (minute, close.value)
-        return minute, True
+        # The minute itself, or for a closing print the one before it.
+        for candidate in (minute, minute - _MINUTE_NS):
+            start = pd.Timestamp(candidate, tz=UTC)
+            try:
+                period_start(start, "1m", self.calendar_id)
+            except ValueError:
+                continue
+            close = segment_closes(pd.DatetimeIndex([start]), "1m", self.calendar_id)[0].value
+            new_segment = self.segment is None or self.segment[1] != close
+            if new_segment and self.segment is not None:
+                self._end_segment(self.segment[1])
+            self.segment = (candidate, close)
+            return candidate, new_segment
+        return None, False
 
     def add_tick(self, at_ns: int, price: float, volume: int, total: int) -> None:
         minute, new_segment = self._minute_of(at_ns)
@@ -188,6 +200,22 @@ class _MinuteBook:
             row[2] = min(row[2], price)
             row[3] = price
             row[4] += volume
+
+    def end_segment(self, now_ns: int) -> None:
+        if self.segment is not None and now_ns >= self.segment[1]:
+            self._end_segment(self.segment[1])
+
+    def _end_segment(self, close: int) -> None:
+        """Hand a closed segment's last minutes to kbars(): a trade missed
+        after its last tick would show at no later tick of the segment, and
+        the next segment may restart the cumulative volume."""
+        if self.ended_segment == close:
+            return
+        self.ended_segment = close
+        if self.covered_from is None:
+            return  # every streamed minute already waits for kbars()
+        self._settle_streamed()
+        self.covered_from = max(self.covered_from, close)
 
     def connection_lost(self) -> None:
         self._settle_streamed()
@@ -240,7 +268,8 @@ class _MinuteBook:
 
         A minute is final once a later one is in the answer, or once it
         closed ``SEGMENT_END_SETTLE`` before the query (see
-        ``drop_incomplete_ohlcv``).
+        ``drop_incomplete_ohlcv``), unless the stream holds trades in a
+        later minute the answer lacks: then kbars() is running late.
         """
         if minutes.empty and (self.history or self.minutes):
             # Shioaji answers empty once the daily traffic cap is spent
@@ -255,13 +284,31 @@ class _MinuteBook:
         values = minutes[["open", "high", "low", "close", "volume"]].itertuples(
             index=False, name=None
         )
-        self.history = {
-            start: tuple(map(float, row)) for start, row in zip(starts, values, strict=True)
-        }
+        answer = {start: tuple(map(float, row)) for start, row in zip(starts, values, strict=True)}
+        newest = max(starts, default=None)
         settled = queried_ns - _SETTLE_NS
         final_before = settled - settled % _MINUTE_NS
-        if starts:
-            final_before = max(final_before, max(starts))
+        if newest is not None and any(
+            newest < m < final_before
+            for m in self.minutes
+            if self.covered_from is not None and m >= self.covered_from
+        ):
+            # The stream holds trades in a minute the answer lacks, so
+            # kbars() is running late: only the minutes before its newest are
+            # final, and settled ones after that stay as they were.
+            logger.warning(
+                "Shioaji kbars() for %s ends at %s, before trades the stream holds; "
+                "its later minutes wait for the next refill",
+                self.stream_code,
+                pd.Timestamp(newest, tz=UTC).isoformat(),
+            )
+            kept = self.final_before if self.final_before is not None else newest
+            answer = {m: row for m, row in answer.items() if m < newest}
+            answer.update((m, row) for m, row in self.history.items() if newest <= m < kept)
+            final_before = max(newest, kept)
+        elif newest is not None:
+            final_before = max(final_before, newest)
+        self.history = answer
         self.final_before = final_before
         self.first_day = first_day
         self.minutes = {m: row for m, row in self.minutes.items() if m >= final_before}
@@ -309,12 +356,12 @@ class ShioajiBarStream:
         self._queries_today = 0
 
     # -- SDK callbacks: they only append, as Shioaji asks of quote callbacks.
-    # The SDK drops an exception raised in one without a trace.
+    # SDK 1.7.10 dropped an exception raised in one without a trace on
+    # 2026-11-05.
 
     def _on_tick(self, *args: Any) -> None:
         # The streaming tutorial passes (exchange, tick); the SDK stub
-        # declares the tick alone, and SDK 1.7.10 passed only that on
-        # 2026-11-05, so a two-parameter callback raised unseen.
+        # declares the tick alone, which is what SDK 1.7.10 passed.
         tick = args[-1]
         self._inbox.append(
             (
@@ -328,9 +375,11 @@ class ShioajiBarStream:
             )
         )
 
-    def _on_event(self, _resp_code: int, event_code: int, _info: str, event: str) -> None:
+    def _on_event(self, _resp_code: int, event_code: int, info: str, event: str) -> None:
         if event_code in _CONNECTION_LOST_EVENTS:
             self._inbox.append(("lost", event))
+        elif event_code == _SUBSCRIPTION_REFUSED_EVENT:
+            self._inbox.append(("refused", f"{event} {info}"))
 
     def _on_session_down(self) -> None:
         self._inbox.append(("lost", "session down"))
@@ -359,23 +408,33 @@ class ShioajiBarStream:
             if stream_code not in self._subscribed:
                 self._subscribe(contract, stream_code)
             now = _now_ns()
+            book.end_segment(now)
             seed = book.final_before is None or book.first_day is None or first_day < book.first_day
+            if seed and book.seed_retry_ns is not None and now < book.seed_retry_ns:
+                raise RuntimeError(
+                    f"Shioaji kbars() has not seeded {stream_code}'s minutes from {first_day}; "
+                    f"it is asked again from {pd.Timestamp(book.seed_retry_ns, tz=UTC)}"
+                )
             if not seed:
                 book.skip_closed_market()
             due = (
                 book.holds_gap()
                 and book.covered_from is not None
                 and now >= book.covered_from + _SETTLE_NS
-                and (book.last_refill_ns is None or now >= book.last_refill_ns + _REFILL_SPACING_NS)
+                and (book.last_refill_ns is None or now >= book.last_refill_ns + _QUERY_SPACING_NS)
             )
             if seed or due:
                 query_from = first_day if seed else book.first_day
                 self._spend_query(stream_code)
-                if not seed:
+                if seed:
+                    book.seed_retry_ns = now + _QUERY_SPACING_NS
+                else:
                     book.last_refill_ns = now
                 book.take_kbars(
                     self._query_minutes(contract, query_from, last_day), query_from, now
                 )
+                if seed and book.first_day == query_from:
+                    book.seed_retry_ns = None
                 book.skip_closed_market()
                 logger.info(
                     "Shioaji kbars() %s %s; %s",
@@ -399,7 +458,7 @@ class ShioajiBarStream:
             logger.info("Shioaji %s follows %s instead of %s", code, stream_code, book.stream_code)
             del self._books[code]
             self._release(book.stream_code)
-        book = _MinuteBook(contract, stream_code, calendar_id)
+        book = _MinuteBook(stream_code, calendar_id)
         self._books[code] = book
         if stream_code in self._subscribed:
             book.start_stream(_next_minute_after(_now_ns() + _SUBSCRIBE_MARGIN_NS))
@@ -454,6 +513,9 @@ class ShioajiBarStream:
                 self._subscribed.clear()
                 for book in self._books.values():
                     book.connection_lost()
+                continue
+            if item[0] == "refused":
+                logger.warning("Shioaji refused a quote subscription change: %s", item[1])
                 continue
             _, code, at, close, volume, total, simtrade = item
             if simtrade:

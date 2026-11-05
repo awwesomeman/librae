@@ -38,6 +38,7 @@ class FakeSession:
         self.calls: list[tuple[str, str]] = []
         self.kbars_calls: list[tuple[str, str]] = []
         self.kbars_answer_empty = False
+        self.kbars_lag = pd.Timedelta(0)  # how far behind the trades its answers run
         self.on_tick = self.on_event = self.on_session_down = None
 
     def set_on_tick_fop_v1_callback(self, callback):
@@ -88,7 +89,7 @@ class FakeSession:
     def kbars(self, *, contract, start, end):
         self.kbars_calls.append((start, end))
         code = contract.target_code or contract.code
-        now = self.clock.now.tz_convert(_TAIPEI).tz_localize(None)
+        now = self.clock.now.tz_convert(_TAIPEI).tz_localize(None) - self.kbars_lag
         rows: dict[pd.Timestamp, list] = {}
         for trade_code, wall, price, volume in self.trades:
             if trade_code != code or wall >= now:
@@ -220,7 +221,7 @@ class TestSteadyPolling:
 
         polled = _poll(adapter, clock, "2026-11-05 13:46:01", "1d", limit=2)
 
-        assert len(session.kbars_calls) == 1
+        assert len(session.kbars_calls) == 2, "the seed, and the day session's end"
         assert polled.loc["15:00", "volume"] == 3 * 300
 
 
@@ -236,14 +237,24 @@ class TestMinuteRule:
         session.trade("2026-11-05 13:44:59.990", 103, 4)
         session.trade("2026-11-05 13:45:00.024", 104, 5)
 
+        clock.at("2026-11-05 13:45:30")
+        streamed = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True).set_index("ts")
         polled = _poll(adapter, clock, "2026-11-05 13:46:01")
 
-        assert len(session.kbars_calls) == 2
-        assert polled.loc["13:41"].tolist() == [100, 101, 100, 101, 3]
-        assert polled.loc["13:42"].tolist() == [102, 102, 102, 102, 3]
-        assert polled.loc["13:44"].tolist() == [103, 104, 103, 104, 9]
+        assert streamed.loc[_taipei("2026-11-05 13:41")].tolist() == [100, 101, 100, 101, 3]
+        assert streamed.loc[_taipei("2026-11-05 13:42")].tolist() == [102, 102, 102, 102, 3]
+        assert streamed.loc[_taipei("2026-11-05 13:44")].tolist() == [103, 104, 103, 104, 9]
+        assert len(session.kbars_calls) == 3, "the day session's end is settled by kbars()"
         expected = _exchange_minutes(adapter, clock, "2026-11-05 13:50")
         pd.testing.assert_frame_equal(polled, expected, check_dtype=False)
+
+    def test_a_closing_print_as_the_first_tick_seen_joins_the_last_minute(self):
+        from librae.brokers.shioaji_stream import _MinuteBook, _tick_ns
+
+        book = _MinuteBook("TXFK6", "XTAIFEX")
+        at = _tick_ns(datetime(2026, 11, 5, 13, 45, 0, 24000))
+
+        assert book._minute_of(at) == (_taipei("2026-11-05 13:44").value, True)
 
     def test_trial_matching_is_not_a_trade(self, adapter, session, clock):
         _poll(adapter, clock, "2026-11-05 08:30:00")
@@ -363,6 +374,41 @@ class TestGaps:
         assert len(session.kbars_calls) == 2
         assert held.index[-1] == "09:03", "09:04's last tick may not have been its last trade"
 
+    def test_a_late_kbars_answer_does_not_settle_what_it_lacks(self, adapter, session, clock):
+        self._streaming(adapter, session, clock)
+        session.trade("2026-11-05 09:05:10", 120, 4)
+        session.trade("2026-11-05 09:05:30", 121, 5, delivered=False)
+        session.trade("2026-11-05 09:05:50", 122, 6)
+        _trade_each_minute(session, "2026-11-05 09:06", "2026-11-05 09:13")
+        session.kbars_lag = pd.Timedelta(minutes=3)
+
+        late = _poll(adapter, clock, "2026-11-05 09:08:55")
+        session.kbars_lag = pd.Timedelta(0)
+        caught_up = _poll(adapter, clock, "2026-11-05 09:13:55")
+
+        assert late.index[-1] == "09:04", "kbars() lacks 09:06, which the stream holds"
+        assert len(session.kbars_calls) == 3
+        assert caught_up.loc["09:05"].tolist() == [120, 122, 120, 122, 15]
+        assert caught_up.index[-1] == "09:12"
+
+    def test_a_failed_seed_is_retried_after_a_pause(self, adapter, session, clock, monkeypatch):
+        answers = iter([RuntimeError("timeout")])
+
+        def kbars(**query):
+            error = next(answers, None)
+            if error is not None:
+                raise error
+            return FakeSession.kbars(session, **query)
+
+        monkeypatch.setattr(session, "kbars", kbars)
+        with pytest.raises(RuntimeError, match="timeout"):
+            _poll(adapter, clock, "2026-11-05 09:00:00")
+        with pytest.raises(RuntimeError, match="asked again"):
+            _poll(adapter, clock, "2026-11-05 09:01:00")
+        _poll(adapter, clock, "2026-11-05 09:05:00")
+
+        assert len(session.kbars_calls) == 1, "the failed query records no answer"
+
     def test_refills_stop_at_the_daily_budget(self, adapter, session, clock, monkeypatch):
         monkeypatch.setattr("librae.brokers.shioaji_stream._DAILY_KBARS_BUDGET", 1)
         self._streaming(adapter, session, clock)
@@ -374,12 +420,37 @@ class TestGaps:
 
 
 class TestSegments:
+    def test_a_missed_closing_print_is_settled_by_kbars(self, adapter, session, clock):
+        _poll(adapter, clock, "2026-11-05 08:30:00")
+        _trade_each_minute(session, "2026-11-05 08:45", "2026-11-05 13:44")
+        session.trade("2026-11-05 13:45:00.024", 150, 500, delivered=False)
+        session.trade("2026-11-05 15:00:00.100", 151, 2, total=2)  # the night restarts
+
+        minutes = _poll(adapter, clock, "2026-11-05 15:00:30")
+        daily = _poll(adapter, clock, "2026-11-05 15:00:31", "1d", limit=2)
+
+        assert minutes.loc["13:44"].tolist() == [144, 150, 143, 150, 503]
+        assert daily.loc["15:00", ["close", "volume"]].tolist() == [150, 3 * 300 + 500]
+
+    def test_the_segment_end_is_held_until_kbars_settles_it(self, adapter, session, clock):
+        _poll(adapter, clock, "2026-11-05 08:30:00")
+        _trade_each_minute(session, "2026-11-05 13:40", "2026-11-05 13:44")
+        # Asked just before: the next refill waits five minutes.
+        adapter._bar_stream._books["TXFR1"].last_refill_ns = _taipei("2026-11-05 13:44").value
+
+        held = _poll(adapter, clock, "2026-11-05 13:47:00")
+        settled = _poll(adapter, clock, "2026-11-05 13:49:00")
+
+        assert held.index[-1] == "13:43"
+        assert settled.index[-1] == "13:44"
+        assert len(session.kbars_calls) == 2
+
     @staticmethod
     def _night_streamed(adapter, session, clock) -> None:
         session.trade("2026-11-05 04:57:30", 99, 1)
         _poll(adapter, clock, "2026-11-05 04:58:00")
         session.trade("2026-11-05 04:59:30", 100, 3, total=3)
-        _poll(adapter, clock, "2026-11-05 05:00:30")  # settles what came before the stream
+        _poll(adapter, clock, "2026-11-05 05:01:30")  # settles the night's end
         assert len(session.kbars_calls) == 2
 
     @pytest.mark.parametrize("day_total", [2, 5], ids=["restarted", "carried"])
@@ -401,7 +472,7 @@ class TestSegments:
 
         polled = _poll(adapter, clock, "2026-11-05 08:46:30")
 
-        assert polled.index[-1] == "04:57", "the night may have traded after 04:59:30"
+        assert polled.index[-1] == "04:59", "08:45 waits for kbars()"
 
 
 def test_a_rolled_alias_follows_its_next_contract(adapter, session, clock):
@@ -448,5 +519,3 @@ def test_a_naive_tick_time_reads_as_taipei():
     from librae.brokers.shioaji_stream import _tick_ns
 
     assert _tick_ns(datetime(2026, 11, 5, 8, 45, 0, 1)) == _taipei("2026-11-05 08:45").value + 1000
-    aware = pd.Timestamp("2026-11-05 08:45", tz=_TAIPEI).to_pydatetime()
-    assert _tick_ns(aware) == _taipei("2026-11-05 08:45").value
