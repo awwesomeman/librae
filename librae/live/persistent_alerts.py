@@ -71,7 +71,9 @@ class PersistentAlerts:
         problem.message = message
         problem.clear_since = None
         if now - problem.notified_at < REPEAT_INTERVAL:
-            logger.debug("%s, seen %d times: %s", title, problem.seen, message)
+            # Visible at the default level, so the log shows a problem lasting
+            # between its alerts.
+            logger.info("%s, seen %d times: %s", title, problem.seen, message)
             return
         problem.notified_at = now
         self._notify(
@@ -136,7 +138,8 @@ class PersistentAlerts:
 
 
 def _duration(elapsed: timedelta) -> str:
-    minutes, seconds = divmod(int(elapsed.total_seconds()), 60)
+    # A clock stepped back would otherwise show a negative duration.
+    minutes, seconds = divmod(max(int(elapsed.total_seconds()), 0), 60)
     hours, minutes = divmod(minutes, 60)
     if hours:
         return f"{hours}h {minutes}m"
