@@ -996,8 +996,8 @@ adapter at submission.
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
   confirmed broker fills; a close below the venue minimum is skipped as above.
-  An exit that ends rejected, cancelled, or cancelled after its timeout is
-  skipped too, with a `decision_skipped` event (reason `close_rejected` or
+  An exit that ends rejected, cancelled, cancelled after its timeout, or ended
+  by a later halt's cancellation is skipped too, with a `decision_skipped` event (reason `close_rejected` or
   `close_cancelled`, carrying the venue's reason) and a **Close Rejected** or
   **Close Cancelled** alert, instead of halting and cancelling the other
   exits. That includes an `account_fault` refusal, since the flatten halts

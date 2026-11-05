@@ -21,7 +21,7 @@ from librae.core.executor import REASON_OPERATOR_FLATTEN
 from librae.core.run_config import RiskPolicy
 from librae.core.strategy import OrderIntent, PortfolioWeights, PositionState, Strategy
 from librae.live.executor import OrderBelowVenueMinimumError, OrderRejectedError, OrderRequest
-from librae.live.state import LiveRebalance, TrackedOrder
+from librae.live.state import LiveRebalance, MemoryLiveStateStore, TrackedOrder
 
 from tests.ccxt_standin import build_crypto_adapter, errors
 from tests.engine.live_factories import (
@@ -1118,3 +1118,77 @@ class TestRefusedRecoveryExit:
         [alert] = _titled(alerts, "Close Rejected: AAA")
         assert "no longer in the ledger" in alert["message"]
         assert "stays open" not in alert["message"]
+
+
+def _working_exits(adapter, now: list[datetime], store=None):
+    """A flattened, halted account whose exits rest at the venue, timing out after 30 seconds."""
+    adapter.place_order.side_effect = lambda signal: _accepted(signal["client_order_id"])
+    adapter.get_order.side_effect = lambda order_id, _symbol: _accepted(order_id)
+    kwargs = {"state_store": store} if store is not None else {}
+    trader, events, alerts = _trader(adapter, clock=lambda: now[0], **kwargs)
+    trader._live_order_timeout_seconds = 30
+    return trader, events, alerts
+
+
+class TestAnExitAHaltCancels:
+    """An exit a repeat halt cancels leaves its position open, so it is recorded as any failed exit."""
+
+    def test_one_the_halt_ends_at_once_is_recorded(self):
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        trader, events, alerts = _working_exits(adapter, now)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        aaa = trader._active_orders[0]
+        assert aaa.request.symbol == "AAA"
+
+        def cancel(order_id, _symbol):
+            if order_id == aaa.order_id:
+                raise RuntimeError("venue did not answer the cancel")
+            return {**_accepted(order_id), "status": "canceled"}
+
+        adapter.cancel_order.side_effect = cancel
+        now[0] += timedelta(seconds=30)
+        trader._poll_cycle()
+
+        assert len(_titled(alerts, "Order Timeout Cancellation Failed")) == 1
+        assert trader._active_orders == [aaa]
+        skips = _skips(events, "close_cancelled")
+        assert sorted(skip.symbol for skip in skips) == ["BBB", "DUST"]
+        assert all("in a halt's cancellation" in skip.detail["message"] for skip in skips)
+        assert sorted(a["title"].split("] ")[1] for a in _titled(alerts, "Close Cancelled")) == [
+            "Close Cancelled: BBB",
+            "Close Cancelled: DUST",
+        ]
+
+    def test_one_whose_cancel_ends_after_a_restart_is_recorded(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _adapter(below_minimum="")
+        adapter.get_position.side_effect = lambda request: {
+            "symbol": request.symbol,
+            "size": 1.0,
+            "avg_price": 100.0,
+            "unrealized_pnl": 0.0,
+        }
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _working_exits(adapter, now, store)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        adapter.cancel_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": "pending_cancel",
+        }
+        trader._halt_live(title="Ambiguous Restored Order", message="an exit cannot be found")
+        assert all(order.cancel_requested for order in trader._active_orders)
+
+        trader, events, _ = _working_exits(adapter, now, store)
+        adapter.get_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": "canceled",
+        }
+        trader._initialize_run()
+
+        assert trader._active_orders == []
+        [skip] = _skips(events, "close_cancelled")
+        assert skip.symbol == "AAA"
+        assert "in a halt's cancellation" in skip.detail["message"]

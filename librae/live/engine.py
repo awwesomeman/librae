@@ -4869,29 +4869,33 @@ class LiveTrader:
                     # ended the order: then it ends as any cancel does.
                     if self._halted:
                         self._alert_unapplied_while_halted(exc)
-                        return
-                    if tracked in self._active_orders:
+                    elif tracked in self._active_orders:
                         self._halt_live(title="Order Reconciliation Failed", message=str(exc))
                         return
-                    self._alert_unapplied(exc)
+                    else:
+                        self._alert_unapplied(exc)
                 if self._post_fill_risk_halted():
                     return
-                # Over age, the order fails as its timeout would have failed
-                # it, whichever cancel this was, a halt's of a recovery exit
-                # included, since its position stays open: a restart between
-                # the timeout's recorded cancel and its outcome leaves that to
-                # this pass. A younger order's cancel was a halt's, a
-                # flatten's or a failed group's, each alerting on its own, as
-                # are the cancels of a flatten still waiting on them. A
-                # restart drops a flatten request, so after one an over-age
-                # order fails as a timeout whichever cancel ended it.
-                if (
-                    tracked in self._active_orders
-                    or tracked.status not in ("cancelled", "rejected")
-                    or (self._halted and not _is_recovery_exit(request))
-                    or self._flatten_request is not None
-                    or not self._live_order_timed_out(tracked)
+                if tracked in self._active_orders or tracked.status not in (
+                    "cancelled",
+                    "rejected",
                 ):
+                    return
+                # Over age, the order fails as its timeout would have failed
+                # it, whichever cancel this was: a restart between the
+                # timeout's recorded cancel and its outcome leaves that to
+                # this pass, and drops a flatten request. A younger order's
+                # cancel was a halt's, a flatten's or a failed group's, each
+                # alerting on its own, as are the cancels of a flatten still
+                # waiting on them; but a recovery exit a halt cancelled leaves
+                # its position open, so it is recorded as any failed exit is.
+                if self._halted:
+                    if not _is_recovery_exit(request):
+                        return
+                    if not self._live_order_timed_out(tracked):
+                        self._report_exit_a_halt_ended(tracked)
+                        continue
+                elif self._flatten_request is not None or not self._live_order_timed_out(tracked):
                     return
                 if self._fail_group_or_halt(
                     tracked, title="Order Timeout", message=_timeout_message(tracked)
@@ -5627,8 +5631,34 @@ class LiveTrader:
                         tracked.request.client_order_id,
                         exc_info=exc,
                     )
+            finally:
+                if (
+                    self._halted
+                    and _is_recovery_exit(tracked.request)
+                    and tracked not in self._active_orders
+                    and tracked.status in ("cancelled", "rejected")
+                ):
+                    self._report_exit_a_halt_ended(tracked)
         if failure is not None:
             raise failure
+
+    def _report_exit_a_halt_ended(self, tracked: TrackedOrder) -> None:
+        """Record a recovery exit a halt's cancellation ended unfilled, as any failed exit is.
+
+        Its position stays open, and the halt's own alert names only the
+        orders it has not yet seen end.
+        """
+        request = tracked.request
+        position = self._positions.get(request.symbol)
+        self._report_skipped_close(
+            request.symbol,
+            quantity=request.quantity - tracked.filled_quantity,
+            held=position.quantity if position is not None else None,
+            ts=self._utc_now(),
+            reason=f"close_{tracked.status}",
+            title=f"Close {tracked.status.title()}",
+            cause=f"ended {tracked.status} in a halt's cancellation",
+        )
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
         """Process one symbol through the portfolio-cycle path."""
