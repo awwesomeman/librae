@@ -56,9 +56,10 @@ _EPOCH = datetime(1970, 1, 1)
 _MICROSECOND = timedelta(microseconds=1)
 
 # The stream is taken to hold every trade from the first minute starting this
-# long after the subscription is acknowledged by the host clock (assumed, not
-# measured). kbars() settles that minute before any streamed one is served,
-# so only a subscription starting a minute late would matter.
+# long after the subscription is acknowledged by the host clock. On
+# 2026-11-05 three resubscriptions to MXFR1 got their first tick 0.1-0.8 s
+# after subscribe(), none from before it; kbars() settles that minute before
+# any streamed one is served anyway.
 _SUBSCRIBE_MARGIN_NS = 2 * 1_000_000_000
 
 # kbars() refills, and retries of a failed seed, of one contract come at most
@@ -268,8 +269,8 @@ class _MinuteBook:
 
         A minute is final once a later one is in the answer, or once it
         closed ``SEGMENT_END_SETTLE`` before the query (see
-        ``drop_incomplete_ohlcv``), unless the stream holds trades in a
-        later minute the answer lacks: then kbars() is running late.
+        ``drop_incomplete_ohlcv``), unless the answer runs behind the
+        stream.
         """
         if minutes.empty and (self.history or self.minutes):
             # Shioaji answers empty once the daily traffic cap is spent
@@ -288,24 +289,29 @@ class _MinuteBook:
         newest = max(starts, default=None)
         settled = queried_ns - _SETTLE_NS
         final_before = settled - settled % _MINUTE_NS
-        if newest is not None and any(
-            newest < m < final_before
-            for m in self.minutes
-            if self.covered_from is not None and m >= self.covered_from
-        ):
-            # The stream holds trades in a minute the answer lacks, so
-            # kbars() is running late: only the minutes before its newest are
-            # final, and settled ones after that stay as they were.
+        # Every streamed trade happened, so an answer that lacks a streamed
+        # minute or counts fewer lots in it is running late from there.
+        late = min(
+            (
+                m
+                for m, row in self.minutes.items()
+                if m < final_before and (m not in answer or answer[m][4] < row[4])
+            ),
+            default=None,
+        )
+        if late is not None:
+            trusted = late if newest is None else min(late, newest)
             logger.warning(
-                "Shioaji kbars() for %s ends at %s, before trades the stream holds; "
-                "its later minutes wait for the next refill",
+                "Shioaji kbars() for %s runs behind the stream from %s; "
+                "its minutes from there wait for the next refill",
                 self.stream_code,
-                pd.Timestamp(newest, tz=UTC).isoformat(),
+                pd.Timestamp(late, tz=UTC).isoformat(),
             )
-            kept = self.final_before if self.final_before is not None else newest
-            answer = {m: row for m, row in answer.items() if m < newest}
-            answer.update((m, row) for m, row in self.history.items() if newest <= m < kept)
-            final_before = max(newest, kept)
+            # Settled minutes it has not reached yet stay as they were.
+            kept = self.final_before if self.final_before is not None else trusted
+            answer = {m: row for m, row in answer.items() if m < trusted}
+            answer.update((m, row) for m, row in self.history.items() if trusted <= m < kept)
+            final_before = max(trusted, kept)
         elif newest is not None:
             final_before = max(final_before, newest)
         self.history = answer

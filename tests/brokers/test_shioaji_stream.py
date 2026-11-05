@@ -374,19 +374,26 @@ class TestGaps:
         assert len(session.kbars_calls) == 2
         assert held.index[-1] == "09:03", "09:04's last tick may not have been its last trade"
 
-    def test_a_late_kbars_answer_does_not_settle_what_it_lacks(self, adapter, session, clock):
+    @pytest.mark.parametrize(
+        ("lag", "refill_at"),
+        [("3min", "09:08:55"), ("2min", "09:07:05")],
+        ids=["lacks-a-later-minute", "lacks-the-gap-minute"],
+    )
+    def test_a_late_kbars_answer_does_not_settle_what_it_lacks(
+        self, adapter, session, clock, lag, refill_at
+    ):
         self._streaming(adapter, session, clock)
         session.trade("2026-11-05 09:05:10", 120, 4)
         session.trade("2026-11-05 09:05:30", 121, 5, delivered=False)
         session.trade("2026-11-05 09:05:50", 122, 6)
         _trade_each_minute(session, "2026-11-05 09:06", "2026-11-05 09:13")
-        session.kbars_lag = pd.Timedelta(minutes=3)
+        session.kbars_lag = pd.Timedelta(lag)
 
-        late = _poll(adapter, clock, "2026-11-05 09:08:55")
+        late = _poll(adapter, clock, f"2026-11-05 {refill_at}")
         session.kbars_lag = pd.Timedelta(0)
         caught_up = _poll(adapter, clock, "2026-11-05 09:13:55")
 
-        assert late.index[-1] == "09:04", "kbars() lacks 09:06, which the stream holds"
+        assert late.index[-1] == "09:04", "09:05 waits for an answer that has it"
         assert len(session.kbars_calls) == 3
         assert caught_up.loc["09:05"].tolist() == [120, 122, 120, 122, 15]
         assert caught_up.index[-1] == "09:12"
@@ -431,6 +438,22 @@ class TestSegments:
 
         assert minutes.loc["13:44"].tolist() == [144, 150, 143, 150, 503]
         assert daily.loc["15:00", ["close", "volume"]].tolist() == [150, 3 * 300 + 500]
+
+    def test_a_late_answer_at_the_segment_end_keeps_the_streamed_close(
+        self, adapter, session, clock
+    ):
+        _poll(adapter, clock, "2026-11-05 08:30:00", "1d", limit=2)
+        _trade_each_minute(session, "2026-11-05 08:45", "2026-11-05 13:44")
+        session.trade("2026-11-05 13:45:00.024", 150, 500)
+        session.kbars_lag = pd.Timedelta(minutes=3)
+
+        held = _poll(adapter, clock, "2026-11-05 13:46:30", "1d", limit=2)
+        session.kbars_lag = pd.Timedelta(0)
+        settled = _poll(adapter, clock, "2026-11-05 13:51:31", "1d", limit=2)
+
+        assert "15:00" not in held.index
+        assert settled.loc["15:00", ["close", "volume"]].tolist() == [150, 3 * 300 + 500]
+        assert len(session.kbars_calls) == 3
 
     def test_the_segment_end_is_held_until_kbars_settles_it(self, adapter, session, clock):
         _poll(adapter, clock, "2026-11-05 08:30:00")
