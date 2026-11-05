@@ -628,8 +628,12 @@ id, a cumulative fill that went backwards) leaves the order tracked and under
 its timeout, alerts naming it, repeating while it lasts (see the runbook's
 [lasting problems](operational-runbook.md#lasting-problems)), and lets the
 rest of the cycle run; at startup it still fails closed. While an operator
-flatten is pending, any status that cannot be read or applied is left to the
-flatten's own cancel.
+flatten is pending, the order poll leaves every tracked order to it: the
+flatten reads, books and cancels each one, so an order past its timeout, ended
+by the venue or filled past a risk limit, or one whose status cannot be read
+or applied, does not halt the account first, which would refuse the flatten.
+A queued order is dropped, never sent. A request that arrives mid-cycle takes
+effect at the next order the cycle reaches.
 Operational/error
 halts cancel tracked strategy orders. A drawdown
 breach instead clears the pending strategy decision and keeps its emergency
