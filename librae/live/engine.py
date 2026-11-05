@@ -4902,7 +4902,7 @@ class LiveTrader:
                 # recorded, and a strategy order's end was the halt's to name.
                 if self._halted:
                     if _is_recovery_exit(request):
-                        self._report_exit_a_halt_ended(tracked)
+                        self._report_exit_a_halt_ended(tracked, in_halt_pass=False)
                         continue
                     return
                 # Over age, the order fails as its timeout would have failed
@@ -5670,7 +5670,7 @@ class LiveTrader:
                 ended_exits.append(tracked)
         for tracked in ended_exits:
             try:
-                self._report_exit_a_halt_ended(tracked)
+                self._report_exit_a_halt_ended(tracked, in_halt_pass=True)
             except Exception:
                 logger.exception(
                     "Skipped close not recorded for %s", tracked.request.client_order_id
@@ -5678,16 +5678,24 @@ class LiveTrader:
         if failure is not None:
             raise failure
 
-    def _report_exit_a_halt_ended(self, tracked: TrackedOrder) -> None:
+    def _report_exit_a_halt_ended(self, tracked: TrackedOrder, *, in_halt_pass: bool) -> None:
         """Record a recovery exit that ended short of a fill on a halted account.
 
         Its position stays open, and the halt's own alert names only the
-        orders it has not yet seen end. Which cancel ended it, the halt's or
+        orders it has not yet seen end. Which cancel ended it, a halt's or
         the exit's timeout's, or whether the venue ended it first, is not
-        known here, so the cause says only when it ended.
+        known, so the cause says only when it ended: ``in_halt_pass`` is
+        whether a halt's cancel pass, which goes to every order, saw it end.
         """
         request = tracked.request
         position = self._positions.get(request.symbol)
+        ended = f"ended {tracked.status}" if tracked.placement_attempted else "dropped unsent"
+        if in_halt_pass:
+            cause = f"{ended} while a halt cancelled the account's orders"
+            others = "the halt cancels the account's other orders too"
+        else:
+            cause = f"{ended} after a cancel the engine sent"
+            others = f"still tracked: {self._tracked_orders_summary() or 'none'}"
         self._report_skipped_close(
             request.symbol,
             quantity=request.quantity - tracked.filled_quantity,
@@ -5695,9 +5703,8 @@ class LiveTrader:
             ts=self._utc_now(),
             reason=f"close_{tracked.status}",
             title=f"Close {tracked.status.title()}",
-            cause=(f"ended {tracked.status}" if tracked.placement_attempted else "dropped unsent")
-            + " while a halt cancelled the account's orders",
-            others="the halt cancels the account's other orders too",
+            cause=cause,
+            others=others,
         )
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:

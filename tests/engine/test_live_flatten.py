@@ -1207,9 +1207,9 @@ class TestAnExitAHaltEnds:
         assert trader._active_orders == []
         [skip] = _skips(events, "close_cancelled")
         assert skip.symbol == "AAA"
-        assert skip.detail["message"] == (
-            "ended cancelled while a halt cancelled the account's orders"
-        )
+        assert skip.detail["message"] == "ended cancelled after a cancel the engine sent"
+        [close] = _titled(alerts, "Close Cancelled")
+        assert "still tracked: none" in close["message"]
         assert _titled(alerts, "Order Timeout") == []
 
     def test_a_failing_event_sink_does_not_hold_back_the_halt_s_cancels(self):
