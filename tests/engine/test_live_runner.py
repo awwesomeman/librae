@@ -3063,7 +3063,7 @@ class TestLiveTrader:
         assert order_adapter.place_order.call_count == (2 if mode == "live" else 0)
 
     def test_ohlcv_cache_incremental_fetch(self):
-        """After first full fetch, subsequent fetches use limit=2."""
+        """After first full fetch, subsequent fetches ask for a few bars."""
         calls: list[dict] = []
 
         def tracking_fetcher(symbol: str, timeframe: str, limit: int, **kwargs):
@@ -3075,7 +3075,35 @@ class TestLiveTrader:
 
         assert calls[0]["limit"] == 6  # warmup plus one possibly forming bar
         for c in calls[1:]:
-            assert c["limit"] == 2  # incremental
+            assert c["limit"] == 3  # the head and a new bar, past a dropped forming one
+
+    @pytest.mark.parametrize(
+        ("closed", "requests"),
+        [(1, [3]), (4, [3, 6])],
+        ids=["one-bar", "after-missed-polls"],
+    )
+    def test_a_poll_fetches_every_bar_back_to_the_cache(self, closed, requests):
+        """Bars that closed while polls failed, or that a source held back and
+        released together, all reach the cache."""
+        bars = _make_ohlcv_df(n=12)
+        visible = {"through": 5}
+        asked: list[int] = []
+
+        def fetcher(_symbol, _timeframe, limit, **_kwargs):
+            asked.append(limit)
+            return bars.iloc[: visible["through"]].tail(limit).reset_index(drop=True)
+
+        runner = make_live_runner(fetcher=fetcher)
+        runner._fetch_with_cache("BTCUSDT")
+        visible["through"] += closed
+        asked.clear()
+
+        frame = runner._fetch_with_cache("BTCUSDT")
+
+        assert asked == requests
+        assert list(frame["ts"]) == list(
+            bars["ts"].iloc[visible["through"] - 5 : visible["through"]]
+        )
 
     def test_periods_held_increments(self):
         """periods_held should increment each bar while position is open."""
