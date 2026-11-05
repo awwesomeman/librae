@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import os
 from unittest.mock import MagicMock, patch
 
@@ -154,3 +155,18 @@ class TestTokenNeverReachesLogs:
         for record in caplog.records:
             assert "SECRET-TOKEN" not in record.getMessage()
         assert any("<bot-token>" in r.getMessage() for r in caplog.records)
+
+
+def test_an_alert_carrying_a_long_venue_error_keeps_its_cause_and_its_orders():
+    adapter = TestTelegramAdapter()._make_adapter(enabled=True)
+    adapter._client = MagicMock()
+    adapter._client.post.return_value = MagicMock(status_code=200)
+
+    message = "503 Service Unavailable " + "<html>" * 2_000 + "; awaiting cancel for AAA order_id=1"
+    assert adapter.send_alert("Order Reconciliation Failed", message)
+
+    text = adapter._client.post.call_args.kwargs["json"]["text"]
+    assert len(html.unescape(text)) < 4096
+    assert text.startswith("<b>Order Reconciliation Failed</b>\n503 Service Unavailable")
+    assert " … [cut] … " in text
+    assert "awaiting cancel for AAA order_id=1" in text

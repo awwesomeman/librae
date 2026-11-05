@@ -6,7 +6,8 @@ not hold up the cycle or an operator flatten, and is named in an alert. A halt
 sends a cancel to every tracked order the venue has not confirmed ended,
 whether or not the venue reports a cancel pending and whether or not its
 status could be read, and stays unfinished until the venue confirms each one.
-A cancel the engine sent and the venue reports pending is not sent again.
+A cancel the engine sent and the venue reports pending, in an answer read
+that cycle, is not sent again.
 """
 
 from __future__ import annotations
@@ -192,7 +193,8 @@ class TestAReportThatCannotBeAppliedOnAPoll:
         assert len(_exactly(alerts, "Operator Flatten")) == 1
         assert _submitted(adapter) == ["AAA", "AAA"], "the entry, then the flatten's exit"
 
-    def test_after_a_halt_it_alerts_naming_the_order_without_resending_a_pending_cancel(self):
+    def test_after_a_halt_it_alerts_naming_the_order_and_resends_a_pending_cancel(self):
+        """The venue said pending once; with no status that applies since, it may have put the order back."""
         adapter = _resting_adapter()
         adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "pending_cancel")
         trader, alerts, _ = _trader(adapter)
@@ -204,10 +206,10 @@ class TestAReportThatCannotBeAppliedOnAPoll:
         trader._poll_cycle()
         trader._poll_cycle()
 
-        adapter.cancel_order.assert_called_once()
+        assert adapter.cancel_order.call_count == 3, "one per pass"
         [alert] = _titled(alerts, NOT_APPLIED)
         assert f"AAA order_id={aaa.order_id} broker report not applied" in alert["message"]
-        assert "cancel already pending" in alert["message"]
+        assert "cancel sent" in alert["message"]
 
         adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
         trader._poll_cycle()
@@ -731,3 +733,105 @@ class TestACancelThatEndsAnOrderPastAnAnswerThatCannotApply:
         assert _exactly(alerts, "Order Reconciliation Failed") == []
         [timeout] = _exactly(alerts, "Order Timeout")
         assert "group 'pair' cancelled" in timeout["message"]
+
+
+def _unreachable(_order_id, _symbol):
+    raise ConnectionError("venue did not answer")
+
+
+class TestAnOrderWhoseStatusCannotBeRead:
+    """An order the venue will not report on is named, and a cancel owed to it goes out again."""
+
+    def test_a_halt_resends_a_cancel_it_last_saw_pending(self):
+        adapter = _resting_adapter()
+        adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "pending_cancel")
+        trader, alerts, _ = _trader(adapter)
+        _buy_aaa(trader)
+        trader.halt("desk asked to stop")
+        adapter.get_order.side_effect = _unreachable
+
+        trader._poll_cycle()
+        trader._poll_cycle()
+
+        assert adapter.cancel_order.call_count == 3, "the venue may have put it back to work"
+
+        adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
+        trader._poll_cycle()
+
+        assert trader._active_orders == []
+        assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
+
+    def test_a_restart_into_a_halt_names_the_cancels_still_owed(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "pending_cancel")
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _timeout_trader(adapter, store, now)
+        aaa = _buy_aaa(trader)
+        trader.halt("desk asked to stop")
+
+        trader, _, alerts = _timeout_trader(adapter, store, now)
+        trader._initialize_run()
+
+        [owed] = _exactly(alerts, "Halt Cancellation Owed")
+        assert f"AAA order_id={aaa.order_id} (cancel_pending)" in owed["message"]
+
+        adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
+        trader._poll_cycle()
+
+        assert len(_exactly(alerts, "Halt Cancellation Completed")) == 1
+
+    def test_a_read_that_keeps_failing_is_named_in_the_poll_error(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _timeout_trader(adapter, store, now)
+        aaa = _buy_aaa(trader)
+        reads = iter([_resting(aaa.order_id)])
+        adapter.get_order.side_effect = lambda order_id, symbol: (
+            next(reads, None) or _unreachable(order_id, symbol)
+        )
+        restarted, _, alerts = _timeout_trader(adapter, store, now)
+        restarted._live_order_timeout_seconds = None
+
+        restarted.run(max_iterations=3)
+
+        [poll_error] = _exactly(alerts, "Poll Error")
+        assert (
+            f"the last RuntimeError: AAA order_id={aaa.order_id} status unavailable "
+            "(ConnectionError: venue did not answer)"
+        ) in poll_error["message"]
+        assert restarted._active_orders[0].request.client_order_id == aaa.request.client_order_id
+
+    @pytest.mark.parametrize("left", ["confirmed", "recovery_exit"])
+    def test_a_restart_that_owes_nothing_more_says_so_or_stays_quiet(self, left):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "pending_cancel")
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _timeout_trader(adapter, store, now)
+        if left == "recovery_exit":
+            trader._positions = {"AAA": _position("AAA")}
+            adapter.get_position.side_effect = lambda request: {
+                "symbol": request.symbol,
+                "size": 1.0 if request.symbol == "AAA" else 0.0,
+                "avg_price": 100.0,
+                "unrealized_pnl": 0.0,
+            }
+            trader.request_flatten("desk asked to close")
+            trader._poll_cycle()
+            assert trader._halted is True
+        else:
+            _buy_aaa(trader)
+            trader.halt("desk asked to stop")
+            adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
+
+        trader, _, alerts = _timeout_trader(adapter, store, now)
+        trader._initialize_run()
+
+        if left == "confirmed":
+            [completed] = _exactly(alerts, "Halt Cancellation Completed")
+            assert "restarted halted" in completed["message"]
+        else:
+            assert alerts == []
+        assert _exactly(alerts, "Halt Cancellation Owed") == []
