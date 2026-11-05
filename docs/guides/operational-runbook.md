@@ -93,7 +93,7 @@ Order placement alerts (rules in
 | Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled, and a target rebalance stopped until the next bar's decision. A failed flatten or drawdown exit alerts as Close Rejected or Close Cancelled instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted |
 | Ambiguous Order Placement | Placement failed with an error the adapter could not classify and the client-id lookup found nothing: the order may still exist at the venue; halted. The error is in the order's `broker_orders.error` | Check the broker's order history for the client order id. `reset_halt()` refuses (`unresolved_broker_orders`) until the engine resolves the order |
 | Post-fill Risk Breach | A confirmed entry fill, from a status read or a cancel's answer, took the account past `max_position_weight` or the gross or net exposure limit (the message names the limit and the order); halted, every tracked order cancelled. It takes precedence over Order Rejected, Order Cancelled, Order Timeout or Order Timeout Cancellation Unresolved for that order | Find why the fill exceeded what was sized, such as a fill on a cancel that arrived late, then `reset_halt()` |
-| Order Report Not Applied | The venue's status answer for the named order does not match what the engine tracks (the message says how). The order stays tracked and under its timeout, if one is set, which cancels it; without one the strategy stays blocked behind it. Not halted. Repeats as a [lasting problem](#lasting-problems); the cases met while cancelling are under [Halt not persisted](#halt-not-persisted) | Compare that order and its position at the broker with the ledger, and fix the adapter or venue cause |
+| Order Report Not Applied | The venue's status answer for the named order does not match what the engine tracks, or the executor could not read it (the message says how). The order stays tracked and under its timeout, if one is set, which cancels it; without one the strategy stays blocked behind it. Not halted. Repeats as a [lasting problem](#lasting-problems); the cases met while cancelling are under [Halt not persisted](#halt-not-persisted) | Compare that order and its position at the broker with the ledger, and fix the adapter or venue cause |
 | Insufficient Free Balance, Free Balance Unavailable, Unpriced Entry | An entry, or a whole group with an entry leg, was not submitted: the broker's free balance was below its requirement, could not be read, or the requirement could not be priced (the alert names the amounts or the error). The other queued orders still went out, and a target rebalance stopped until the next bar's decision; not halted. The alert repeats for a cause and symbol only after a check for that symbol passes or `reset_halt()`; every refusal is still a `decision_skipped` event | Restore the balance, or stop flat and start from the broker balance (see the `reset_halt()` step of [Kill-switch rehearsal](#kill-switch-rehearsal)); for an unreadable balance or price, fix what the error names. A rotation refused for want of cash its own exit would free must list that exit first |
 
 ### Lasting problems
@@ -114,7 +114,9 @@ so one that comes and goes alerts no faster than one that stays:
   An answer that applies in the cycle another failed, such as the cancel a
   timeout or a halt sends after an unappliable read, does not count: an order
   that ends that way is not resolved, since fills that read carried may be
-  missing.
+  missing. A single unreadable answer, such as a fill whose fee the venue
+  has not reported yet, alerts at once and resolves once the order ends, or
+  an hour after its answers apply again.
 - Operator Flatten Waiting: the same while the orders and statuses it lists
   are. It ends when the flatten goes ahead; a refused flatten says so
   instead.
@@ -336,13 +338,17 @@ before `reset_halt()`.
 
 An error that says `broker report not applied` names an order the venue
 answered about with something the engine could not match to it. Its cancel
-went out anyway if the error ends `cancel sent` or `cancel already sent`;
-`cancel not confirmed (<error>)` or `no order id to cancel` mean it may not
-have. Fills that answer carried may be missing from
+went out anyway if the error ends `cancel sent`, `cancel already sent`,
+`cancel sent, its answer not applied (<error>)` or `cancel sent, its answer
+not recorded (<error>)`; `cancel not confirmed (<error>)` or `no order id to
+cancel` mean it may not have. Fills that answer carried may be missing from
 the ledger: compare that order and its position at the broker with the
 ledger. Met while a running account finishes a cancel, such as a timeout's
-after a restart, the same answer then halts it, as **Order Reconciliation
-Failed**. Met by an operator flatten cancelling working orders, it alerts
+after a restart, the same answer halts it, as **Order Reconciliation
+Failed**, unless the cancel's own answer applied and ended the order: then
+the alert is **Order Report Not Applied** ending `cancel sent`, and the order
+ends as any cancel does, one past its timeout as **Order Timeout**. Met by an
+operator flatten cancelling working orders, it alerts
 **Order Report Not Applied** as a [lasting problem](#lasting-problems); the
 flatten sends the cancel again each cycle and goes ahead once the venue
 confirms the order ended. It never halts for it, since a halt would refuse

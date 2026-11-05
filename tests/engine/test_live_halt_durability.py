@@ -298,25 +298,48 @@ class TestAReportThatCannotBeAppliedStillCancels:
         assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
         adapter.cancel_order.assert_called_once()
 
-    def test_a_running_account_sends_the_cancel_then_halts(self):
-        """A cancel restored from the checkpoint meets a report naming another order."""
+    def test_a_running_account_sends_the_cancel_and_ends_the_order_it_confirms(self):
+        """A cancel restored from the checkpoint meets a report naming another order.
+
+        The cancel's own answer applies and ends the order, so what the venue
+        holds is known: the order ends as any engine cancel does.
+        """
         adapter = _resting_adapter()
         trader, _, alerts = _trader(adapter)
         _buy_two(trader)
-        aaa = trader._active_orders[0]
+        aaa, bbb = trader._active_orders
         aaa.cancel_requested = True
         adapter.get_order.side_effect = lambda _order_id, _s: _resting("another-order")
 
         trader._advance_live_orders()
 
-        assert trader._halted is True
+        assert trader._halted is False
         adapter.cancel_order.assert_called_once()
         assert adapter.cancel_order.call_args.args[0] == aaa.order_id
+        assert aaa.status == "cancelled"
+        assert _titled(alerts, "Order Reconciliation Failed") == []
+        [mismatch] = _titled(alerts, "Order Report Not Applied")
+        assert f"AAA order_id={aaa.order_id} broker report not applied" in mismatch["message"]
+        assert "cancel sent" in mismatch["message"]
+        assert trader._active_orders == [bbb]
+        adapter.place_order.assert_called_once()
+
+    def test_a_running_account_halts_when_the_cancel_answer_does_not_apply_either(self):
+        adapter = _resting_adapter()
+        trader, _, alerts = _trader(adapter)
+        _buy_two(trader)
+        aaa = trader._active_orders[0]
+        aaa.cancel_requested = True
+        _answer_about_another_order(adapter)
+
+        with pytest.raises(Exception, match="cancel already sent"):
+            trader._advance_live_orders()
+
+        assert trader._halted is True
         [halt] = _titled(alerts, "Order Reconciliation Failed")
         assert f"AAA order_id={aaa.order_id} broker report not applied" in halt["message"]
-        assert "cancel sent" in halt["message"]
-        assert trader._active_orders == [], "AAA's cancel was confirmed and BBB never sent"
-        adapter.place_order.assert_called_once()
+        assert "cancel sent, its answer not applied (ValueError: " in halt["message"]
+        assert adapter.cancel_order.call_count == 1, "the halt's pass does not send it again"
 
     def test_a_flatten_sends_the_cancel_and_goes_ahead_once_it_is_confirmed(self):
         """The cancel's own answer ends the order, so the flatten goes ahead, never halting first."""
