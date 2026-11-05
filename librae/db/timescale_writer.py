@@ -1195,7 +1195,8 @@ def refresh_performance(
 ) -> None:
     """Recompute KPI metrics from DB equity_curve + position_events and upsert.
 
-    Called after each trade close in sim mode to keep Grafana KPIs up to date.
+    The live engine calls it after a close, reduce or financing cash flow, and
+    on the first equity point after a restore, to keep the KPIs current.
     """
     from librae.core import EPSILON
     from librae.core.executor import REASON_FORCE_CLOSE, TradePnL
