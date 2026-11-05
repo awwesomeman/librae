@@ -12,7 +12,7 @@ touches engine state.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Lock, Thread, get_ident
 from unittest.mock import MagicMock
 
@@ -481,6 +481,36 @@ class TestOperatorFlatten:
         assert "second request" in flatten["message"]
         assert trader._positions == {}
 
+    def test_a_request_arriving_as_one_submits_its_exits_does_not_hold_them(self):
+        adapter = _adapter(below_minimum="")
+        trader, _, alerts = _trader(adapter)
+        held = trader._flatten_request_lock
+
+        class InterleavingLock:
+            """Lets a second request land as the first is cleared, before its exits go out."""
+
+            def __init__(self) -> None:
+                self.entries = 0
+
+            def __enter__(self):
+                self.entries += 1
+                if self.entries == 2:
+                    trader.request_flatten("second request")
+                return held.__enter__()
+
+            def __exit__(self, *exc):
+                return held.__exit__(*exc)
+
+        trader.request_flatten("first request")
+        trader._flatten_request_lock = InterleavingLock()
+        trader._poll_cycle()
+
+        assert _submitted(adapter) == SYMBOLS
+        assert trader._active_orders == []
+        assert trader._positions == {}
+        [flatten] = [alert for alert in alerts if alert["title"].endswith("Operator Flatten")]
+        assert "first request" in flatten["message"]
+
     def test_request_after_a_reset_waits_for_a_matching_reconciliation(self):
         adapter = _adapter(below_minimum="")
         adapter.get_position.side_effect = lambda request: {
@@ -611,6 +641,224 @@ class TestOperatorFlatten:
             ("close", REASON_OPERATOR_FLATTEN)
         ]
         assert strategy.calls == 0
+
+
+def _working_order_trader(adapter, now: list[datetime]):
+    """A trader holding AAA, with an ungrouped BBB entry working at the venue.
+
+    Its orders time out 30 seconds after placement.
+    """
+    adapter.place_order.side_effect = lambda signal: _accepted(signal["client_order_id"])
+    adapter.cancel_order.side_effect = lambda order_id, _symbol: {
+        **_accepted(order_id),
+        "status": "canceled",
+    }
+    trader, events, alerts = _trader(adapter, clock=lambda: now[0])
+    trader._live_order_timeout_seconds = 30
+    trader._positions = {"AAA": _position("AAA")}
+    trader._execute_live_decision(
+        [OrderIntent(action="long", symbol="BBB", quantity=1.0)], _bars(), TEST_CLOCK_NOW
+    )
+    [bbb] = trader._active_orders
+    adapter.place_order.side_effect = lambda signal: _broker_report(
+        order_id=signal["client_order_id"], quantity=signal["quantity"]
+    )
+    return trader, events, alerts, bbb
+
+
+def _flattened_once(trader, events, alerts) -> None:
+    """The flatten went ahead and is the only thing that halted the account."""
+    assert trader._halted is True
+    assert trader._positions == {}
+    assert _titled(alerts, "Refused") == []
+    assert [alert["title"] for alert in alerts] == ["[test] Operator Flatten"]
+    assert [event.detail["reason"] for event in events if event.event_type == "halted"] == [
+        "Operator Flatten"
+    ]
+
+
+class TestAPendingFlattenDoesTheCyclesOrderWork:
+    """Nothing in the cycle's order poll halts the account ahead of a requested flatten.
+
+    A halted account refuses the flatten, which would leave its positions open.
+    """
+
+    def test_an_order_timing_out_as_it_is_requested_is_cancelled_by_it(self, caplog):
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        trader, events, alerts, bbb = _working_order_trader(adapter, now)
+        adapter.get_order.side_effect = lambda order_id, _symbol: _accepted(order_id)
+        now[0] += timedelta(seconds=30)
+
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+
+        adapter.cancel_order.assert_called_once()
+        assert adapter.cancel_order.call_args.args[0] == bbb.order_id
+        assert bbb.status == "cancelled"
+        assert _submitted(adapter) == ["BBB", "AAA"]
+        _flattened_once(trader, events, alerts)
+        [logged] = [record for record in caplog.records if "past its timeout" in record.message]
+        assert logged.message == (
+            f"BBB order_id={bbb.order_id} past its timeout ended cancelled in the operator flatten"
+        )
+
+    def test_a_timed_out_order_is_logged_once_it_ends_and_only_if_unfilled(self, caplog):
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        trader, _, _, bbb = _working_order_trader(adapter, now)
+        adapter.get_order.side_effect = lambda order_id, _symbol: _accepted(order_id)
+        adapter.cancel_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": "pending_cancel",
+        }
+        now[0] += timedelta(seconds=30)
+        trader.request_flatten("desk asked to close")
+
+        for _ in range(3):
+            trader._poll_cycle()
+        adapter.get_order.side_effect = lambda order_id, _symbol: _broker_report(
+            order_id=order_id, quantity=1.0
+        )
+        trader._poll_cycle()
+
+        assert bbb.status == "filled"
+        assert trader._halted is True
+        assert "past its timeout" not in caplog.text
+
+    def test_an_order_restored_after_a_restart_is_cancelled_by_it_too(self):
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        before, _, _, _ = _working_order_trader(adapter, now)
+        adapter.get_order.side_effect = lambda order_id, _symbol: _accepted(order_id)
+        adapter.get_position.side_effect = lambda request: {
+            "symbol": request.symbol,
+            "size": 1.0 if request.symbol == "AAA" else 0.0,
+            "avg_price": 100.0,
+            "unrealized_pnl": 0.0,
+        }
+        events: list = []
+        alerts: list[dict] = []
+        trader = with_run_leases(
+            make_live_trader(
+                _HoldStrategy(),
+                adapter,
+                config=_test_cfg(mode="live", symbols=SYMBOLS),
+                state_store=before._state_store,
+                clock=lambda: now[0],
+                on_runtime_event=events.append,
+            )
+        )
+        trader._notify = lambda method, **kw: alerts.append(kw) if method == "send_alert" else None
+        trader._live_order_timeout_seconds = 30
+        trader._last_prices = {symbol: 100.0 for symbol in SYMBOLS}
+        trader._initialize_run()
+        [bbb] = trader._active_orders
+        events.clear()
+        now[0] += timedelta(seconds=30)
+
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+
+        adapter.cancel_order.assert_called_once()
+        assert bbb.status == "cancelled"
+        assert _submitted(adapter) == ["BBB", "AAA"]
+        _flattened_once(trader, events, alerts)
+
+    @pytest.mark.parametrize("status", ["canceled", "rejected"])
+    def test_an_order_the_venue_ended_does_not_refuse_it(self, status):
+        adapter = _adapter(below_minimum="")
+        trader, events, alerts, bbb = _working_order_trader(adapter, [TEST_CLOCK_NOW])
+        adapter.get_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": status,
+        }
+
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+
+        adapter.cancel_order.assert_not_called()
+        assert bbb.status == status.replace("canceled", "cancelled")
+        assert _submitted(adapter) == ["BBB", "AAA"]
+        _flattened_once(trader, events, alerts)
+
+    def test_a_fill_past_a_risk_limit_is_booked_then_closed(self):
+        adapter = _adapter(below_minimum="")
+        trader, events, alerts, bbb = _working_order_trader(adapter, [TEST_CLOCK_NOW])
+        trader._risk_policy = RiskPolicy(max_position_weight=0.0001)
+        adapter.get_order.side_effect = lambda order_id, _symbol: _broker_report(
+            order_id=order_id, quantity=1.0
+        )
+
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+
+        assert bbb.status == "filled"
+        assert _submitted(adapter) == ["BBB", "AAA", "BBB"]
+        _flattened_once(trader, events, alerts)
+
+    def test_a_queued_order_does_not_go_out_ahead_of_it(self):
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = lambda signal: _accepted(signal["client_order_id"])
+        trader, events, alerts = _trader(adapter)
+        trader._positions = {}
+        trader._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="AAA", quantity=1.0),
+                OrderIntent(action="long", symbol="BBB", quantity=1.0),
+            ],
+            _bars(),
+            TEST_CLOCK_NOW,
+        )
+        aaa, bbb = trader._active_orders
+        adapter.get_order.side_effect = lambda order_id, _symbol: _broker_report(
+            order_id=order_id, quantity=1.0
+        )
+        adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=signal["client_order_id"], quantity=signal["quantity"]
+        )
+
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+
+        assert aaa.status == "filled"
+        assert bbb.placement_attempted is False
+        assert bbb.status == "cancelled"
+        assert _submitted(adapter) == ["AAA", "AAA"], "AAA's entry, then its exit; BBB never"
+        _flattened_once(trader, events, alerts)
+
+    def test_one_arriving_as_the_strategy_sends_its_orders_stops_them(self):
+        adapter = _adapter(below_minimum="")
+        trader, events, alerts = _trader(adapter)
+        trader._positions = {}
+
+        def place_order(signal):
+            trader.request_flatten("desk asked to close")
+            return _broker_report(order_id=signal["client_order_id"], quantity=signal["quantity"])
+
+        adapter.place_order.side_effect = place_order
+        complete = trader._execute_live_decision(
+            [
+                OrderIntent(action="long", symbol="AAA", quantity=1.0),
+                OrderIntent(action="long", symbol="BBB", quantity=1.0),
+            ],
+            _bars(),
+            TEST_CLOCK_NOW,
+        )
+
+        assert complete is False
+        assert _submitted(adapter) == ["AAA"]
+        [bbb] = trader._active_orders
+        assert bbb.placement_attempted is False
+
+        adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=signal["client_order_id"], quantity=signal["quantity"]
+        )
+        trader._poll_cycle()
+
+        assert bbb.status == "cancelled"
+        assert _submitted(adapter) == ["AAA", "AAA"], "AAA's entry, then its exit; BBB never"
+        _flattened_once(trader, events, alerts)
 
 
 _REDUCE_ONLY_REFUSAL = 'binance {"code":-2022,"msg":"ReduceOnly Order is rejected."}'
