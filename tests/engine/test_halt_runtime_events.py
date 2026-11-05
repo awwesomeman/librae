@@ -20,9 +20,9 @@ from datetime import datetime, timedelta
 
 import pytest
 from librae.core.run_config import ExecutionPolicy, RiskPolicy
-from librae.core.strategy import OrderIntent, PortfolioWeights
+from librae.core.strategy import OrderIntent, PortfolioWeights, Strategy
 from librae.live.executor import OrderRejectedError
-from librae.live.state import MemoryLiveStateStore
+from librae.live.state import LiveRebalance, MemoryLiveStateStore
 
 from tests.engine.live_factories import (
     TEST_CLOCK_NOW,
@@ -42,7 +42,7 @@ from tests.engine.test_live_flatten import (
 )
 from tests.engine.test_live_halt_durability import OUTAGE, _resting_adapter, _store_outage
 from tests.engine.test_live_operator_halt import _resting
-from tests.engine.test_live_runner import _broker_report, _mock_order_adapter
+from tests.engine.test_live_runner import _broker_report, _make_ohlcv_at, _mock_order_adapter
 
 
 def _of_type(events, event_type: str) -> list:
@@ -88,6 +88,58 @@ def _basis_group() -> list[OrderIntent]:
 
 def _group_bars() -> dict[str, dict[str, float]]:
     return {symbol: {"close": 100.0, "volume": 10_000.0} for symbol in ("SPOT", "PERP")}
+
+
+class _SameTargets(Strategy):
+    """Asks for the same target book on every bar."""
+
+    def __init__(self, weights: dict[str, float]) -> None:
+        self.weights = weights
+        self.calls = 0
+
+    def on_bar(self, ctx):
+        self.calls += 1
+        return PortfolioWeights(self.weights)
+
+
+def _continue_on_the_next_bar(trader, weights: dict[str, float]) -> list[datetime]:
+    """Leave a target rebalance decided on the bar before ``TEST_CLOCK_NOW``.
+
+    Returns the bar times, to which each later bar is appended.
+    """
+    decided = TEST_CLOCK_NOW - timedelta(hours=1)
+    trader._live_rebalance = LiveRebalance(
+        targets=PortfolioWeights(weights),
+        reference_prices={symbol: 100.0 for symbol in SYMBOLS},
+        reference_volumes={symbol: 10_000.0 for symbol in SYMBOLS},
+        lagged_adv_by_symbol={},
+        decided_at=decided,
+    )
+    trader._persist_state()
+    return [decided]
+
+
+def _next_bar(trader, bar_times: list[datetime]) -> None:
+    bar_times.append(bar_times[-1] + timedelta(hours=1))
+    trader._process_cycle({symbol: _make_ohlcv_at(bar_times) for symbol in SYMBOLS}, bar_times[-1])
+
+
+def _refusing_aaa(outcome: str):
+    """``place_order`` that fills every order but AAA's, which ends ``outcome``."""
+
+    def place_order(signal):
+        if signal["canonical_symbol"] != "AAA":
+            return _broker_report(order_id=signal["client_order_id"], quantity=signal["quantity"])
+        if outcome == "rejected":
+            raise OrderRejectedError("ReduceOnly Order is rejected.")
+        return _broker_report(
+            order_id=signal["client_order_id"],
+            status="canceled",
+            quantity=signal["quantity"],
+            filled=0.0,
+        )
+
+    return place_order
 
 
 class TestEachHaltAlertIsRecorded:
@@ -283,6 +335,7 @@ class TestGroupFailureIsRecorded:
         assert failed.detail["group_id"] == "basis"
         assert failed.detail["client_order_id"]
         assert "Margin is insufficient." in failed.detail["message"]
+        assert failed.detail["rebalance_stopped"] is False
         assert _of_type(events, "halted") == []
 
     def test_a_failing_sink_still_cancels_the_group(self):
@@ -311,7 +364,9 @@ class TestGroupFailureIsRecorded:
 
     @pytest.mark.parametrize("paused", [False, True])
     @pytest.mark.parametrize("outcome", ["rejected", "cancelled"])
-    def test_a_failed_rebalance_leg_is_sent_once_and_stops_the_rebalance(self, outcome, paused):
+    def test_a_failed_rebalance_leg_is_sent_once_and_stops_the_rebalance(
+        self, outcome, paused, caplog
+    ):
         """A target rebalance that kept going would replan the same leg and send it again."""
         adapter = _adapter(below_minimum="")
 
@@ -351,8 +406,102 @@ class TestGroupFailureIsRecorded:
         assert trader._state_store.load(trader._state_key).live_rebalance is None
         [failed] = _of_type(events, "group_failed")
         assert failed.detail["group_id"] == "pair"
+        assert failed.detail["rebalance_stopped"] is True
         [alert] = _titled(alerts, f"Order {outcome.title()}")
         assert "target rebalance stopped" in alert["message"]
+        [logged] = [
+            record
+            for record in caplog.records
+            if record.name == "librae.live.engine" and record.levelname == "ERROR"
+        ]
+        assert logged.getMessage() == f"Order {outcome.title()}: {alert['message'][:-1]}"
+
+    @pytest.mark.parametrize("restored", [False, True])
+    @pytest.mark.parametrize("outcome", ["rejected", "cancelled"])
+    def test_a_rebalance_stopped_while_continuing_is_not_decided_again_on_that_bar(
+        self, outcome, restored
+    ):
+        """The same targets on the same bar and book would send the failed leg again."""
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = _refusing_aaa(outcome)
+        strategy = _SameTargets({"BBB": 0.0})
+        trader, events, _ = _trader(adapter, strategy=strategy)
+        bar_times = _continue_on_the_next_bar(trader, strategy.weights)
+        if restored:
+            trader, events, _ = _trader(adapter, strategy=strategy, state_store=trader._state_store)
+            assert trader._live_rebalance is not None
+        trader._positions = {
+            symbol: replace(_position(symbol), group_id="pair") for symbol in ("AAA", "BBB")
+        }
+
+        _next_bar(trader, bar_times)
+
+        assert _submitted(adapter) == ["AAA"]
+        assert strategy.calls == 0
+        assert trader._live_rebalance is None
+        assert trader._halted is False
+
+        _next_bar(trader, bar_times)
+
+        assert strategy.calls == 1
+        assert _submitted(adapter) == ["AAA", "AAA"], "the next bar's decision sends it once"
+        assert len(_of_type(events, "group_failed")) == 2
+
+    def test_a_bar_retried_after_the_stop_is_not_decided_on_either(self):
+        """A checkpoint failure after the stop leaves the bar for the next poll to retry."""
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = _refusing_aaa("rejected")
+        strategy = _SameTargets({"BBB": 0.0})
+        trader, events, _ = _trader(adapter, strategy=strategy)
+        bar_times = _continue_on_the_next_bar(trader, strategy.weights)
+        trader._positions = {
+            symbol: replace(_position(symbol), group_id="pair") for symbol in ("AAA", "BBB")
+        }
+        persist = trader._persist_state
+        failed: list[bool] = []
+
+        def persist_failing_once_the_bar_executed(*orders):
+            if not failed and trader._last_execution_bar_ts.get("AAA") == bar_times[-1]:
+                failed.append(True)
+                raise OSError(OUTAGE)
+            persist(*orders)
+
+        trader._persist_state = persist_failing_once_the_bar_executed
+        with pytest.raises(OSError, match=OUTAGE):
+            _next_bar(trader, bar_times)
+        trader._process_cycle(
+            {symbol: _make_ohlcv_at(bar_times) for symbol in SYMBOLS}, bar_times[-1]
+        )
+
+        assert failed == [True]
+        assert _submitted(adapter) == ["AAA"]
+        assert strategy.calls == 0
+        assert len(_of_type(events, "group_failed")) == 1
+
+        _next_bar(trader, bar_times)
+
+        assert strategy.calls == 1
+        assert _submitted(adapter) == ["AAA", "AAA"]
+
+    def test_a_rebalance_an_unfunded_entry_stopped_is_not_decided_again_on_that_bar(self):
+        adapter = _adapter(below_minimum="")
+        adapter.get_balance.return_value = {"free": 0.0, "used": 0.0, "total": 0.0}
+        strategy = _SameTargets({"AAA": 0.5})
+        trader, events, _ = _trader(adapter, strategy=strategy)
+        trader._positions = {}
+        bar_times = _continue_on_the_next_bar(trader, strategy.weights)
+
+        _next_bar(trader, bar_times)
+
+        adapter.place_order.assert_not_called()
+        assert strategy.calls == 0
+        assert trader._live_rebalance is None
+        assert len(_of_type(events, "decision_skipped")) == 1
+
+        _next_bar(trader, bar_times)
+
+        assert strategy.calls == 1
+        assert len(_of_type(events, "decision_skipped")) == 2
 
     @pytest.mark.parametrize("grouped", [True, False])
     @pytest.mark.parametrize("ends_after", ["restart", "pending_cancel"])

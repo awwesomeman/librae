@@ -965,6 +965,8 @@ class LiveTrader:
         self._unstarted_groups: set[str] = set()
         # Set only while a flatten submits its exits, before it halts the account.
         self._flatten_at: datetime | None = None
+        # The last bar a target rebalance stopped on; not checkpointed.
+        self._rebalance_stopped_at: datetime | None = None
         self._cycle_fetch_seconds: dict[str, float] = {}
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
@@ -2331,7 +2333,7 @@ class LiveTrader:
         only that group's other still-active legs and alerts — unrelated
         groups and independent intents keep executing. A target rebalance
         stops instead, since replanning it would send the same leg again;
-        the next decision replans from the book. Returns True if the
+        the next bar's decision replans from the book. Returns True if the
         whole account was halted (caller should stop advancing this tick),
         False otherwise (caller should continue to the next active order).
         """
@@ -2356,16 +2358,17 @@ class LiveTrader:
             for sibling in list(self._active_orders):
                 if sibling.request.group_id == group_id:
                     self._cancel_tracked_order(sibling)
-        scope = "other groups unaffected"
-        if self._live_rebalance is not None:
+        rebalance_stopped = self._live_rebalance is not None
+        if rebalance_stopped:
             self._live_rebalance = None
             self._persist_state()
-            scope = "the target rebalance stopped"
-        logger.error("%s: %s", title, message)
+        scope = "the target rebalance stopped" if rebalance_stopped else "other groups unaffected"
+        outcome = f"{message}; group {group_id!r} cancelled, {scope}"
+        logger.error("%s: %s", title, outcome)
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}",
-            message=f"{message}; group {group_id!r} cancelled, {scope}.",
+            message=f"{outcome}.",
         )
         self._record_runtime_event(
             "group_failed",
@@ -2374,6 +2377,7 @@ class LiveTrader:
                 "group_id": group_id,
                 "client_order_id": request.client_order_id,
                 "message": message,
+                "rebalance_stopped": rebalance_stopped,
             },
             symbol=request.symbol,
         )
@@ -4776,7 +4780,12 @@ class LiveTrader:
         *,
         lagged_adv_by_symbol: dict[str, float] | None = None,
     ) -> bool:
-        """Advance serial target legs using only one current market snapshot."""
+        """Advance serial target legs using only one current market snapshot.
+
+        Returns whether the rebalance is complete. A leg that fails or is
+        refused ends it short of its targets, and the trader remembers the
+        bar, so that no decision on it replans them.
+        """
         while self._live_rebalance is not None and not self._active_orders and not self._halted:
             if not self._queue_next_live_rebalance_order(
                 bars,
@@ -4785,6 +4794,8 @@ class LiveTrader:
             ):
                 break
             self._advance_live_orders()
+            if self._live_rebalance is None:
+                self._rebalance_stopped_at = ts
         return self._live_rebalance is None and not self._active_orders and not self._halted
 
     def _timed_order_call[T](self, callback: Callable[[], T]) -> T:
@@ -5144,8 +5155,8 @@ class LiveTrader:
 
         scope = "other orders remain eligible"
         if self._live_rebalance is not None:
-            # Replanning would queue the same leg again; the next decision
-            # replans the targets from the current book.
+            # Replanning would queue the same leg again; the next bar's
+            # decision replans the targets from the current book.
             self._live_rebalance = None
             scope = "the target rebalance stopped"
         if group_id is not None:
@@ -5945,7 +5956,10 @@ class LiveTrader:
             self._commit_cycle_bars(audit_bars, audit_histories, ts)
             return feature_batch.as_of if feature_batch is not None else None
 
-        if live_rebalance_blocks_decisions:
+        # A rebalance stopped on this bar is replanned on the next one: the
+        # same bar and book would size the same leg and send it again. Kept on
+        # the trader, since a cycle that fails after the stop retries the bar.
+        if live_rebalance_blocks_decisions or self._rebalance_stopped_at == ts:
             for symbol, position in self._positions.items():
                 if symbol in raw_bars:
                     position.periods_held += 1
