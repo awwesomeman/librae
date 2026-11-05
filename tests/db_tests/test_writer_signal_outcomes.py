@@ -373,6 +373,31 @@ def test_strategy_performance_sql_matches_account_metric_values() -> None:
     assert values[:6] == ("run-1", "account-a", "USD", 100.0, 110.0, 10.0)
 
 
+@pytest.mark.parametrize(
+    ("if_absent", "conflict"), [(False, "DO UPDATE SET"), (True, "DO NOTHING")]
+)
+def test_strategy_performance_baseline_never_replaces_a_stored_row(
+    if_absent: bool, conflict: str
+) -> None:
+    cursor = MagicMock()
+
+    write_strategy_performance(
+        "run-1",
+        "account-a",
+        "USD",
+        100.0,
+        100.0,
+        0.0,
+        StrategyMetrics(total_return=0.0),
+        if_absent=if_absent,
+        cur=cursor,
+    )
+
+    sql, values = cursor.execute.call_args.args
+    assert f"ON CONFLICT (run_id, account_id) {conflict}" in sql
+    assert sql.count("%s") == len(values) == 28
+
+
 class TestWriteEquityCurvePoint:
     """write_equity_curve_point single-row upsert."""
 

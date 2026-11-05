@@ -181,13 +181,15 @@ def make_live_trader(
     on_ready=None,
     on_runtime_event=None,
     on_position_event=None,
+    on_performance=None,
     cost_model: CostModel | None = None,
+    fetcher=None,
 ) -> LiveTrader:
     trader = LiveTrader(
         strategy,
         _simple_feature_fn,
         config=config or _test_cfg(mode="live"),
-        adapter=lambda *a, **kw: _make_ohlcv_df(),
+        adapter=fetcher or (lambda *a, **kw: _make_ohlcv_df()),
         cost_model=cost_model or _zero_cost_model(),
         order_adapter=adapter,
         on_bar=None,
@@ -200,6 +202,7 @@ def make_live_trader(
         clock=clock or (lambda: TEST_CLOCK_NOW),
         on_ready=on_ready,
         on_runtime_event=on_runtime_event,
+        on_performance=on_performance,
     )
     trader.STALE_DATA_TOLERANCE_BARS = 100
     return trader

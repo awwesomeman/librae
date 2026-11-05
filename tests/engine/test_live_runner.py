@@ -7373,6 +7373,31 @@ class TestLiveExecutionLifecycle:
         event = on_runtime_event.call_args[0][0]
         assert event.event_type == "state_recovered"
 
+    def test_restored_run_refreshes_performance_on_its_first_equity_point(self):
+        """The dirty flag is not checkpointed: a stop between a close and its
+        refresh must not leave the stored KPIs behind the stored trades."""
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _mock_order_adapter()
+        first_performance = MagicMock()
+        first = make_live_trader(
+            _HoldStrategy(), adapter, state_store=store, on_performance=first_performance
+        )
+        first.run(max_iterations=1)
+        first_performance.assert_not_called()
+
+        on_performance = MagicMock()
+        second = make_live_trader(
+            _HoldStrategy(),
+            adapter,
+            state_store=store,
+            on_performance=on_performance,
+            fetcher=lambda *_args, **_kwargs: _make_ohlcv_df(n=6),
+        )
+        on_performance.assert_not_called()
+        second.run(max_iterations=1)
+
+        on_performance.assert_called_once_with(first._run_id, second._account_id)
+
     def test_restored_position_without_broker_cost_basis_reconciles_on_size_alone(self):
         """CCXT spot balances never carry avg_price; restore must not halt
         forever just because that field is absent — only size/side are

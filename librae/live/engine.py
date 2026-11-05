@@ -1255,6 +1255,9 @@ class LiveTrader:
         self._entries_paused = state.entries_paused
         self._adv_session_labels = state.adv_session_labels
         self._adv_filled_quantities = state.adv_filled_quantities
+        # The flag is not checkpointed, so a stop between a close and its
+        # refresh would leave the stored KPIs behind the stored trades.
+        self._performance_dirty = True
         self._restored_state = True
         logger.info(
             "Restored runtime state: key=%s run_id=%s cycle=%s orders=%d halted=%s "
