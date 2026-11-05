@@ -22,7 +22,7 @@ from librae.core.market_data import (
     MarketDataSubscription,
 )
 
-from .interfaces import OhlcvCallback, RuntimeEventCallback
+from .interfaces import OhlcvBatchCallback, OhlcvCallback, RuntimeEventCallback
 from .state import MAX_PENDING_OHLCV, PendingOhlcvDelivery
 
 logger = logging.getLogger(__name__)
@@ -206,10 +206,15 @@ def flush_pending(
     pending: list[PendingOhlcvDelivery],
     *,
     on_ohlcv: OhlcvCallback | None,
+    on_ohlcv_batch: OhlcvBatchCallback | None = None,
     degraded: bool,
     persist: Callable[[], None],
 ) -> bool:
     """Offer queued rows in order, keeping whatever is not acknowledged.
+
+    With ``on_ohlcv_batch``, consecutive rows of one subscription go in one
+    call, so a burst of corrections costs one write rather than one per row.
+    A batch is acknowledged whole or not at all.
 
     The first refusal stops the drain: the rows behind it go to the same
     database, and offering them anyway would only multiply the failure.
@@ -222,22 +227,31 @@ def flush_pending(
     if not pending or on_ohlcv is None:
         return degraded
     delivered = 0
-    for row in list(pending):
-        bar = dict(row.bar)
-        bar[AVAILABLE_AT_COLUMN] = row.available_at
-        bar[OBSERVED_AT_COLUMN] = row.observed_at
+    while delivered < len(pending):
+        head = pending[delivered]
+        batch = [head]
+        if on_ohlcv_batch is not None:
+            # A batch is in ts order, so it also holds one version per bar.
+            for row in pending[delivered + 1 :]:
+                if row.subscription != head.subscription or row.ts <= batch[-1].ts:
+                    break
+                batch.append(row)
+        bars = [(row.ts, _offered_bar(row)) for row in batch]
         try:
-            on_ohlcv(row.subscription.symbol, row.subscription.timeframe, bar, row.ts)
+            if on_ohlcv_batch is not None and len(bars) > 1:
+                on_ohlcv_batch(head.subscription.symbol, head.subscription.timeframe, bars)
+            else:
+                on_ohlcv(head.subscription.symbol, head.subscription.timeframe, bars[0][1], head.ts)
         except Exception:
             logger.warning(
                 "OHLCV audit delivery failed for %s %s at %s; %d row(s) still pending",
-                row.subscription.symbol,
-                row.subscription.timeframe,
-                row.ts,
+                head.subscription.symbol,
+                head.subscription.timeframe,
+                head.ts,
                 len(pending) - delivered,
             )
             break
-        delivered += 1
+        delivered += len(batch)
     if delivered:
         del pending[:delivered]
         persist()
@@ -245,3 +259,10 @@ def flush_pending(
         degraded = False
         logger.info("OHLCV audit backlog cleared; delivery has caught up")
     return degraded
+
+
+def _offered_bar(row: PendingOhlcvDelivery) -> dict[str, object]:
+    bar: dict[str, object] = dict(row.bar)
+    bar[AVAILABLE_AT_COLUMN] = row.available_at
+    bar[OBSERVED_AT_COLUMN] = row.observed_at
+    return bar

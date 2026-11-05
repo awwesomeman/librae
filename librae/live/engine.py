@@ -1554,6 +1554,7 @@ class LiveTrader:
         self._ohlcv_audit_degraded = ohlcv_audit.flush_pending(
             self._pending_ohlcv,
             on_ohlcv=self._on_ohlcv,
+            on_ohlcv_batch=self._on_ohlcv_batch,
             degraded=self._ohlcv_audit_degraded,
             persist=self._persist_state,
         )
@@ -3454,6 +3455,11 @@ class LiveTrader:
         fetched = self._normalize_runtime_rows(symbol, fetched)
         observed_at = self._record_observed_at(symbol, fetched)
         watermark = self._last_bar_ts.get(symbol)
+        decided = watermark
+        if decided is None and self._period_index:
+            # The first decision's checkpoint lands before its watermark does;
+            # its cycle's execution bar is the bar it decided on.
+            decided = self._last_execution_bar_ts.get(symbol)
 
         def audit_rows(rows: pd.DataFrame) -> list[_OhlcvAuditRow]:
             return [
@@ -3466,9 +3472,9 @@ class LiveTrader:
 
         accepted_audit_rows: list[_OhlcvAuditRow] = []
         accepted_corrections: list[_OhlcvAuditRow] = []
-        if audit_sink is not None and first_fill and watermark is not None:
-            decided = fetched.loc[fetched["ts"] <= pd.Timestamp(watermark)]
-            accepted_audit_rows = audit_rows(decided.iloc[-self._warmup_periods :])
+        if audit_sink is not None and first_fill and decided is not None:
+            read = fetched.loc[fetched["ts"] <= pd.Timestamp(decided)]
+            accepted_audit_rows = audit_rows(read.iloc[-self._warmup_periods :])
         if cached is None or cached.empty:
             merged = fetched
         else:

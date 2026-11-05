@@ -123,8 +123,10 @@ type PositionEventCallback = Callable[[PositionEvent, int], None]
 # carries OHLCV, available_at, and observed_at, when the engine received it.
 type OhlcvCallback = Callable[[str, str, dict[str, object], datetime], None]
 # The same sink's path for many bars of one symbol at once, as (ts, bar) pairs
-# in ts order: a start's window or a restart's re-read, one write instead of one
-# per bar. Optional; without it those bars go through OhlcvCallback one by one.
+# in ts order: a start's window, a restart's re-read, or a durable sink's queued
+# rows, one write instead of one per bar. Optional; without it those bars go
+# through OhlcvCallback one by one. A durable sink's must raise on a failed
+# write, since a normal return acknowledges queued rows.
 type OhlcvBatchCallback = Callable[[str, str, Sequence[tuple[datetime, dict[str, object]]]], None]
 type HeartbeatCallback = Callable[[str], None]
 type FinancingCashFlowCallback = Callable[[FinancingCashFlow], None]
