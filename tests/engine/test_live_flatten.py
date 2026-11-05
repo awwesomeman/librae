@@ -21,7 +21,7 @@ from librae.core.executor import REASON_OPERATOR_FLATTEN
 from librae.core.run_config import RiskPolicy
 from librae.core.strategy import OrderIntent, PortfolioWeights, PositionState, Strategy
 from librae.live.executor import OrderBelowVenueMinimumError, OrderRejectedError, OrderRequest
-from librae.live.state import LiveRebalance, TrackedOrder
+from librae.live.state import LiveRebalance, MemoryLiveStateStore, TrackedOrder
 
 from tests.ccxt_standin import build_crypto_adapter, errors
 from tests.engine.live_factories import (
@@ -1118,3 +1118,121 @@ class TestRefusedRecoveryExit:
         [alert] = _titled(alerts, "Close Rejected: AAA")
         assert "no longer in the ledger" in alert["message"]
         assert "stays open" not in alert["message"]
+
+
+def _working_exits(adapter, now: list[datetime], store=None):
+    """A trader holding AAA, BBB and DUST whose exits rest at the venue when sent.
+
+    Its orders time out after 30 seconds. A flatten sends one exit at a time,
+    so behind the first the others wait, unsent.
+    """
+    adapter.place_order.side_effect = lambda signal: _accepted(signal["client_order_id"])
+    adapter.get_order.side_effect = lambda order_id, _symbol: _accepted(order_id)
+    kwargs = {"state_store": store} if store is not None else {}
+    trader, events, alerts = _trader(adapter, clock=lambda: now[0], **kwargs)
+    trader._live_order_timeout_seconds = 30
+    return trader, events, alerts
+
+
+def _held_everywhere(request) -> dict:
+    return {"symbol": request.symbol, "size": 1.0, "avg_price": 100.0, "unrealized_pnl": 0.0}
+
+
+class TestAnExitAHaltEnds:
+    """An exit a repeat halt ends leaves its position open, so it is recorded as any failed exit."""
+
+    def test_ones_the_halt_drops_unsent_are_recorded_naming_the_halt(self):
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        trader, events, alerts = _working_exits(adapter, now)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        aaa = trader._active_orders[0]
+
+        def cancel(order_id, _symbol):
+            if order_id == aaa.order_id:
+                raise RuntimeError("venue did not answer the cancel")
+            return {**_accepted(order_id), "status": "canceled"}
+
+        adapter.cancel_order.side_effect = cancel
+        now[0] += timedelta(seconds=30)
+        trader._poll_cycle()
+
+        assert len(_titled(alerts, "Order Timeout Cancellation Failed")) == 1
+        assert trader._active_orders == [aaa]
+        skips = _skips(events, "close_cancelled")
+        assert sorted(skip.symbol for skip in skips) == ["BBB", "DUST"]
+        assert all(
+            skip.detail["message"] == "dropped unsent while a halt cancelled the account's orders"
+            for skip in skips
+        )
+        closes = _titled(alerts, "Close Cancelled")
+        assert len(closes) == 2
+        assert all(
+            "the halt cancels the account's other orders too" in a["message"] for a in closes
+        )
+        assert not any("other orders remain eligible" in a["message"] for a in closes)
+
+    @pytest.mark.parametrize("read", ["applies", "cannot_apply"])
+    def test_one_whose_cancel_ends_after_a_restart_is_recorded_whatever_its_age(self, read):
+        """Past its timeout too: after a restart the engine cannot tell which cancel it was."""
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _adapter(below_minimum="")
+        adapter.get_position.side_effect = _held_everywhere
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _working_exits(adapter, now, store)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        adapter.cancel_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": "pending_cancel",
+        }
+        trader._halt_live(title="Ambiguous Restored Order", message="an exit cannot be found")
+        [aaa] = trader._active_orders
+        assert aaa.cancel_requested
+
+        now[0] += timedelta(seconds=60)
+        trader, events, alerts = _working_exits(adapter, now, store)
+        cancelled = lambda order_id, _symbol: {**_accepted(order_id), "status": "canceled"}  # noqa: E731
+        if read == "applies":
+            adapter.get_order.side_effect = cancelled
+        else:
+            adapter.get_order.side_effect = lambda order_id, _symbol: {
+                **_accepted(order_id),
+                "status": "bogus-status",
+            }
+            adapter.cancel_order.side_effect = cancelled
+        trader._initialize_run()
+
+        assert trader._active_orders == []
+        [skip] = _skips(events, "close_cancelled")
+        assert skip.symbol == "AAA"
+        assert skip.detail["message"] == "ended cancelled after a cancel the engine requested"
+        [close] = _titled(alerts, "Close Cancelled")
+        assert "still tracked: none" in close["message"]
+        assert _titled(alerts, "Order Timeout") == []
+
+    def test_a_failing_event_sink_does_not_hold_back_the_halt_s_cancels(self):
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        trader, _, alerts = _working_exits(adapter, now)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        [aaa, *_] = trader._active_orders
+
+        def failing_sink(event):
+            if event.event_type == "decision_skipped":
+                raise RuntimeError("custom sink down")
+
+        trader._on_runtime_event = failing_sink
+        adapter.cancel_order.side_effect = lambda order_id, _symbol: (
+            (_ for _ in ()).throw(RuntimeError("venue did not answer the cancel"))
+            if order_id == aaa.order_id
+            else {**_accepted(order_id), "status": "canceled"}
+        )
+        now[0] += timedelta(seconds=30)
+        trader._poll_cycle()
+
+        assert trader._active_orders == [aaa], "BBB and DUST were dropped all the same"
+        [halt] = _titled(alerts, "Order Timeout Cancellation Failed")
+        assert "custom sink down" not in halt["message"]

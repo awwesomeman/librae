@@ -4073,6 +4073,7 @@ class LiveTrader:
         reason: str,
         title: str,
         cause: str,
+        others: str = "other orders remain eligible",
     ) -> None:
         """Record a skipped exit every time; alert once per reason and held quantity.
 
@@ -4103,9 +4104,7 @@ class LiveTrader:
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}: {symbol}",
-            message=(
-                f"exit of {quantity:g} skipped: {cause}; {remaining}, other orders remain eligible."
-            ),
+            message=(f"exit of {quantity:g} skipped: {cause}; {remaining}, {others}."),
         )
 
     def _plan_live_orders(
@@ -4885,29 +4884,34 @@ class LiveTrader:
                     # ended the order: then it ends as any cancel does.
                     if self._halted:
                         self._alert_unapplied_while_halted(exc)
-                        return
-                    if tracked in self._active_orders:
+                    elif tracked in self._active_orders:
                         self._halt_live(title="Order Reconciliation Failed", message=str(exc))
                         return
-                    self._alert_unapplied(exc)
+                    else:
+                        self._alert_unapplied(exc)
                 if self._post_fill_risk_halted():
                     return
-                # Over age, the order fails as its timeout would have failed
-                # it, whichever cancel this was, a halt's of a recovery exit
-                # included, since its position stays open: a restart between
-                # the timeout's recorded cancel and its outcome leaves that to
-                # this pass. A younger order's cancel was a halt's, a
-                # flatten's or a failed group's, each alerting on its own, as
-                # are the cancels of a flatten still waiting on them. A
-                # restart drops a flatten request, so after one an over-age
-                # order fails as a timeout whichever cancel ended it.
-                if (
-                    tracked in self._active_orders
-                    or tracked.status not in ("cancelled", "rejected")
-                    or (self._halted and not _is_recovery_exit(request))
-                    or self._flatten_request is not None
-                    or not self._live_order_timed_out(tracked)
+                if tracked in self._active_orders or tracked.status not in (
+                    "cancelled",
+                    "rejected",
                 ):
+                    return
+                # On a halted account the cancel was the halt's or the exit's
+                # own timeout's, which a restart leaves no way to tell apart;
+                # a recovery exit's position stays open either way, so it is
+                # recorded, and a strategy order's end was the halt's to name.
+                if self._halted:
+                    if _is_recovery_exit(request):
+                        self._report_exit_a_halt_ended(tracked, in_halt_pass=False)
+                        continue
+                    return
+                # Over age, the order fails as its timeout would have failed
+                # it, whichever cancel this was: a restart between the
+                # timeout's recorded cancel and its outcome leaves that to
+                # this pass, and drops a flatten request. A younger order's
+                # cancel was a flatten's or a failed group's, each alerting on
+                # its own, as are the cancels of a flatten still waiting on them.
+                if self._flatten_request is not None or not self._live_order_timed_out(tracked):
                     return
                 if self._fail_group_or_halt(
                     tracked, title="Order Timeout", message=_timeout_message(tracked)
@@ -5639,8 +5643,12 @@ class LiveTrader:
 
         A failure at one order does not stop the others, so an order queued
         behind it cannot go out ahead of a flatten that waits on this pass.
+        On a halted account, each recovery exit the pass ends short of a fill
+        is recorded once the pass is done, so a failing record cannot hold
+        back a cancel.
         """
         failure: Exception | None = None
+        ended_exits: list[TrackedOrder] = []
         for tracked in list(self._active_orders):
             try:
                 self._cancel_tracked_order(tracked)
@@ -5653,8 +5661,51 @@ class LiveTrader:
                         tracked.request.client_order_id,
                         exc_info=exc,
                     )
+            if (
+                self._halted
+                and _is_recovery_exit(tracked.request)
+                and tracked not in self._active_orders
+                and tracked.status in ("cancelled", "rejected")
+            ):
+                ended_exits.append(tracked)
+        for tracked in ended_exits:
+            try:
+                self._report_exit_a_halt_ended(tracked, in_halt_pass=True)
+            except Exception:
+                logger.exception(
+                    "Skipped close not recorded for %s", tracked.request.client_order_id
+                )
         if failure is not None:
             raise failure
+
+    def _report_exit_a_halt_ended(self, tracked: TrackedOrder, *, in_halt_pass: bool) -> None:
+        """Record a recovery exit that ended short of a fill on a halted account.
+
+        Its position stays open, and the halt's own alert names only the
+        orders it has not yet seen end. Which cancel ended it, a halt's or
+        the exit's timeout's, or whether the venue ended it first, is not
+        known, so the cause says only when it ended: ``in_halt_pass`` is
+        whether a halt's cancel pass, which goes to every order, saw it end.
+        """
+        request = tracked.request
+        position = self._positions.get(request.symbol)
+        ended = f"ended {tracked.status}" if tracked.placement_attempted else "dropped unsent"
+        if in_halt_pass:
+            cause = f"{ended} while a halt cancelled the account's orders"
+            others = "the halt cancels the account's other orders too"
+        else:
+            cause = f"{ended} after a cancel the engine requested"
+            others = f"still tracked: {self._tracked_orders_summary() or 'none'}"
+        self._report_skipped_close(
+            request.symbol,
+            quantity=request.quantity - tracked.filled_quantity,
+            held=position.quantity if position is not None else None,
+            ts=self._utc_now(),
+            reason=f"close_{tracked.status}",
+            title=f"Close {tracked.status.title()}",
+            cause=cause,
+            others=others,
+        )
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
         """Process one symbol through the portfolio-cycle path."""

@@ -1005,7 +1005,12 @@ adapter at submission.
   `close_cancelled`, carrying the venue's reason) and a **Close Rejected** or
   **Close Cancelled** alert, instead of halting and cancelling the other
   exits. That includes an `account_fault` refusal, since the flatten halts
-  the account anyway. A strategy close that merely carries a recovery reason
+  the account anyway. An engine halt of the already-halted account, such as
+  one for an exit whose cancel or placement cannot be resolved, cancels the
+  other exits too; each it ends short of a fill is recorded the same way, its
+  cause saying it ended while a halt cancelled the account's orders, or after
+  a cancel the engine requested when it ends in a later cycle. A
+  strategy close that merely carries a recovery reason
   on a running account keeps the normal handling. The breach alert names what
   remains open. The halt persists across restart, emergency exits remain active while halted, and broker orders must
   reach a terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts
