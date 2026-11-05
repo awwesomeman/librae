@@ -83,29 +83,67 @@ def find_position(
     }
 
 
+# How long past its close a bar that ends its trading segment is held. No
+# later bar can show the source finished it before the next segment opens,
+# and nothing trades until then, so the hold costs no fill; it only has to
+# outlast the source's lag.
+SEGMENT_END_SETTLE = pd.Timedelta(minutes=1)
+
+
 def drop_incomplete_ohlcv(
     df: pd.DataFrame,
     timeframe: str,
     *,
     calendar_id: str | None = None,
 ) -> pd.DataFrame:
-    """Drop a final bar-start candle whose interval has not closed yet."""
+    """Drop the newest bar unless the source has shown it closed.
+
+    A source can still be filling a bar after its close has passed on this
+    host, behind clock offset or trade aggregation, and a decision taken on
+    a short bar cannot be redone. ccxt documents the current candle as one
+    that "may be incomplete until the candle is closed (until the next
+    candle starts)"; Shioaji minutes do the same (on 2026-11-05 TXFR1's
+    11:33 Taipei minute read 81 lots half a second after its close and 91
+    once the next minute appeared).
+
+    A later bar in the response shows that the one before it closed.
+    Without one, the newest is held until the bar after it would have closed
+    too, so a market that has not traded since still gets it; a bar that
+    ends its trading segment, which no later bar can follow until the next
+    segment opens, only for ``SEGMENT_END_SETTLE``. Without ``calendar_id``
+    every period follows the last.
+    """
     if df.empty:
         return df
     from librae.core.utils import interval_to_timedelta, to_canonical
 
-    last_ts = pd.Timestamp(df["ts"].iloc[-1])
+    newest = pd.Timestamp(df["ts"].iloc[-1])
     canonical = to_canonical(timeframe)
     if calendar_id is not None:
-        from librae.core.trading_calendar import period_close
+        from librae.core.readiness import next_expected_close
+        from librae.core.trading_calendar import period_close, period_start
 
-        close_at = period_close(last_ts, canonical, calendar_id)
-    elif canonical.startswith("MN"):
-        month_count = int(canonical[2:])
-        close_at = last_ts + pd.offsets.MonthBegin(month_count)
+        close_at = period_close(newest, canonical, calendar_id)
+        following_close = pd.Timestamp(
+            next_expected_close(
+                newest.to_pydatetime(), timeframe=canonical, calendar_id=calendar_id
+            )
+        )
+        following_start = period_start(
+            following_close - pd.Timedelta(1, unit="ns"), canonical, calendar_id
+        )
+        if following_start > close_at:
+            release_at = close_at + SEGMENT_END_SETTLE
+        else:
+            release_at = following_close
     else:
-        close_at = last_ts + interval_to_timedelta(canonical)
-    if close_at > datetime.now(UTC):
+        period = (
+            pd.offsets.MonthBegin(int(canonical[2:]))
+            if canonical.startswith("MN")
+            else interval_to_timedelta(canonical)
+        )
+        release_at = newest + period + period
+    if release_at > datetime.now(UTC):
         return df.iloc[:-1]
     return df
 

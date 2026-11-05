@@ -450,11 +450,13 @@ Input timestamps must be timezone-aware and every adapter/ETL path must use
 the same convention: `ts` is the UTC bar-start instant. A bar becomes eligible
 only after its interval close; fixed-duration bars use `ts + timeframe`, while
 calendar-aligned bars use the actual segment/session close. Adapters drop a
-final still-forming interval. The crypto adapter also holds back a newest
-candle whose close has passed, until a later candle appears or one more period
-ends: ccxt documents the last candle as possibly incomplete until the next one
-starts, and a decision taken on a short candle cannot be redone. A poll as
-long as the bar can then leave decisions a bar late. A Shioaji date window
+final still-forming interval, and hold back a newest bar whose close has
+passed until the source shows it closed: a later bar appears, one more period
+ends, or, for a bar that ends its trading segment, a short settle passes.
+Sources keep filling a bar after its close and a decision taken on a short bar
+cannot be redone; the rule and its evidence are in
+`librae.brokers.base.drop_incomplete_ohlcv`. A poll as long as the bar can
+then leave decisions a bar late. A Shioaji date window
 returns whole bars only:
 intraday bars that start on its dates and daily bars of its trading days, with
 the minutes fetched as far either side as those bars reach. Keeping the

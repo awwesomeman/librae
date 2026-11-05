@@ -531,7 +531,8 @@ class IBKRAdapter:
                 exposed by IBKR; ``"regular"`` requests RTH only.
             use_rth: Adapter-specific compatibility spelling retained for direct
                 callers. It must agree with ``session_mode`` when both are set.
-            drop_incomplete: Drop the current still-forming candle.
+            drop_incomplete: Drop the newest bar unless the source has
+                shown it closed (see ``drop_incomplete_ohlcv``).
 
         Returns columns: ``[ts, open, high, low, close, volume]``
         where ``ts`` is the UTC-aware bar-start datetime. Daily stock bars

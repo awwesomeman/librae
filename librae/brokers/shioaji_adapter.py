@@ -352,7 +352,8 @@ class ShioajiAdapter:
                 longer than Shioaji's 30-day kbars() query limit is fetched
                 in multiple chunked calls and concatenated transparently.
             limit: Max bars (used only when start/end are omitted).
-            drop_incomplete: Drop the current still-forming candle.
+            drop_incomplete: Drop the newest bar unless the source has
+                shown it closed (see ``drop_incomplete_ohlcv``).
             calendar_id: Trading-calendar identifier used for resampling.
             continuous_alias: For futures only, require a native R1/R2 route.
             contract_month: For exact futures only, expected ``YYYYMM`` month.
