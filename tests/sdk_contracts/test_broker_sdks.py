@@ -70,6 +70,17 @@ def test_shioaji_contract() -> None:
     assert callable(sj.Shioaji.update_status)
     assert callable(sj.Shioaji.list_trades)
     assert callable(sj.Shioaji.cancel_order)
+    for method in (
+        "subscribe",
+        "unsubscribe",
+        "set_on_tick_fop_v1_callback",
+        "set_event_callback",
+        "set_session_down_callback",
+    ):
+        assert callable(getattr(sj.Shioaji, method))
+    for field in ("code", "datetime", "close", "volume", "total_volume", "simtrade"):
+        assert hasattr(sj.TickFOPv1, field)
+    assert sj.QuoteType("tick") == sj.QuoteType.Tick
 
 
 def test_ib_async_contract() -> None:

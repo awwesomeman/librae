@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from math import isfinite
@@ -61,6 +62,7 @@ from .base import (
     validate_order_signal,
     validate_time_in_force,
 )
+from .shioaji_stream import ShioajiBarStream
 from .shioaji_time import shioaji_kbar_starts
 
 logger = logging.getLogger(__name__)
@@ -171,6 +173,7 @@ class ShioajiAdapter:
         # activate_ca() below to pick which account's CA to activate.
         self._api.login(api_key=creds.api_key.reveal(), secret_key=creds.secret_key.reveal())
         self._execution_environment = "paper" if simulation else "production"
+        self._bar_stream = ShioajiBarStream(self._api, self._kbars_minutes)
         logger.info("Shioaji login successful (simulation=%s)", simulation)
 
         self._read_only = True
@@ -348,12 +351,16 @@ class ShioajiAdapter:
                 fetched as far either side as those bars reach (a TAIFEX
                 daily bar opens the night before its trading day). If both
                 are omitted, fetches the most recent *limit* bars, daily
-                ones through such a window of their trading days. A range
-                longer than Shioaji's 30-day kbars() query limit is fetched
-                in multiple chunked calls and concatenated transparently.
+                ones through such a window of their trading days; a future's
+                then come from its tick subscription (see
+                ``shioaji_stream``), since Shioaji rules out polling kbars()
+                during the session. A range longer than Shioaji's 30-day
+                kbars() query limit is fetched in multiple chunked calls and
+                concatenated transparently.
             limit: Max bars (used only when start/end are omitted).
             drop_incomplete: Drop the newest bar unless the source has
-                shown it closed (see ``drop_incomplete_ohlcv``).
+                shown it closed (see ``drop_incomplete_ohlcv``), and any bar
+                holding a streamed minute that may lack trades.
             calendar_id: Trading-calendar identifier used for resampling.
             continuous_alias: For futures only, require a native R1/R2 route.
             contract_month: For exact futures only, expected ``YYYYMM`` month.
@@ -373,40 +380,39 @@ class ShioajiAdapter:
 
         empty = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
         dateless = not start and not end
+        streamed = dateless and getattr(contract, "security_type", None) == "FUT"
         if dateless and interval_to_timedelta(timeframe) == timedelta(days=1):
             start = _dateless_first_day(limit, resolved_calendar)
+        today = pd.Timestamp.now(tz=_TAIPEI).date()
         window = None
+        complete_through = None
         if start:
-            last_day = _to_date(end) if end else pd.Timestamp.now(tz=_TAIPEI).date()
+            last_day = _to_date(end) if end else today
             window = _date_window(_to_date(start), last_day, timeframe, resolved_calendar)
             bars_from, bars_before, first_query_day, last_query_day = window
             # No minute stamped after today exists to fetch.
-            last_query_day = min(last_query_day, pd.Timestamp.now(tz=_TAIPEI).date())
+            last_query_day = min(last_query_day, today)
             if bars_from >= bars_before or first_query_day > last_query_day:
                 return empty
-            frames = []
-            for chunk_start, chunk_end in _kbar_date_chunks(
-                first_query_day, last_query_day, _MAX_KBAR_QUERY_DAYS
-            ):
-                chunk_kbars = self._api.kbars(
-                    contract=contract,
-                    start=chunk_start.isoformat(),
-                    end=chunk_end.isoformat(),
-                )
-                chunk_df = pd.DataFrame({**chunk_kbars})
-                if not chunk_df.empty:
-                    frames.append(chunk_df)
-            df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         elif end:
             raise ValueError("a date window needs start; end alone has no first date")
         else:
-            df = pd.DataFrame({**self._api.kbars(contract=contract)})
+            # A dateless kbars() call's documented window.
+            first_query_day, last_query_day = today - timedelta(days=1), today
+        if streamed:
+            df, complete_through = self._bar_stream.minutes(
+                contract,
+                first_query_day,
+                last_query_day,
+                resolved_calendar,
+                complete_only=drop_incomplete,
+            )
+        elif start:
+            df = self._kbars_minutes(contract, first_query_day, last_query_day)
+        else:
+            df = _kbar_frame([self._api.kbars(contract=contract)])
         if df.empty:
             return empty
-
-        # Normalise column names (Shioaji may return capitalised names)
-        df.columns = df.columns.str.lower()
-        df["ts"] = shioaji_kbar_starts(df["ts"])
 
         # Resample if requested timeframe is coarser than 1-min
         if timeframe != "1m":
@@ -430,6 +436,14 @@ class ShioajiAdapter:
             df = df.loc[(df["ts"] >= bars_from) & (df["ts"] < bars_before)].reset_index(drop=True)
 
         if drop_incomplete:
+            if complete_through is not None:
+                # The stream left minutes from here to kbars(): a bar reaching
+                # past it may lack some even after it closed.
+                settled = pd.Timestamp(complete_through, tz=UTC)
+                while not df.empty and (
+                    period_close(df["ts"].iloc[-1], timeframe, resolved_calendar) > settled
+                ):
+                    df = df.iloc[:-1]
             df = drop_incomplete_ohlcv(
                 df,
                 timeframe,
@@ -439,6 +453,20 @@ class ShioajiAdapter:
             df = df.tail(limit).reset_index(drop=True)
 
         return df[["ts", "open", "high", "low", "close", "volume"]]
+
+    def _kbars_minutes(self, contract: object, first_day: date, last_day: date) -> pd.DataFrame:
+        """kbars() minutes stamped ``first_day`` to ``last_day``, start-stamped
+        in UTC, in as few queries as Shioaji's 30-day limit allows."""
+        return _kbar_frame(
+            self._api.kbars(
+                contract=contract,
+                start=chunk_start.isoformat(),
+                end=chunk_end.isoformat(),
+            )
+            for chunk_start, chunk_end in _kbar_date_chunks(
+                first_day, last_day, _MAX_KBAR_QUERY_DAYS
+            )
+        )
 
     # ------------------------------------------------------------------
     # Order management (requires CA)
@@ -946,6 +974,18 @@ def _dateless_first_day(limit: int, calendar_id: str) -> str:
     sessions = min(limit + 1, _DATELESS_DAILY_LOOKBACK_DAYS)
     days = min(session_lookback_days(now, sessions, calendar_id), _DATELESS_DAILY_LOOKBACK_DAYS)
     return (now.date() - timedelta(days=days)).isoformat()
+
+
+def _kbar_frame(responses: Iterable[Mapping[str, list]]) -> pd.DataFrame:
+    """kbars() answers as one frame of lower-case columns and minute starts."""
+    frames = [frame for response in responses if not (frame := pd.DataFrame({**response})).empty]
+    if not frames:
+        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+    df = pd.concat(frames, ignore_index=True)
+    # Shioaji names the price columns capitalised.
+    df.columns = df.columns.str.lower()
+    df["ts"] = shioaji_kbar_starts(df["ts"])
+    return df
 
 
 def _kbar_date_chunks(start: date, end: date, max_days: int) -> list[tuple[date, date]]:
