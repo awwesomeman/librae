@@ -5694,7 +5694,7 @@ class LiveTrader:
             cause = f"{ended} while a halt cancelled the account's orders"
             others = "the halt cancels the account's other orders too"
         else:
-            cause = f"{ended} after a cancel the engine sent"
+            cause = f"{ended} after a cancel the engine requested"
             others = f"still tracked: {self._tracked_orders_summary() or 'none'}"
         self._report_skipped_close(
             request.symbol,
