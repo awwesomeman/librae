@@ -374,6 +374,23 @@ class TestMultiplierTickSizeValidation:
                 }
             )
 
+    @pytest.mark.parametrize("key", ["commission_per_contract", "multipler"])
+    def test_unknown_key_raises_instead_of_being_ignored(self, key):
+        with pytest.raises(ValueError, match=rf"unknown keys \['{key}'\]"):
+            _build_registry(
+                {
+                    "BADSYM": {
+                        "market": "tw_futures",
+                        "data_source": "shioaji",
+                        "instrument_type": "contract_monthly",
+                        "data_adapter": "shioaji",
+                        "currency": "TWD",
+                        "multiplier": 200.0,
+                        key: 1.0,
+                    }
+                }
+            )
+
     def test_missing_multiplier_defaults_to_one_for_spot(self):
         registry = _build_registry(
             {

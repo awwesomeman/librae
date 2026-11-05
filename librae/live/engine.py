@@ -558,9 +558,13 @@ def _is_recovery_exit(request: OrderRequest) -> bool:
 class ReportNotAppliedError(RuntimeError):
     """A venue answer about a tracked order did not reconcile with it; its cancel went ahead."""
 
-    def __init__(self, message: str, order: TrackedOrder) -> None:
+    def __init__(self, message: str, order: TrackedOrder, *, content: str) -> None:
         super().__init__(message)
         self.order = order
+        # What makes a later failure the same problem to alert on: the
+        # mismatch, without what became of its cancel, which can carry a
+        # venue's error text that differs on every attempt.
+        self.content = content
 
 
 def _report_failure(request: OrderRequest, order_id: str, error: Exception) -> str:
@@ -2241,15 +2245,23 @@ class LiveTrader:
             message=message,
         )
 
-    def _alert_report_not_applied(self, tracked: TrackedOrder, message: str) -> None:
+    def _alert_report_not_applied(
+        self, tracked: TrackedOrder, message: str, *, content: str | None = None
+    ) -> None:
         self._report_alerts.fire(
-            tracked.request.client_order_id, "Order Report Not Applied", message
+            tracked.request.client_order_id,
+            "Order Report Not Applied",
+            message,
+            content=content,
         )
+
+    def _alert_unapplied(self, exc: ReportNotAppliedError, note: str = "") -> None:
+        self._alert_report_not_applied(exc.order, f"{exc}{note}", content=f"{exc.content}{note}")
 
     def _alert_unapplied_while_halted(self, exc: ReportNotAppliedError) -> None:
         """Alert, without failing the cycle: a halted account does no order work to protect."""
         owed = "; the halt's cancellation stays owed" if exc.order in self._active_orders else ""
-        self._alert_report_not_applied(exc.order, f"{exc}{owed}")
+        self._alert_unapplied(exc, owed)
 
     def _retry_halt(self) -> bool:
         """Finish a halt's checkpoint, then its owed cancellation, before any other work.
@@ -5551,7 +5563,7 @@ class LiveTrader:
                 outcome = f"cancel not confirmed ({type(exc).__name__}: {exc})"
             else:
                 outcome = "cancel sent"
-        raise ReportNotAppliedError(f"{failure}; {outcome}", tracked) from error
+        raise ReportNotAppliedError(f"{failure}; {outcome}", tracked, content=failure) from error
 
     def _cancel_active_orders(self) -> None:
         """Cancel every tracked order, then raise the first failure, if any.
@@ -6510,12 +6522,10 @@ class LiveTrader:
                 # flatten, and the cancel goes out again each cycle anyway.
                 if exc.order not in self._active_orders:
                     # Its cancel's own answer applied and ended it.
-                    self._alert_report_not_applied(exc.order, str(exc))
+                    self._alert_unapplied(exc)
                 else:
                     self._flatten_waits += 1
-                    self._alert_report_not_applied(
-                        exc.order, f"{exc}; the operator flatten waits for it"
-                    )
+                    self._alert_unapplied(exc, "; the operator flatten waits for it")
                     return
             if self._active_orders:
                 self._flatten_waits += 1

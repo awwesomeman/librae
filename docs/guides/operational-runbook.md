@@ -107,12 +107,14 @@ lasts, adding how long and how many times it was seen; then once as
 problem that clears and comes back within `REPEAT_INTERVAL` is the same one,
 so one that comes and goes alerts no faster than one that stays:
 
-- Order Report Not Applied: the same while its message is. It ends once
-  every answer about that order has applied for `REPEAT_INTERVAL`, or when
-  the order ends after its answers applied again. An answer that applies in
-  the cycle another failed, such as the cancel a timeout or a halt sends
-  after an unappliable read, does not count: an order that ends that way is
-  not resolved, since fills that read carried may be missing.
+- Order Report Not Applied: the same while the order's mismatch is; what
+  became of its cancel, a venue error included, changes only the message.
+  It ends once every answer about that order has applied for
+  `REPEAT_INTERVAL`, or when the order ends after its answers applied again.
+  An answer that applies in the cycle another failed, such as the cancel a
+  timeout or a halt sends after an unappliable read, does not count: an order
+  that ends that way is not resolved, since fills that read carried may be
+  missing.
 - Operator Flatten Waiting: the same while the orders and statuses it lists
   are. It ends when the flatten goes ahead; a refused flatten says so
   instead.

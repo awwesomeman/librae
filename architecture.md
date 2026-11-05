@@ -851,7 +851,10 @@ assumptions, and portfolio limits cannot drift into one untyped bag.
 `backtest_revision` records the caller-owned code/data fingerprint, and the
 nullable unique `backtest_cache_key` is the only backtest deduplication
 identity. Sim state uses `sim:config_hash`; live state additionally binds the
-adapter-observed execution-identity digest.
+adapter-observed execution-identity digest. A run's identity, its `mode`
+included, never changes (the upsert condition in `write_run_metadata()`), and
+the backtest savers store backtest runs only, so no save clears the rows a sim
+or live engine recorded.
 
 `signal_events` and the run's `run_bars` are the source facts for
 signal-quality analysis, so a backtest feeds the signal dashboard only when
@@ -893,7 +896,8 @@ lookups, DataFrame loads, and derived results.
 Backtest and signal-result persistence serialize writers for the same
 non-null `backtest_cache_key` with a transaction-scoped PostgreSQL advisory
 lock. After taking the lock, a normal duplicate writer skips the complete run
-without writing partial child rows. An explicit force recompute deletes and
+without writing partial child rows; one that asks to store bars is refused
+instead when the canonical run keeps none. An explicit force recompute deletes and
 replaces the prior canonical run for that cache key in the same transaction,
 so rollback restores the prior run if the replacement fails. A null key means
 cache reuse is disabled and does not serialize otherwise equal configurations.
