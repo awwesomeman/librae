@@ -347,8 +347,8 @@ class ShioajiAdapter:
                 dates and daily bars of these trading days, with the minutes
                 fetched as far either side as those bars reach (a TAIFEX
                 daily bar opens the night before its trading day). If both
-                are omitted, fetches the most recent *limit* bars, daily or
-                longer ones through such a window of their trading days. A range
+                are omitted, fetches the most recent *limit* bars, daily
+                ones through such a window of their trading days. A range
                 longer than Shioaji's 30-day kbars() query limit is fetched
                 in multiple chunked calls and concatenated transparently.
             limit: Max bars (used only when start/end are omitted).
@@ -372,8 +372,8 @@ class ShioajiAdapter:
 
         empty = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
         dateless = not start and not end
-        if dateless and interval_to_timedelta(timeframe) >= timedelta(days=1):
-            start = _dateless_first_day(timeframe, limit, resolved_calendar)
+        if dateless and interval_to_timedelta(timeframe) == timedelta(days=1):
+            start = _dateless_first_day(limit, resolved_calendar)
         window = None
         if start:
             last_day = _to_date(end) if end else pd.Timestamp.now(tz=_TAIPEI).date()
@@ -930,8 +930,8 @@ _MAX_KBAR_QUERY_DAYS = 30
 _DATELESS_DAILY_LOOKBACK_DAYS = 14
 
 
-def _dateless_first_day(timeframe: str, limit: int, calendar_id: str) -> str:
-    """First date of the window a dateless poll of daily or longer bars asks for.
+def _dateless_first_day(limit: int, calendar_id: str) -> str:
+    """First date of the window a dateless poll of daily bars asks for.
 
     A dateless kbars() call answers yesterday and today by stamp date, its
     documented default (https://sinotrade.github.io/zh/tutor/market_data/historical/;
@@ -942,10 +942,7 @@ def _dateless_first_day(timeframe: str, limit: int, calendar_id: str) -> str:
     now = pd.Timestamp.now(tz=_TAIPEI)
     # No more sessions than days fit in the cap, so a warmup-sized limit
     # cannot reach past the calendar.
-    sessions = min(
-        (limit + 1) * int(interval_to_timedelta(timeframe) // timedelta(days=1)),
-        _DATELESS_DAILY_LOOKBACK_DAYS,
-    )
+    sessions = min(limit + 1, _DATELESS_DAILY_LOOKBACK_DAYS)
     days = min(session_lookback_days(now, sessions, calendar_id), _DATELESS_DAILY_LOOKBACK_DAYS)
     return (now.date() - timedelta(days=days)).isoformat()
 
