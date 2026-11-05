@@ -27,8 +27,10 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 # Telegram refuses a message over 4096 characters (Bot API sendMessage), and
 # an alert can carry a venue's error text, which for ccxt includes the whole
-# HTTP response body. Refused, the alert would be lost, so it is cut short.
-MAX_ALERT_MESSAGE_CHARS = 1000
+# HTTP response body. Refused, the alert would be lost, so its middle is cut:
+# the cause comes first and the orders still owing a cancel come last.
+ALERT_MESSAGE_HEAD_CHARS = 500
+ALERT_MESSAGE_TAIL_CHARS = 3000
 BACKOFF_BASE = 1.0  # seconds
 EMOJI_WARNING = "\u26a0\ufe0f"  # ⚠️
 EMOJI_SUCCESS = "\u2714\ufe0f"  # ✔️
@@ -273,8 +275,11 @@ class TelegramAdapter:
         """Send a system alert (e.g. consecutive poll errors)."""
         if not self._notifications.error:
             return False
-        if len(message) > MAX_ALERT_MESSAGE_CHARS:
-            message = f"{message[:MAX_ALERT_MESSAGE_CHARS]}… [cut]"
+        if len(message) > ALERT_MESSAGE_HEAD_CHARS + ALERT_MESSAGE_TAIL_CHARS:
+            message = (
+                f"{message[:ALERT_MESSAGE_HEAD_CHARS]} … [cut] … "
+                f"{message[-ALERT_MESSAGE_TAIL_CHARS:]}"
+            )
         safe_title = html.escape(title)
         safe_message = html.escape(message)
         lines = [f"<b>{safe_title}</b>", safe_message, f"<i>{_timestamp()}</i>"]
