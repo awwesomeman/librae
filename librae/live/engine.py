@@ -574,10 +574,10 @@ def _report_failure(request: OrderRequest, order_id: str, error: Exception) -> s
     )
 
 
-def _timeout_message(request: OrderRequest, order_id: str, report: ExecutionReport) -> str:
+def _timeout_message(tracked: TrackedOrder) -> str:
     return (
-        f"{request.symbol} order_id={order_id} status={report.status} "
-        f"filled={report.filled_quantity:.4f}/{report.requested_quantity:.4f}"
+        f"{tracked.request.symbol} order_id={tracked.order_id} status={tracked.status} "
+        f"filled={tracked.filled_quantity:.4f}/{tracked.request.quantity:.4f}"
     )
 
 
@@ -4833,35 +4833,38 @@ class LiveTrader:
                 and not _is_recovery_exit(request)
             ):
                 try:
-                    report = self._cancel_tracked_order(tracked)
+                    self._cancel_tracked_order(tracked)
                 except ReportNotAppliedError as exc:
                     # The cancel went out regardless. A halt has stopped
-                    # trading already; otherwise what the venue holds is unknown.
+                    # trading already. Otherwise what the venue holds is
+                    # unknown, unless the cancel's own answer applied and
+                    # ended the order: then it ends as any cancel does.
                     if self._halted:
                         self._alert_unapplied_while_halted(exc)
                         return
-                    self._halt_live(title="Order Reconciliation Failed", message=str(exc))
-                    return
+                    if tracked in self._active_orders:
+                        self._halt_live(title="Order Reconciliation Failed", message=str(exc))
+                        return
+                    self._alert_unapplied(exc)
                 # Over age, the order fails as its timeout would have failed
                 # it, whichever cancel this was, a halt's of a recovery exit
                 # included, since its position stays open: a restart between
                 # the timeout's recorded cancel and its outcome leaves that to
                 # this pass. A younger order's cancel was a halt's, a
                 # flatten's or a failed group's, each alerting on its own, as
-                # are the cancels of a flatten still waiting on them.
+                # are the cancels of a flatten still waiting on them; a
+                # restart drops a flatten request, so after one an over-age
+                # order its cancel ended fails as a timeout.
                 if (
-                    report is None
-                    or report.status not in ("cancelled", "rejected")
+                    tracked in self._active_orders
+                    or tracked.status not in ("cancelled", "rejected")
                     or (self._halted and not _is_recovery_exit(request))
                     or self._flatten_request is not None
                     or not self._live_order_timed_out(tracked)
                 ):
                     return
-                order_id = report.order_id or tracked.order_id
                 if self._fail_group_or_halt(
-                    tracked,
-                    title="Order Timeout",
-                    message=_timeout_message(request, order_id, report),
+                    tracked, title="Order Timeout", message=_timeout_message(tracked)
                 ):
                     return
                 continue
@@ -4923,6 +4926,11 @@ class LiveTrader:
                         report = self._timed_order_call(
                             lambda request=request: self._executor.find_order(request)
                         )
+                except ValueError as exc:
+                    self._poll_answer_not_applied(
+                        tracked, tracked.order_id, exc, submit_planned=submit_planned
+                    )
+                    return
                 except Exception as exc:
                     if not self._live_order_timed_out(tracked):
                         raise
@@ -4952,26 +4960,12 @@ class LiveTrader:
                 # and the next poll retries it here.
                 if not polled:
                     raise
-                self._note_unappliable(tracked)
-                failure = _report_failure(request, tracked.order_id or report.order_id, exc)
-                if not submit_planned:
-                    # A restore at startup fails closed, naming the order.
-                    raise ValueError(failure) from exc
-                # The venue answered with something that does not match the
-                # order, which may still be working: it stays tracked, under
-                # its timeout, and the rest of the cycle goes on.
-                timed_out = self._live_order_timed_out(tracked)
-                self._alert_report_not_applied(
+                self._poll_answer_not_applied(
                     tracked,
-                    f"{failure}; "
-                    + (
-                        "cancelling it at its timeout"
-                        if timed_out
-                        else "the order stays tracked and is polled again next cycle"
-                    ),
+                    tracked.order_id or report.order_id,
+                    exc,
+                    submit_planned=submit_planned,
                 )
-                if timed_out:
-                    self._cancel_timed_out_order(tracked, None, status_error=exc)
                 return
             if report.status == "cancel_pending":
                 # The venue is cancelling it on its own; its outcome is polled,
@@ -5011,6 +5005,32 @@ class LiveTrader:
                 return
             if report.status != "filled":
                 return
+
+    def _poll_answer_not_applied(
+        self, tracked: TrackedOrder, order_id: str, error: ValueError, *, submit_planned: bool
+    ) -> None:
+        """Alert a polled answer that does not apply to its order, whether read or applied.
+
+        The order may still be working, so it stays tracked and under its
+        timeout, and the rest of the cycle goes on. A restore at startup
+        fails closed instead, naming the order.
+        """
+        self._note_unappliable(tracked)
+        failure = _report_failure(tracked.request, order_id, error)
+        if not submit_planned:
+            raise ValueError(failure) from error
+        timed_out = self._live_order_timed_out(tracked)
+        self._alert_report_not_applied(
+            tracked,
+            f"{failure}; "
+            + (
+                "cancelling it at its timeout"
+                if timed_out
+                else "the order stays tracked and is polled again next cycle"
+            ),
+        )
+        if timed_out:
+            self._cancel_timed_out_order(tracked, None, status_error=error)
 
     def _drop_paused_entry(self, tracked: TrackedOrder) -> bool:
         """Drop an unsubmitted entry, with its group, while entries are paused.
@@ -5308,7 +5328,7 @@ class LiveTrader:
         if cancel_report.status == "filled":
             return
         status = cancel_report.status
-        message = _timeout_message(request, order_id, cancel_report)
+        message = _timeout_message(tracked)
         if status in ("cancelled", "rejected"):
             self._fail_group_or_halt(tracked, title="Order Timeout", message=message)
         else:
@@ -5407,8 +5427,13 @@ class LiveTrader:
         if result is not None:
             self._trade_count += len(result.trades)
             self._unpublished_results.append(result)
-        self._persist_state(tracked)
-        self._publish_checkpointed_results()
+        try:
+            self._persist_state(tracked)
+            self._publish_checkpointed_results()
+        except ValueError as exc:
+            # Booked already: every caller reads a ValueError as an answer
+            # that does not apply, and would report this one as not applied.
+            raise RuntimeError(f"applied broker report not recorded: {exc}") from exc
         # Last, so no alert runs between booking a fill and recording it. An
         # answer that applies in the pass where another failed has not shown
         # the failure gone, such as a cancel's after an unappliable read.
@@ -5543,6 +5568,9 @@ class LiveTrader:
             try:
                 cancel_report = self._send_cancel(tracked, order_id)
                 self._apply_order_report(tracked, cancel_report)
+            except ValueError as exc:
+                # The venue answered the cancel, with something that does not apply either.
+                outcome = f"cancel sent, its answer not applied ({type(exc).__name__}: {exc})"
             except Exception as exc:
                 logger.exception("Cancel not confirmed for %s", request.client_order_id)
                 outcome = f"cancel not confirmed ({type(exc).__name__}: {exc})"

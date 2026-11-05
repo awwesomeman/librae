@@ -18,7 +18,7 @@ from librae.core.strategy import OrderIntent
 from librae.live.state import MemoryLiveStateStore
 
 from tests.engine.live_factories import TEST_CLOCK_NOW
-from tests.engine.test_halt_runtime_events import _timeout_trader
+from tests.engine.test_halt_runtime_events import _Crash, _timeout_trader
 from tests.engine.test_live_flatten import _bars, _position, _submitted, _titled
 from tests.engine.test_live_halt_durability import (
     OUTAGE,
@@ -29,6 +29,7 @@ from tests.engine.test_live_halt_durability import (
     _unappliable,
 )
 from tests.engine.test_live_operator_halt import _resting
+from tests.engine.test_live_runner import _broker_report
 
 NOT_APPLIED = "Order Report Not Applied"
 
@@ -384,3 +385,88 @@ class TestAHaltCancelsEveryUnconfirmedOrder:
         assert adapter.cancel_order.call_args.args[0] == aaa.order_id
         assert trader._active_orders == []
         assert len(_exactly(alerts, "Order Timeout")) == 1
+
+
+def _unsupported(order_id: str, _symbol) -> dict:
+    """An answer the executor cannot read: a status it does not know."""
+    return _resting(order_id, "bogus-status")
+
+
+class TestAnAnswerThatCannotBeRead:
+    """A status read the executor refuses is an answer that does not apply, not a dead cycle."""
+
+    def test_it_alerts_naming_the_order_and_is_cancelled_at_its_timeout(self):
+        adapter = _resting_adapter()
+        trader, alerts, now = _trader(adapter)
+        aaa = _buy_aaa(trader)
+        adapter.get_order.side_effect = _unsupported
+
+        trader._poll_cycle()
+
+        [alert] = _titled(alerts, NOT_APPLIED)
+        assert f"AAA order_id={aaa.order_id} broker report not applied" in alert["message"]
+        assert "unsupported broker order status" in alert["message"]
+        assert trader._active_orders == [aaa]
+        adapter.cancel_order.assert_not_called()
+
+        now[0] += timedelta(seconds=30)
+        trader._poll_cycle()
+        trader._poll_cycle()
+
+        adapter.cancel_order.assert_called_once()
+        assert trader._active_orders == []
+        assert len(_exactly(alerts, "Order Timeout")) == 1
+        assert _exactly(alerts, "Resolved") == [], "the read before the cancel never applied"
+
+    def test_a_restored_cancel_that_ends_cleanly_fails_as_its_timeout_would(self):
+        """After a restart the timeout's cancel finishes, past a read that cannot apply."""
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _timeout_trader(adapter, store, now)
+        aaa = _buy_aaa(trader)
+        now[0] += timedelta(seconds=30)
+        adapter.cancel_order.side_effect = _Crash
+        with pytest.raises(_Crash):
+            trader._advance_live_orders()
+        adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
+        adapter.get_order.side_effect = _unsupported
+
+        trader, _, alerts = _timeout_trader(adapter, store, now)
+        trader._initialize_run()
+
+        assert trader._active_orders == []
+        assert adapter.cancel_order.call_count == 2, "the crashed one, then the restored one"
+        assert _exactly(alerts, "Order Reconciliation Failed") == []
+        [mismatch] = _exactly(alerts, NOT_APPLIED)
+        assert f"AAA order_id={aaa.order_id} broker report not applied" in mismatch["message"]
+        [timeout] = _exactly(alerts, "Order Timeout")
+        assert "status=cancelled" in timeout["message"]
+        assert trader._halted is True, "an ungrouped order's timeout halts"
+
+    def test_a_value_error_recording_an_applied_fill_is_not_read_as_one(self):
+        adapter = _resting_adapter()
+        trader, alerts, now = _trader(adapter)
+        aaa = _buy_aaa(trader)
+        persist = trader._persist_state
+        refused: list[bool] = []
+
+        def persist_refusing_the_fill(*orders):
+            if not refused and any(order.status == "filled" for order in orders):
+                refused.append(True)
+                raise ValueError("snapshot failed validation")
+            persist(*orders)
+
+        trader._persist_state = persist_refusing_the_fill
+        adapter.get_order.side_effect = lambda order_id, _s: _broker_report(
+            order_id=order_id, quantity=1.0
+        )
+        now[0] += timedelta(seconds=30)
+
+        with pytest.raises(RuntimeError, match="applied broker report not recorded"):
+            trader._poll_cycle()
+
+        assert aaa.status == "filled"
+        adapter.cancel_order.assert_not_called()
+        assert _titled(alerts, NOT_APPLIED) == []
+        assert trader._halted is False

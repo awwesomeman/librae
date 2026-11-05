@@ -623,8 +623,9 @@ engine sent goes out at most once per cycle, and not again while the venue
 reports it `cancel_pending`; one the venue turns down, leaving the order
 working, is sent again. An order the venue reports `cancel_pending` on its own
 is polled until it ends, and is under its timeout again if it reverts to
-working. A status report that cannot be applied to its order (another order
-id, a cumulative fill that went backwards) leaves the order tracked and under
+working. A status report that cannot be read or applied to its order (a
+status the executor does not know, another order id, a cumulative fill that
+went backwards) leaves the order tracked and under
 its timeout, alerts naming it, repeating while it lasts (see the runbook's
 [lasting problems](operational-runbook.md#lasting-problems)), and lets the
 rest of the cycle run; at startup it still fails closed. While an operator
@@ -1021,7 +1022,9 @@ adapter at submission.
   quantity) fails the cancellation but never holds its cancel back, since the
   order may still be working, nor the cancels of the other tracked orders.
   Met while a running account finishes a cancel, such as a timeout's after a
-  restart, it then halts the account; an operator flatten instead resends that
+  restart, it then halts the account, unless the cancel's own answer applied
+  and ended the order, which then ends as any cancel does; an operator flatten
+  instead resends that
   cancel each cycle and waits for the order, since a halt would refuse it.
   The cancellation stays owed until the venue confirms every tracked
   order ended: each later cycle retries it before any order work, and a
