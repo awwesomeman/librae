@@ -675,10 +675,10 @@ repeat the largest request at doubling poll intervals, capped by
 history is retried on the next poll. After every symbol is ready, each poll
 asks for the newest few bars and widens the request until it reaches the
 newest cached one, so bars that closed while a poll failed, or that a source
-held back and released together, are not skipped; it stops early when the
-source answers with fewer bars than asked, since asking for more then finds
-nothing older (an IBKR intraday request spans whole days, so a hole across a
-market closure can remain). A custom
+held back and released together, are not skipped. It stops early when the
+source answers with fewer bars than asked, as a count-based source then has
+nothing older; an IBKR intraday request spans whole days instead, so a hole
+across a market closure can remain there. A custom
 `warmup_fetcher` remains responsible for returning completed observations and
 for any DB-first/API gap-filling policy.
 
@@ -1507,9 +1507,10 @@ cycle.
 Live also does not replay an outage backlog into the market. If a fetch returns
 multiple bars newer than the durable watermark, only the latest completed bar
 is evaluated and the skipped count is alerted. Sim continues to replay every
-uncommitted bar, up to four warmup windows of them; an outage longer than that
-stops a sim's evaluation until restart, as `Shadow replay backlog exceeded`
-logs. The optional `clock` constructor dependency exists to make
+uncommitted bar while its cache, the decided window included, stays within
+four warmup windows (about three windows of backlog); an outage longer than
+that stops a sim's evaluation until restart, as `Shadow replay backlog
+exceeded` logs. The optional `clock` constructor dependency exists to make
 time-based integrations deterministic; production defaults to UTC now.
 
 ## Sim monitoring
