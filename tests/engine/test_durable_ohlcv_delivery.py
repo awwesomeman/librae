@@ -15,6 +15,7 @@ a database that is fully down fails the checkpoint too, so nothing advances.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -813,6 +814,115 @@ class TestTheAuditRowSaysWhenTheBarWasReceived:
             (self.LAST_BAR + timedelta(hours=1), self.RECEIVED, 100.0),
             (self.RECEIVED + timedelta(minutes=15), self.RECEIVED + timedelta(minutes=30), 100.5),
         ]
+
+    def test_a_revision_under_the_same_available_at_is_a_new_version(self, caplog) -> None:
+        """A source can change a closed bar without moving the available_at
+        its calendar derives. Kept silently, the cache and every later window
+        would read the first values while the source says otherwise."""
+        sink = _RecordingDurableSink()
+        clock = {"now": self.RECEIVED}
+        frame = {"bars": _frame(6)}
+        runner = self._runner(sink, clock, frame=frame)
+        runner._poll_cycle()
+
+        revised = _frame(6)
+        revised.loc[5, ["close", "volume"]] = [100.5, 1_200.0]
+        frame["bars"] = revised
+        clock["now"] = self.RECEIVED + timedelta(minutes=30)
+        with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
+            runner._poll_cycle()
+            clock["now"] = self.RECEIVED + timedelta(minutes=40)
+            runner._poll_cycle()
+
+        versions = [
+            (bar["available_at"], bar["observed_at"], bar["close"], bar["volume"])
+            for ts, bar in sink.bars
+            if ts == self.LAST_BAR
+        ]
+        available_at = self.LAST_BAR + timedelta(hours=1)
+        assert versions == [
+            (available_at, self.RECEIVED, 100.0, 1_000.0),
+            (available_at, self.RECEIVED + timedelta(minutes=30), 100.5, 1_200.0),
+        ]
+        assert runner._ohlcv_cache["BTCUSDT"].iloc[-1]["close"] == 100.5
+        assert caplog.text.count("changed under the same available_at") == 1
+
+    def test_the_next_decision_reads_the_revised_bar(self) -> None:
+        from tests.engine.live_factories import _simple_feature_fn, _test_cfg, make_live_runner
+
+        windows: list[pd.DataFrame] = []
+
+        def feature_fn(history: pd.DataFrame) -> pd.DataFrame:
+            windows.append(history.copy())
+            return _simple_feature_fn(history)
+
+        clock = {"now": self.RECEIVED}
+        frame = {"bars": _frame(6)}
+        runner = make_live_runner(
+            config=_test_cfg(mode="sim", warmup_periods=2),
+            fetcher=lambda *a, **k: frame["bars"],
+            feature_fn=feature_fn,
+            clock=lambda: clock["now"],
+        )
+        runner._poll_cycle()
+
+        revised = _frame(7)
+        revised.loc[5, "close"] = 100.5
+        frame["bars"] = revised
+        clock["now"] = self.RECEIVED + timedelta(hours=1)
+        runner._poll_cycle()
+
+        assert windows[-1].index[-1] == pd.Timestamp(self.LAST_BAR + timedelta(hours=1))
+        assert windows[-1].loc[pd.Timestamp(self.LAST_BAR), "close"] == 100.5
+
+    def test_a_tie_with_the_same_values_keeps_the_cached_row(self) -> None:
+        """A fetch can lack a column the cached row carries, such as a
+        financing rate whose endpoint failed this poll."""
+        runner = self._runner(None, {"now": self.RECEIVED})
+        cached = _frame(2).assign(available_at=lambda f: f["ts"] + pd.Timedelta(hours=1))
+        cached["funding_rate"] = [0.0, 0.0001]
+        fetched = cached.drop(columns="funding_rate")
+
+        merged = runner._merge_runtime_rows("BTCUSDT", cached, fetched)
+
+        assert merged["funding_rate"].tolist() == [0.0, 0.0001]
+
+    def test_a_revision_keeps_a_column_the_fetch_lacks(self) -> None:
+        runner = self._runner(None, {"now": self.RECEIVED})
+        cached = _frame(2).assign(available_at=lambda f: f["ts"] + pd.Timedelta(hours=1))
+        cached["funding_rate"] = [0.0, 0.0001]
+        fetched = cached.drop(columns="funding_rate")
+        fetched.loc[1, "close"] = 100.5
+
+        merged = runner._merge_runtime_rows("BTCUSDT", cached, fetched)
+
+        assert merged["close"].tolist() == [100.0, 100.5]
+        assert merged["funding_rate"].tolist() == [0.0, 0.0001]
+
+    def test_a_fetch_that_revises_a_bar_twice_records_what_the_cache_kept(
+        self, monkeypatch
+    ) -> None:
+        """A warmup ladder or a history walk merges several responses in one
+        fetch, so the same bar can be revised twice before it is recorded."""
+        sink = _RecordingDurableSink()
+        runner = self._runner(sink, {"now": self.RECEIVED})
+        bar = {
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "volume": 1_000.0,
+            "available_at": pd.Timestamp(self.LAST_BAR + timedelta(hours=1)),
+            "observed_at": self.RECEIVED,
+        }
+
+        def fetch(symbol, *, audit_sink, correction_sink):
+            correction_sink.extend([(self.LAST_BAR, {**bar, "close": c}) for c in (100.5, 100.7)])
+            return _frame(6)
+
+        monkeypatch.setattr(runner, "_fetch_with_cache_unchecked", fetch)
+        runner._fetch_runtime_frames()
+
+        assert [recorded["close"] for _ts, recorded in sink.bars] == [100.7]
 
     @staticmethod
     def _warmup_runner(sink, clock, frame):

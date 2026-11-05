@@ -2136,7 +2136,9 @@ class TestLiveTrader:
 
         assert symbol not in runner._ohlcv_cache
 
-    def test_same_timestamp_runtime_versions_match_database_policy(self):
+    def test_same_timestamp_runtime_versions_match_run_bars_versions(self):
+        """run_bars keys a version by ts, available_at and values, so a change
+        under the same available_at is a new version, and the later one wins."""
         runner = make_live_runner(config=_test_cfg(warmup_periods=1))
         timestamp = datetime(2025, 1, 1, tzinfo=UTC)
 
@@ -2163,11 +2165,11 @@ class TestLiveTrader:
         )
 
         assert older.loc[0, "close"] == 200.0
-        assert equal.loc[0, "close"] == 200.0
+        assert equal.loc[0, "close"] == 150.0
         assert newer.loc[0, "close"] == 300.0
         assert newer.loc[0, "available_at"] == pd.Timestamp("2025-01-01T03:00:00Z")
 
-    def test_poll_persists_only_newer_correction_without_replaying_observation(self):
+    def test_poll_persists_corrections_but_not_older_versions_or_replays(self):
         from librae.core.executor import execute_pending_decision_and_stops
 
         first_ts = datetime(2025, 1, 1, tzinfo=UTC)
@@ -2243,6 +2245,7 @@ class TestLiveTrader:
         ] == [
             ("BTCUSDT", "1h", first_ts, 100.0, pd.Timestamp("2025-01-01T01:00:00Z")),
             ("BTCUSDT", "1h", first_ts, 101.0, pd.Timestamp("2025-01-01T02:00:00Z")),
+            ("BTCUSDT", "1h", first_ts, 150.0, pd.Timestamp("2025-01-01T02:00:00Z")),
             ("BTCUSDT", "1h", next_ts, 200.0, pd.Timestamp("2025-01-01T02:00:00Z")),
         ]
         assert all(
