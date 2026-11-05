@@ -43,6 +43,7 @@ from librae.core.trading_calendar import (
     period_close,
     period_start,
     resample_session_ohlcv,
+    session_lookback_days,
 )
 from librae.core.utils import (
     floor_to_step,
@@ -346,7 +347,8 @@ class ShioajiAdapter:
                 dates and daily bars of these trading days, with the minutes
                 fetched as far either side as those bars reach (a TAIFEX
                 daily bar opens the night before its trading day). If both
-                are omitted, fetches the most recent *limit* bars. A range
+                are omitted, fetches the most recent *limit* bars, daily or
+                longer ones through such a window of their trading days. A range
                 longer than Shioaji's 30-day kbars() query limit is fetched
                 in multiple chunked calls and concatenated transparently.
             limit: Max bars (used only when start/end are omitted).
@@ -369,6 +371,9 @@ class ShioajiAdapter:
         )
 
         empty = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+        dateless = not start and not end
+        if dateless and interval_to_timedelta(timeframe) >= timedelta(days=1):
+            start = _dateless_first_day(timeframe, limit, resolved_calendar)
         window = None
         if start:
             last_day = _to_date(end) if end else pd.Timestamp.now(tz=_TAIPEI).date()
@@ -418,7 +423,7 @@ class ShioajiAdapter:
             # An intraday bucket that opened before the poll's first date,
             # mid night session, lacks its head: drop it rather than return it
             # as a whole bar.
-            if window is None and target_seconds < 24 * 60 * 60:
+            if window is None:
                 df = df.loc[df["ts"] >= window_open].reset_index(drop=True)
         if window is not None:
             df = df.loc[(df["ts"] >= bars_from) & (df["ts"] < bars_before)].reset_index(drop=True)
@@ -429,7 +434,7 @@ class ShioajiAdapter:
                 timeframe,
                 calendar_id=resolved_calendar,
             )
-        if not start and not end and len(df) > limit:
+        if dateless and len(df) > limit:
             df = df.tail(limit).reset_index(drop=True)
 
         return df[["ts", "open", "high", "low", "close", "volume"]]
@@ -918,6 +923,31 @@ def _date_window(
 # Shioaji rejects a single kbars() query spanning more than this many days:
 # https://sinotrade.github.io/zh/tutor/limit/
 _MAX_KBAR_QUERY_DAYS = 30
+
+# A poll spends the intraday kbars() quota, so a dateless poll of daily bars
+# looks back at most this far: one query even after _date_window widens it to
+# the trading night before (12 days over the 2026 Lunar New Year).
+_DATELESS_DAILY_LOOKBACK_DAYS = 14
+
+
+def _dateless_first_day(timeframe: str, limit: int, calendar_id: str) -> str:
+    """First date of the window a dateless poll of daily or longer bars asks for.
+
+    A dateless kbars() call answers yesterday and today by stamp date, its
+    documented default (https://sinotrade.github.io/zh/tutor/market_data/historical/;
+    on 2026-11-05 it started at stamp 11-04 00:00). A TAIFEX daily bar opens
+    the evening before its trading day, a Monday's on Friday, so that window
+    cuts them; their trading days are asked for by date instead.
+    """
+    now = pd.Timestamp.now(tz=_TAIPEI)
+    # No more sessions than days fit in the cap, so a warmup-sized limit
+    # cannot reach past the calendar.
+    sessions = min(
+        (limit + 1) * int(interval_to_timedelta(timeframe) // timedelta(days=1)),
+        _DATELESS_DAILY_LOOKBACK_DAYS,
+    )
+    days = min(session_lookback_days(now, sessions, calendar_id), _DATELESS_DAILY_LOOKBACK_DAYS)
+    return (now.date() - timedelta(days=days)).isoformat()
 
 
 def _kbar_date_chunks(start: date, end: date, max_days: int) -> list[tuple[date, date]]:
