@@ -431,7 +431,11 @@ prepared result is checked again before submission. Short feasibility does not
 diverge either: a short intent or negative weight on crypto spot fails decision
 preflight on the emitting bar in every mode (`SymbolInfo.can_short`).
 
-OHLCV caches are sorted and deduplicated. Mode-specific backlog handling is
+OHLCV caches are sorted and deduplicated. Of two versions of a bar the later
+`available_at` wins, and under the same one the fetch that changed its values,
+since a source can revise a closed bar in place; a new version of a bar
+already decided is recorded beside the old one (`run_bars` in
+[architecture.md](../../architecture.md)). Mode-specific backlog handling is
 defined under data staleness below. Both modes advance a durable per-symbol
 watermark only after successful processing. A late symbol at the same
 timestamp is processed with any same-timestamp bars already present in cache,
