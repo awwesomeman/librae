@@ -1467,7 +1467,9 @@ as one call per symbol when the sink provides it. A refusal is logged, the
 rest is skipped, and the cycle still decides its new bar. A later version of a
 bar already decided is rare and is what the audit keeps, so it rides the
 queue; a burst of them is flushed whenever the queue fills, so a healthy sink
-loses none to the bound.
+loses none to the bound. A sink with `on_ohlcv_batch` takes queued rows of one
+symbol in one call, so a burst does not hold the decision for a write per row;
+a durable sink's batch path must raise on a failed write, as `on_ohlcv` does.
 
 Any other callback keeps the documented best-effort contract: it is invoked,
 its failure is logged, and nothing is queued. The engine cannot acknowledge on

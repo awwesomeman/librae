@@ -15,6 +15,7 @@ a database that is fully down fails the checkpoint too, so nothing advances.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pandas as pd
@@ -653,6 +654,50 @@ class TestTheCheckpointRecordsWhatTheSinkAccepted:
         assert [row.identity for row in pending] == untouched
 
 
+class TestQueuedRowsGoInBatches:
+    """A sink with a batch path takes a run of one symbol's queued rows in
+    one call, in ts order, acknowledged whole or not at all."""
+
+    @staticmethod
+    def _flush(pending, batch):
+        from librae.live.ohlcv_audit import flush_pending
+
+        singles: list[datetime] = []
+        flush_pending(
+            pending,
+            on_ohlcv=lambda _symbol, _tf, _bar, ts: singles.append(ts),
+            on_ohlcv_batch=batch,
+            degraded=False,
+            persist=lambda: None,
+        )
+        return singles
+
+    def test_a_batch_breaks_where_the_symbol_or_ts_order_does(self) -> None:
+        first, second, third = _pending_sequence(3)
+        other = replace(second, subscription=replace(_subscription(), symbol="ETHUSDT"))
+        correction = replace(first, available_at=first.available_at + timedelta(minutes=5))
+        pending = [first, second, third, correction, other]
+        batches: list[tuple[str, list[datetime]]] = []
+
+        singles = self._flush(
+            pending, lambda symbol, _tf, bars: batches.append((symbol, [ts for ts, _ in bars]))
+        )
+
+        assert batches == [("BTCUSDT", [first.ts, second.ts, third.ts])]
+        assert singles == [correction.ts, other.ts]
+        assert pending == []
+
+    def test_a_refused_batch_stays_queued_whole(self) -> None:
+        pending = _pending_sequence(3)
+        queued = list(pending)
+
+        def refuse(*_args: object) -> None:
+            raise RuntimeError("timescale unavailable")
+
+        assert self._flush(pending, refuse) == []
+        assert pending == queued
+
+
 class _RecordingDurableSink(_DurableSink):
     """A durable sink that keeps each delivered bar, clocks included."""
 
@@ -1009,6 +1054,45 @@ class TestARestartReReadsOnlyWhatADecisionRead:
             decided + timedelta(hours=1),
         ]
 
+    def test_a_crash_right_after_the_first_decision_still_records_its_window(self) -> None:
+        """The first decision's checkpoint lands before its watermark; a crash
+        before its window is offered must not lose the window once the
+        market moves on."""
+        from librae.live.state import MemoryLiveStateStore
+
+        from tests.engine.live_factories import _test_cfg, make_live_runner
+
+        class Crash(BaseException):
+            pass
+
+        store = MemoryLiveStateStore()
+        frame = {"bars": _frame(6)}
+
+        def runner(sink):
+            return make_live_runner(
+                config=_test_cfg(mode="sim", warmup_periods=5),
+                state_store=store,
+                fetcher=lambda *a, **k: frame["bars"],
+                on_ohlcv=sink,
+            )
+
+        first = runner(_RecordingDurableSink())
+
+        def crash(*_args: object) -> None:
+            raise Crash
+
+        first._deliver_ohlcv = crash
+        with pytest.raises(Crash):
+            first._poll_cycle()
+        decided = datetime(2025, 1, 1, 5, tzinfo=UTC)
+
+        frame["bars"] = _frame(8)
+        recovered = _RecordingDurableSink()
+        runner(recovered)._poll_cycle()
+
+        recorded = {ts for ts, _bar in recovered.bars}
+        assert {decided - timedelta(hours=hours) for hours in range(5)} <= recorded
+
 
 class TestABurstOfCorrectionsIsNotDropped:
     BOUND = 2
@@ -1072,6 +1156,31 @@ class TestABurstOfCorrectionsIsNotDropped:
         assert len(restamped) == 5
         assert runner._pending_ohlcv == []
         assert dropped == []
+
+    def test_a_sink_that_takes_batches_gets_the_burst_in_batches(self, monkeypatch) -> None:
+        """The burst is flushed during the fetch, before the decision: one
+        write per correction would hold the decision for each."""
+        batches: list[int] = []
+
+        def take_batches(runner):
+            sink = runner._on_ohlcv
+
+            def batch(_symbol, _timeframe, bars):
+                batches.append(len(bars))
+                sink.bars.extend((ts, dict(bar)) for ts, bar in bars)
+
+            runner._on_ohlcv_batch = batch
+
+        runner, restamped, dropped = self._restamp_every_cached_bar(
+            monkeypatch, before_second_poll=take_batches
+        )
+
+        assert len(restamped) == 5
+        assert runner._pending_ohlcv == []
+        assert dropped == []
+        # Each flush the full queue triggers is one call; the last row alone
+        # goes through on_ohlcv.
+        assert batches == [self.BOUND, self.BOUND]
 
     def test_a_refusing_sink_is_not_asked_again_for_every_correction(self, monkeypatch) -> None:
         """With the queue full and the database down, one write attempt per
