@@ -355,9 +355,11 @@ class _TimescaleCallbacks:
         # dirty-flag gated, see live/engine.py), so every KPI panel sourced
         # from it (Total Return, Max Drawdown, Sharpe, ...) shows "No data"
         # next to an already-live Unrealized P&L, which reads as broken.
+        # A restored run registers again and must keep the KPIs it has.
         self._write(
             write_strategy_performance,
             critical=True,
+            if_absent=True,
             run_id=run_id,
             account_id=self._config.account_id,
             currency=self._config.account.currency,

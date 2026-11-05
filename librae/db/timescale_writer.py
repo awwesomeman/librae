@@ -1092,10 +1092,14 @@ def write_strategy_performance(
     net_pnl: float,
     metrics: Any,
     *,
+    if_absent: bool = False,
     cur: PgCursor | None = None,
     dsn: str | None = None,
 ) -> None:
     """Write/update one account's strategy_name performance.
+
+    ``if_absent=True`` writes only when the account has no row yet, for a
+    baseline that must not replace KPIs already computed for the run.
 
     If ``cur`` is provided, executes on that cursor (caller owns the
     transaction).  Otherwise opens its own connection and commits.
@@ -1112,7 +1116,11 @@ def write_strategy_performance(
                 total_commission, total_slippage, total_tax)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (run_id, account_id) DO UPDATE SET
+               ON CONFLICT (run_id, account_id) DO """
+    sql += (
+        "NOTHING"
+        if if_absent
+        else """UPDATE SET
                  currency=EXCLUDED.currency,
                  initial_cash=EXCLUDED.initial_cash,
                  final_equity=EXCLUDED.final_equity,
@@ -1139,6 +1147,7 @@ def write_strategy_performance(
                  total_commission=EXCLUDED.total_commission,
                  total_slippage=EXCLUDED.total_slippage,
                  total_tax=EXCLUDED.total_tax"""
+    )
     params = (
         run_id,
         account_id,

@@ -881,6 +881,8 @@ def test_register_run_seeds_zero_baseline_strategy_performance() -> None:
     assert kwargs["initial_cash"] == kwargs["final_equity"] == 50_000.0
     assert kwargs["net_pnl"] == 0.0
     assert kwargs["metrics"].total_return == 0.0
+    # A restored run registers again; its computed KPIs must survive that.
+    assert kwargs["if_absent"] is True
 
 
 def test_register_run_persists_poll_seconds_for_runtime_health() -> None:
