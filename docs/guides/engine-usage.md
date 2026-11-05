@@ -622,12 +622,16 @@ An optional local wall-clock timeout cancels an over-age order, preserves any
 confirmed partial fill, and halts dependent work for review. A cancel the
 engine sent goes out at most once per cycle, and not again while the venue
 reports it `cancel_pending`; one the venue turns down, leaving the order
-working, is sent again. An order the venue reports `cancel_pending` on its own
-is polled until it ends, and is under its timeout again if it reverts to
-working. A status report that cannot be read or applied to its order (a
-status the executor does not know, another order id, a cumulative fill that
-went backwards) leaves the order tracked and under
-its timeout, alerts naming it, repeating while it lasts (see the runbook's
+working, is sent again, and so is one whose status a later cycle cannot read
+or apply, since the venue may have put the order back to work. A status read
+that fails, other than with an answer the executor refuses, fails the cycle
+before the order's timeout, naming the order, so a **Poll Error** that
+follows says which order it is. An order the venue reports `cancel_pending`
+on its own is polled until it ends, and is under its timeout again if it
+reverts to working. A status report that cannot be read or applied to its
+order (a status the executor does not know, another order id, a cumulative
+fill that went backwards) leaves the order tracked and under its timeout,
+alerts naming it, repeating while it lasts (see the runbook's
 [lasting problems](operational-runbook.md#lasting-problems)), and lets the
 rest of the cycle run; at startup it still fails closed, unless the order is
 past its timeout, which cancels it. While an operator

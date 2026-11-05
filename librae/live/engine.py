@@ -2482,10 +2482,25 @@ class LiveTrader:
             # Not persisted: a start decides from the checkpoint, as a new process does.
             self._halt_cancels_pending = False
             restored_halted = self._halted
+            restored_orders = bool(self._active_orders)
             try:
                 if self._halted and not self._has_active_recovery_orders():
                     self._cancel_active_orders()
                     self._halt_cancels_pending = bool(self._active_orders)
+                    # The halt that owed these cancels alerted in the process
+                    # that is gone, so this one says how its own pass ended.
+                    if self._halt_cancels_pending:
+                        self._send_alert(
+                            "Halt Cancellation Owed",
+                            "restarted halted; awaiting cancel confirmation for "
+                            f"{self._tracked_orders_summary()}",
+                        )
+                    elif restored_orders:
+                        self._send_alert(
+                            "Halt Cancellation Completed",
+                            "restarted halted; the venue confirmed every cancel the halt "
+                            "owed; no order is tracked.",
+                        )
                 else:
                     self._advance_live_orders(submit_planned=False)
                 self._reconcile_open_orders()
@@ -2568,7 +2583,7 @@ class LiveTrader:
                     try:
                         self._poll_cycle()
                         self._consecutive_errors = 0
-                    except Exception:
+                    except Exception as exc:
                         self._consecutive_errors += 1
                         logger.exception(
                             "Error in poll cycle (%d consecutive), will retry next interval",
@@ -2579,7 +2594,8 @@ class LiveTrader:
                                 "send_alert",
                                 title=f"[{strategy_name}] Poll Error",
                                 message=(
-                                    f"{self._consecutive_errors} consecutive failures. Check logs."
+                                    f"{self._consecutive_errors} consecutive failures, the "
+                                    f"last {type(exc).__name__}: {exc}. Check logs."
                                 ),
                             )
                     finally:
@@ -4963,7 +4979,12 @@ class LiveTrader:
                     return
                 except Exception as exc:
                     if not self._live_order_timed_out(tracked):
-                        raise
+                        # The cycle fails and the next one reads again; a Poll
+                        # Error that follows names the order.
+                        raise RuntimeError(
+                            f"{request.symbol} order_id={tracked.order_id or 'unassigned'} "
+                            f"status unavailable ({type(exc).__name__}: {exc})"
+                        ) from exc
                     logger.exception(
                         "Order status unavailable after local timeout: %s",
                         request.client_order_id,
@@ -5474,7 +5495,8 @@ class LiveTrader:
         out unless one this process sent still stands
         (``_cancel_outcome_so_far``): neither a pending state the venue set
         itself nor a failed status read holds it back, and in a later pass
-        one the venue turned down, leaving the order working, is sent again.
+        one the venue turned down, leaving the order working, is sent again,
+        as is one whose pending state this pass could not read.
         NautilusTrader and LEAN likewise hold back a second cancel only while
         their own is pending.
 
@@ -5497,6 +5519,7 @@ class LiveTrader:
         request = tracked.request
         order_id = tracked.order_id
         cancel_sent = False
+        status_read = False
         try:
             try:
                 report = self._timed_order_call(
@@ -5523,7 +5546,8 @@ class LiveTrader:
                 self._apply_order_report(tracked, report)
                 if report.status in ("filled", "cancelled", "rejected"):
                     return
-            if self._cancel_outcome_so_far(tracked) is not None:
+                status_read = True
+            if self._cancel_outcome_so_far(tracked, status_read=status_read) is not None:
                 return
 
             cancel_sent = True
@@ -5539,16 +5563,18 @@ class LiveTrader:
             self._cancel_unreconciled(tracked, order_id, exc, cancel_sent=cancel_sent)
             return
 
-    def _cancel_outcome_so_far(self, tracked: TrackedOrder) -> str | None:
+    def _cancel_outcome_so_far(self, tracked: TrackedOrder, *, status_read: bool) -> str | None:
         """What became of a cancel this process sent that still stands, or None if none does.
 
-        One stands while the venue's latest applied answer reports it
-        pending, and through the rest of the pass that sent it.
+        One stands through the rest of the pass that sent it, and while the
+        venue reports it pending in an answer ``status_read`` says this pass
+        applied: a pending state from an earlier pass, with the status now
+        unreadable, may hide an order the venue put back to work.
         """
         sent_in = self._cancels_sent.get(tracked.request.client_order_id)
         if sent_in is None:
             return None
-        if tracked.status == "cancel_pending":
+        if status_read and tracked.status == "cancel_pending":
             return "cancel already pending"
         return "cancel already sent" if sent_in == self._order_pass else None
 
@@ -5582,7 +5608,7 @@ class LiveTrader:
         self._note_unappliable(tracked)
         request = tracked.request
         failure = _report_failure(request, order_id, error)
-        standing = self._cancel_outcome_so_far(tracked)
+        standing = self._cancel_outcome_so_far(tracked, status_read=False)
         if cancel_sent:
             outcome = "cancel sent"
         elif standing is not None:

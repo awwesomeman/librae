@@ -260,9 +260,9 @@ class TestAReportThatKeepsFailingToApply:
             now[0] += timedelta(minutes=5)
 
         first, reminder = _titled_not_applied(alerts)
-        assert "cancel already pending; the halt's cancellation stays owed" in first["message"]
+        assert "cancel sent; the halt's cancellation stays owed" in first["message"]
         assert "still so after 1h 0m, seen 13 times" in reminder["message"]
-        adapter.cancel_order.assert_called_once()
+        assert adapter.cancel_order.call_count == 14, "the halt's, then one per pass"
         assert trader._halt_cancels_pending is True
 
         adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
