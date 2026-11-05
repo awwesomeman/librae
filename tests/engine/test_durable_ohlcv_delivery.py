@@ -887,6 +887,43 @@ class TestTheAuditRowSaysWhenTheBarWasReceived:
 
         assert merged["funding_rate"].tolist() == [0.0, 0.0001]
 
+    def test_a_revision_keeps_a_column_the_fetch_lacks(self) -> None:
+        runner = self._runner(None, {"now": self.RECEIVED})
+        cached = _frame(2).assign(available_at=lambda f: f["ts"] + pd.Timedelta(hours=1))
+        cached["funding_rate"] = [0.0, 0.0001]
+        fetched = cached.drop(columns="funding_rate")
+        fetched.loc[1, "close"] = 100.5
+
+        merged = runner._merge_runtime_rows("BTCUSDT", cached, fetched)
+
+        assert merged["close"].tolist() == [100.0, 100.5]
+        assert merged["funding_rate"].tolist() == [0.0, 0.0001]
+
+    def test_a_fetch_that_revises_a_bar_twice_records_what_the_cache_kept(
+        self, monkeypatch
+    ) -> None:
+        """A warmup ladder or a history walk merges several responses in one
+        fetch, so the same bar can be revised twice before it is recorded."""
+        sink = _RecordingDurableSink()
+        runner = self._runner(sink, {"now": self.RECEIVED})
+        bar = {
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "volume": 1_000.0,
+            "available_at": pd.Timestamp(self.LAST_BAR + timedelta(hours=1)),
+            "observed_at": self.RECEIVED,
+        }
+
+        def fetch(symbol, *, audit_sink, correction_sink):
+            correction_sink.extend([(self.LAST_BAR, {**bar, "close": c}) for c in (100.5, 100.7)])
+            return _frame(6)
+
+        monkeypatch.setattr(runner, "_fetch_with_cache_unchecked", fetch)
+        runner._fetch_runtime_frames()
+
+        assert [recorded["close"] for _ts, recorded in sink.bars] == [100.7]
+
     @staticmethod
     def _warmup_runner(sink, clock, frame):
         from librae.live.state import MemoryLiveStateStore

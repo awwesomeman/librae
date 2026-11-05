@@ -1645,7 +1645,9 @@ class LiveTrader:
                     pd.Timestamp(event_ts).value,
                     pd.Timestamp(audit_bar[AVAILABLE_AT_COLUMN]).value,
                 )
-                unique.setdefault(version, (event_ts, audit_bar))
+                # The last one is what the cache kept: a fetch that merges
+                # several responses can revise a bar more than once.
+                unique[version] = (event_ts, audit_bar)
             return [unique[version] for version in sorted(unique)]
 
         corrections_queued = False
@@ -3457,6 +3459,13 @@ class LiveTrader:
         if cached is not None and not cached.empty:
             cached = self._normalize_runtime_rows(symbol, cached)
             revised = self._revised_in_place(symbol, cached, fetched)
+            missing = cached.columns.difference(fetched.columns)
+            if revised.any() and len(missing):
+                # A revision keeps what the fetch lacks, such as a financing
+                # rate whose endpoint failed this poll.
+                carried = cached.set_index("ts").loc[fetched.loc[revised, "ts"], missing]
+                carried.index = fetched.index[revised.to_numpy()]
+                fetched = fetched.join(carried)
         else:
             revised = pd.Series(False, index=fetched.index)
         observed_at = self._record_observed_at(symbol, fetched)
@@ -3548,8 +3557,7 @@ class LiveTrader:
                 (pd.Timestamp(new["ts"]).value, pd.Timestamp(new[AVAILABLE_AT_COLUMN]).value), None
             )
             logger.warning(
-                "%s bar %s changed under the same available_at %s: %s -> %s; "
-                "later windows read the new values",
+                "%s bar %s changed under the same available_at %s: %s -> %s",
                 symbol,
                 new["ts"],
                 new[AVAILABLE_AT_COLUMN],
