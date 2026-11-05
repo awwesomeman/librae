@@ -135,10 +135,12 @@ def test_available_symbols_lists_tmf_exact_front_and_next_contracts():
 def _make_adapter(*, ca_activated: bool = False):
     """Build a ShioajiAdapter with mocked internals (no real login)."""
     from librae.brokers.shioaji_adapter import ShioajiAdapter
+    from librae.brokers.shioaji_stream import ShioajiBarStream
 
     adapter = ShioajiAdapter.__new__(ShioajiAdapter)
     adapter._api = MagicMock()
     adapter._read_only = not ca_activated
+    adapter._bar_stream = ShioajiBarStream(adapter._api, adapter._kbars_minutes)
     return adapter
 
 
@@ -769,11 +771,12 @@ class TestDatelessPoll:
         assert list(polled.index) == [_taipei("2026-10-30 15:00")]
         assert kbars.call_count == 1
 
-    def test_an_intraday_poll_still_asks_without_dates(self, monkeypatch):
+    def test_an_intraday_poll_asks_for_the_dateless_window_by_date(self, monkeypatch):
         polled, kbars = self._poll(monkeypatch, "1h", limit=2)
 
         assert list(polled.index) == [_taipei("2026-11-02 11:45"), _taipei("2026-11-02 12:45")]
-        assert set(kbars.call_args.kwargs) == {"contract"}
+        assert kbars.call_args.kwargs["start"] == "2026-11-01"
+        assert kbars.call_args.kwargs["end"] == "2026-11-02"
 
 
 class TestLiveBarClock:
