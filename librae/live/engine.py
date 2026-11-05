@@ -961,6 +961,8 @@ class LiveTrader:
         self._unstarted_groups: set[str] = set()
         # Set only while a flatten submits its exits, before it halts the account.
         self._flatten_at: datetime | None = None
+        # The last order an entry fill was booked for, until the risk limits are checked.
+        self._entry_fill_unchecked: TrackedOrder | None = None
         self._cycle_fetch_seconds: dict[str, float] = {}
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
@@ -2366,6 +2368,31 @@ class LiveTrader:
             symbol=request.symbol,
         )
         return False
+
+    def _post_fill_risk_halted(self) -> bool:
+        """Halt if an entry fill booked since the last check took the account past a limit.
+
+        Any report can carry a fill, whichever path applied it: a status
+        read, a cancel's answer, a sibling's cancel. Not while the account
+        is halted, or a flatten submits its exits: both are closing the book
+        already, and a halt here would cancel the exits. Returns whether it
+        halted.
+        """
+        filled, self._entry_fill_unchecked = self._entry_fill_unchecked, None
+        if filled is None or self._halted or self._flatten_at is not None:
+            return False
+        violation = self._post_fill_risk_violation()
+        if violation is None:
+            return False
+        self._halt_live(
+            title="Post-fill Risk Breach",
+            message=(
+                f"{violation}; after {filled.request.symbol} order_id={filled.order_id} "
+                f"status={filled.status} "
+                f"filled={filled.filled_quantity:.4f}/{filled.request.quantity:.4f}"
+            ),
+        )
+        return True
 
     def _has_active_recovery_orders(self) -> bool:
         """Whether every tracked order is an engine-owned recovery order."""
@@ -4812,6 +4839,8 @@ class LiveTrader:
                         return
                     self._halt_live(title="Order Reconciliation Failed", message=str(exc))
                     return
+                if self._post_fill_risk_halted():
+                    return
                 # Over age, the order fails as its timeout would have failed
                 # it, whichever cancel this was, a halt's of a recovery exit
                 # included, since its position stays open: a restart between
@@ -4921,7 +4950,6 @@ class LiveTrader:
                     )
                     return
 
-            prior_filled_quantity = tracked.filled_quantity
             try:
                 self._apply_order_report(tracked, report)
             except ValueError as exc:
@@ -4953,19 +4981,8 @@ class LiveTrader:
                 if timed_out:
                     self._cancel_timed_out_order(tracked, None, status_error=exc)
                 return
-            # Whatever its status, a report can carry a fill: a cancel the venue
-            # has not finished, or one that ended the order part filled.
-            if (
-                report.filled_quantity > prior_filled_quantity + EPSILON
-                and request.position_effect in ("open", "add")
-            ):
-                risk_violation = self._post_fill_risk_violation()
-                if risk_violation is not None:
-                    self._halt_live(
-                        title="Post-fill Risk Breach",
-                        message=risk_violation,
-                    )
-                    return
+            if self._post_fill_risk_halted():
+                return
             if report.status == "cancel_pending":
                 # The venue is cancelling it on its own; its outcome is polled,
                 # and one that reverts to working is under its timeout again.
@@ -5286,6 +5303,8 @@ class LiveTrader:
                 ),
             )
             return
+        if self._post_fill_risk_halted():
+            return
 
         if cancel_report.status == "filled":
             return
@@ -5371,6 +5390,8 @@ class LiveTrader:
                 time_in_force=request.time_in_force,
             )
             self._record_adv_fill(report.symbol, delta_quantity, adv_session)
+            if request.position_effect in ("open", "add"):
+                self._entry_fill_unchecked = tracked
             if self._live_rebalance is not None:
                 consumed = self._live_rebalance.filled_bar_quantity_by_symbol
                 consumed[report.symbol] = consumed.get(report.symbol, 0.0) + delta_quantity

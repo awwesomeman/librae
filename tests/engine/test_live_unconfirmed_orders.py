@@ -31,6 +31,7 @@ from tests.engine.test_live_halt_durability import (
     _unappliable,
 )
 from tests.engine.test_live_operator_halt import _resting
+from tests.engine.test_live_runner import _broker_report
 
 NOT_APPLIED = "Order Report Not Applied"
 
@@ -432,18 +433,88 @@ class TestAPartlyFilledOrderTheVenueIsCancelling:
         assert trader._positions["AAA"].quantity == pytest.approx(0.5)
         assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
 
-    @pytest.mark.parametrize("status", ["PendingCancel", "canceled"])
-    def test_a_fill_it_carries_past_a_risk_limit_halts(self, status):
+
+def _entry(trader, *, grouped: bool):
+    """Leave an AAA entry working, with a BBB leg of its group queued behind it if grouped."""
+    group_id = "pair" if grouped else None
+    trader._execute_live_decision(
+        [
+            OrderIntent(action="long", symbol="AAA", quantity=1.0, group_id=group_id),
+            *(
+                [OrderIntent(action="long", symbol="BBB", quantity=1.0, group_id=group_id)]
+                if grouped
+                else []
+            ),
+        ],
+        _bars(),
+        TEST_CLOCK_NOW,
+    )
+    return trader._active_orders[0]
+
+
+class TestAFillPastARiskLimitHaltsWhicheverReportCarriesIt:
+    """An entry fill is checked against the limits whether a status read or a cancel's answer brings it."""
+
+    @pytest.mark.parametrize(
+        ("path", "grouped"),
+        [
+            pytest.param("venue_pending_cancel", False, id="read-pending-cancel"),
+            pytest.param("venue_cancelled", True, id="read-cancelled-grouped-leg"),
+            pytest.param("timeout_cancel_filled", False, id="timeout-cancel-answer-filled"),
+            pytest.param("timeout_cancel_cancelled", True, id="timeout-cancel-answer-grouped-leg"),
+            pytest.param("restored_cancel", False, id="restored-cancel-answer"),
+        ],
+    )
+    def test_it_halts_as_a_post_fill_risk_breach(self, path, grouped):
         adapter = _resting_adapter()
-        trader, alerts, _ = _trader(adapter)
-        aaa = _buy_aaa(trader)
+        trader, alerts, now = _trader(adapter)
+        aaa = _entry(trader, grouped=grouped)
         trader._risk_policy = RiskPolicy(max_position_weight=0.0001)
-        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(order_id, status)
         adapter.cancel_order.side_effect = lambda order_id, _s: _partly_filled(order_id, "canceled")
+        if path == "venue_pending_cancel":
+            adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(
+                order_id, "PendingCancel"
+            )
+        elif path == "venue_cancelled":
+            adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(
+                order_id, "canceled"
+            )
+        elif path == "timeout_cancel_filled":
+            adapter.cancel_order.side_effect = lambda order_id, _s: _broker_report(
+                order_id=order_id, quantity=1.0
+            )
+            now[0] += timedelta(seconds=30)
+        elif path == "timeout_cancel_cancelled":
+            now[0] += timedelta(seconds=30)
+        else:
+            aaa.cancel_requested = True
 
         trader._poll_cycle()
 
+        assert aaa.filled_quantity > 0
         assert trader._halted is True
         [breach] = _exactly(alerts, "Post-fill Risk Breach")
         assert "AAA confirmed weight" in breach["message"]
+        assert f"after AAA order_id={aaa.order_id} status={aaa.status}" in breach["message"]
+        assert _exactly(alerts, "Order Cancelled") == []
+        assert _exactly(alerts, "Order Timeout") == []
+        assert _submitted(adapter) == ["AAA"], "nothing after it went out"
+
+    def test_a_flatten_that_books_one_still_closes_and_halts_once(self):
+        adapter = _resting_adapter()
+        trader, alerts, _ = _trader(adapter)
+        trader._positions = {"BBB": _position("BBB")}
+        aaa = _entry(trader, grouped=False)
+        trader._risk_policy = RiskPolicy(max_position_weight=0.0001)
+        adapter.cancel_order.side_effect = lambda order_id, _s: _partly_filled(order_id, "canceled")
+        adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=signal["client_order_id"], quantity=signal["quantity"]
+        )
+        trader.request_flatten("desk asked to close")
+
+        trader._poll_cycle()
+
         assert aaa.filled_quantity == pytest.approx(0.5)
+        assert trader._halted is True
+        assert trader._positions == {}
+        assert [alert["title"] for alert in alerts] == ["[test] Operator Flatten"]

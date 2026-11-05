@@ -290,8 +290,9 @@ class ExecutionReport:
     Costs are denominated in the portfolio cash currency; commission may be
     negative for a broker rebate. There is no slippage cost: the average
     price already embeds it, and charging it again would count it twice. A
-    report with ``status="filled"`` or ``"partial"`` must carry
-    broker-confirmed quantity, average price, and execution timestamp.
+    report that carries a fill, whatever its status (a part-filled order can
+    be ``cancel_pending``, cancelled or rejected), must carry broker-confirmed
+    quantity, average price, and execution timestamp.
     ``rejection_reason`` and ``account_fault`` carry an
     ``OrderRejectedError`` raised at placement.
     """
