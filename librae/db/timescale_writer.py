@@ -331,6 +331,9 @@ def _claim_backtest_cache_key(
     if existing is None or existing[0] == run_id:
         return True
     if replace_existing:
+        # These two have no foreign key to cascade through.
+        cur.execute("DELETE FROM signal_events WHERE run_id = %s", (existing[0],))
+        cur.execute("DELETE FROM position_events WHERE run_id = %s", (existing[0],))
         cur.execute("DELETE FROM backtest_runs WHERE run_id = %s", (existing[0],))
         return True
     if store_bars:
@@ -405,13 +408,18 @@ def save_backtest_output(
         raise ValueError("replace_existing=True requires backtest_revision")
     subscription_by_symbol = {item.symbol: item for item in meta.primary_subscriptions}
     # All or none: a run with bars for some symbols reads as fully priced while
-    # its unpriced positions drop out of every mark.
-    if bars_by_symbol is not None and set(bars_by_symbol) != set(subscription_by_symbol):
-        raise ValueError(
-            "bars_by_symbol must cover exactly the run symbols; "
-            f"missing={sorted(set(subscription_by_symbol) - set(bars_by_symbol))}, "
-            f"extra={sorted(set(bars_by_symbol) - set(subscription_by_symbol))}"
-        )
+    # its unpriced positions drop out of every mark, and a later duplicate
+    # asking for bars would be skipped as if they were all there.
+    if bars_by_symbol is not None:
+        if set(bars_by_symbol) != set(subscription_by_symbol):
+            raise ValueError(
+                "bars_by_symbol must cover exactly the run symbols; "
+                f"missing={sorted(set(subscription_by_symbol) - set(bars_by_symbol))}, "
+                f"extra={sorted(set(bars_by_symbol) - set(subscription_by_symbol))}"
+            )
+        empty = sorted(symbol for symbol, bars in bars_by_symbol.items() if bars.empty)
+        if empty:
+            raise ValueError(f"bars_by_symbol has no bars for {empty}")
 
     # WHY: single transaction for atomicity — partial writes on failure
     # would leave DB in inconsistent state (e.g. trades without metadata).
@@ -1457,6 +1465,9 @@ def save_signal_results(
 
     has_entry = not signal_series.empty
     has_exit = not exit_signal_series.empty
+    if store_bars and not (has_entry or has_exit):
+        # The run's range comes from its signals; without one nothing is written.
+        raise ValueError("store_bars=True needs at least one signal to store a run")
     if has_entry or has_exit:
         started_at = min(
             signal_series.index.min() if has_entry else exit_signal_series.index.min(),

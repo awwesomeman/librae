@@ -829,12 +829,12 @@ flowchart TD
 |---|---|---|---|
 | `backtest_runs` | run hub and resolved strategy/execution/risk configuration, 1 row / run | PK `run_id` | no |
 | `equity_curve` | currency-labeled per-account equity, return, drawdown, exposure-state, concentration, and turnover | unique `(run_id, account_id, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
-| `position_events` | currency-labeled account position lifecycle events (open/add/reduce/close), including exit execution costs and prorated entry costs on closes | FK `run_id` (nullable) | yes (`ts`) |
+| `position_events` | currency-labeled account position lifecycle events (open/add/reduce/close), including exit execution costs and prorated entry costs on closes | `run_id` (nullable), no FK: deleting a run must delete these rows too, as a replacing backtest save does | yes (`ts`) |
 | `financing_cash_flows` | applied financing (perpetual funding or short borrow) rate, mark, position, multiplier, and account cash flow | unique `(run_id, account_id, symbol, kind, ts)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `runtime_events` | operational audit trail (restarts, skipped decisions, halts, halt resets, group failures) — not a fill; `event_type` is a small, deliberately closed set (`RuntimeEventType` in `librae/core/executor.py`), with the specific skip reason as a free string in `detail` | unique `(run_id, ts, event_type, COALESCE(symbol, ''))`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
 | `strategy_performance` | currency-labeled generic period, trade, PnL, cost, and portfolio diagnostics, 1 row / account / run | PK `(run_id, account_id)`; `run_id` FK → `backtest_runs` CASCADE | no |
 | `run_bars` | the bars one run saw, under the run's six-field subscription identity: for sim/live the primary bars behind each decision and later versions of decided bars (see [Data acquisition and ownership boundary](#data-acquisition-and-ownership-boundary)); a backtest's inputs only when saved with `store_bars=True` | unique `(run_id, symbol, ts, available_at, open, high, low, close, volume)`; `run_id` FK → `backtest_runs` CASCADE | yes (`ts`) |
-| `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | FK `run_id` (nullable) | yes (`ts`) |
+| `signal_events` | signal-quality monitoring (the strategy's raw signals, not fill records) | `run_id` (nullable), no FK: deleting a run must delete these rows too, as a replacing backtest save does | yes (`ts`) |
 | `librae_schema_revision` | authoritative reference-schema revision; writable only by the table owner | singleton PK | no |
 | `execution_runtime_state` | latest durable sim/live checkpoint, one row per strategy state key | PK `state_key`, FK `run_id` → `backtest_runs` CASCADE | no |
 | `broker_orders` | durable broker order lifecycle records, with the error a failed placement raised | PK `state_key` + `client_order_id` | no |
