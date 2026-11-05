@@ -289,8 +289,10 @@ class _MinuteBook:
         newest = max(starts, default=None)
         settled = queried_ns - _SETTLE_NS
         final_before = settled - settled % _MINUTE_NS
-        # Every streamed trade happened, so an answer that lacks a streamed
-        # minute or counts fewer lots in it is running late from there.
+        # Every streamed trade happened, so an answer that ends before a
+        # streamed minute, or counts fewer lots in its own newest one, is
+        # running late from there. Short of that in a minute it has passed,
+        # the two disagree, and kbars() is the record.
         late = min(
             (
                 m
@@ -299,8 +301,8 @@ class _MinuteBook:
             ),
             default=None,
         )
-        if late is not None:
-            trusted = late if newest is None else min(late, newest)
+        if late is not None and (newest is None or late >= newest):
+            trusted = late if newest is None else newest
             logger.warning(
                 "Shioaji kbars() for %s runs behind the stream from %s; "
                 "its minutes from there wait for the next refill",

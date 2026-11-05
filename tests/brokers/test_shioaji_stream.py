@@ -344,6 +344,28 @@ class TestGaps:
         assert held.index[-1] == "09:00", "the 09:05 bar holds 09:07, which lacks a trade"
         assert len(session.kbars_calls) == 1
 
+    def test_kbars_settles_a_minute_the_stream_counted_twice(self, adapter, session, clock):
+        self._streaming(adapter, session, clock)
+        session.trade("2026-11-05 09:05:50", 120, 4)
+        replay = SimpleNamespace(
+            code="TXFK6",
+            datetime=pd.Timestamp("2026-11-05 09:05:50").to_pydatetime(),
+            close="120",
+            volume=4,
+            total_volume=session.totals["TXFK6"],
+            simtrade=False,
+        )
+        session.on_event(0, 12, "", "Session reconnecting")
+        _poll(adapter, clock, "2026-11-05 09:06:05")  # renews the subscription
+        session.on_tick(replay)  # had the renewed subscription sent it again
+        _trade_each_minute(session, "2026-11-05 09:06", "2026-11-05 09:08")
+
+        polled = _poll(adapter, clock, "2026-11-05 09:08:05")
+
+        assert len(session.kbars_calls) == 2
+        assert polled.loc["09:05", "volume"] == 4
+        assert polled.index[-1] == "09:07"
+
     def test_a_lost_connection_renews_the_subscription_and_settles_by_kbars(
         self, adapter, session, clock
     ):
