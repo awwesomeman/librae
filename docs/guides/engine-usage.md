@@ -629,7 +629,8 @@ status the executor does not know, another order id, a cumulative fill that
 went backwards) leaves the order tracked and under
 its timeout, alerts naming it, repeating while it lasts (see the runbook's
 [lasting problems](operational-runbook.md#lasting-problems)), and lets the
-rest of the cycle run; at startup it still fails closed. While an operator
+rest of the cycle run; at startup it still fails closed, unless the order is
+past its timeout, which cancels it. While an operator
 flatten is pending, the order poll leaves every tracked order to it: the
 flatten reads, books and cancels each one, so an order past its timeout, ended
 by the venue or filled past a risk limit, or one whose status cannot be read
@@ -1028,8 +1029,8 @@ adapter at submission.
   Met while a running account finishes a cancel, such as a timeout's after a
   restart, it then halts the account, unless the cancel's own answer applied
   and ended the order, which then ends as any cancel does; an operator flatten
-  instead resends that
-  cancel each cycle and waits for the order, since a halt would refuse it.
+  instead resends that cancel each cycle and waits for the order, since a halt
+  would refuse it.
   The cancellation stays owed until the venue confirms every tracked
   order ended: each later cycle retries it before any order work, and a
   failure stops the cycle there, except an answer that cannot be applied,

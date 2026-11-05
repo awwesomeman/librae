@@ -646,3 +646,88 @@ class TestAnAnswerThatCannotBeRead:
         adapter.cancel_order.assert_not_called()
         assert _titled(alerts, NOT_APPLIED) == []
         assert trader._halted is False
+
+
+class TestACancelThatEndsAnOrderPastAnAnswerThatCannotApply:
+    """A cancel whose own answer applies and ends the order: the venue's state is known."""
+
+    def _restored_cancel(self, adapter, *, grouped: bool, past_timeout: bool):
+        trader, alerts, now = _trader(adapter)
+        aaa = _entry(trader, grouped=grouped)
+        aaa.cancel_requested = True
+        if past_timeout:
+            now[0] += timedelta(seconds=30)
+        adapter.get_order.side_effect = _unsupported
+        return trader, alerts, aaa
+
+    @pytest.mark.parametrize("past_timeout", [False, True])
+    def test_a_grouped_leg_fails_only_its_group_and_only_past_its_timeout(self, past_timeout):
+        adapter = _resting_adapter()
+        trader, alerts, aaa = self._restored_cancel(
+            adapter, grouped=True, past_timeout=past_timeout
+        )
+
+        trader._poll_cycle()
+
+        assert aaa.status == "cancelled"
+        assert trader._halted is False
+        assert _exactly(alerts, "Order Reconciliation Failed") == []
+        assert len(_exactly(alerts, NOT_APPLIED)) == 1
+        if past_timeout:
+            [timeout] = _exactly(alerts, "Order Timeout")
+            assert "group 'pair' cancelled" in timeout["message"]
+            assert trader._active_orders == []
+        else:
+            assert _exactly(alerts, "Order Timeout") == []
+            assert [order.request.symbol for order in trader._active_orders] == ["BBB"]
+
+    def test_a_fill_its_answer_carries_past_a_risk_limit_halts(self):
+        adapter = _resting_adapter()
+        adapter.cancel_order.side_effect = lambda order_id, _s: _partly_filled(order_id, "canceled")
+        trader, alerts, _ = self._restored_cancel(adapter, grouped=True, past_timeout=False)
+        trader._risk_policy = RiskPolicy(max_position_weight=0.0001)
+
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert len(_exactly(alerts, NOT_APPLIED)) == 1
+        assert len(_exactly(alerts, "Post-fill Risk Breach")) == 1
+
+    def test_a_store_outage_recording_its_answer_says_the_cancel_went_out(self):
+        adapter = _resting_adapter()
+        trader, alerts, aaa = self._restored_cancel(adapter, grouped=False, past_timeout=False)
+        outage = _store_outage(trader)
+        outage["down"] = False
+        cancel = adapter.cancel_order.side_effect
+
+        def cancel_then_store_down(order_id, symbol):
+            outage["down"] = True
+            return cancel(order_id, symbol)
+
+        adapter.cancel_order.side_effect = cancel_then_store_down
+
+        with pytest.raises(OSError, match=OUTAGE):
+            trader._poll_cycle()
+
+        adapter.cancel_order.assert_called_once()
+        [mismatch] = _exactly(alerts, NOT_APPLIED)
+        assert "cancel sent, its answer not recorded (OSError: " in mismatch["message"]
+        assert aaa.status == "cancelled"
+
+    def test_at_startup_one_past_its_timeout_is_cancelled_not_failed_closed(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _timeout_trader(adapter, store, now)
+        _entry(trader, grouped=True)
+        now[0] += timedelta(seconds=30)
+        adapter.get_order.side_effect = _unsupported
+
+        trader, _, alerts = _timeout_trader(adapter, store, now)
+        trader._initialize_run()
+
+        adapter.cancel_order.assert_called_once()
+        assert trader._halted is False
+        assert _exactly(alerts, "Order Reconciliation Failed") == []
+        [timeout] = _exactly(alerts, "Order Timeout")
+        assert "group 'pair' cancelled" in timeout["message"]

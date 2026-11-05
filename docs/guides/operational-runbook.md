@@ -114,7 +114,9 @@ so one that comes and goes alerts no faster than one that stays:
   An answer that applies in the cycle another failed, such as the cancel a
   timeout or a halt sends after an unappliable read, does not count: an order
   that ends that way is not resolved, since fills that read carried may be
-  missing.
+  missing. A single unreadable answer, such as a fill whose fee the venue
+  has not reported yet, alerts at once and resolves an hour after its
+  answers apply again.
 - Operator Flatten Waiting: the same while the orders and statuses it lists
   are. It ends when the flatten goes ahead; a refused flatten says so
   instead.
@@ -333,14 +335,16 @@ working. Find the cause before `reset_halt()`.
 An error that says `broker report not applied` names an order the venue
 answered about with something the engine could not match to it. Its cancel
 went out anyway if the error ends `cancel sent`, `cancel already sent`,
-`cancel already pending` or `cancel sent, its answer not applied (<error>)`;
-`cancel not confirmed (<error>)` or `no order id to cancel` mean it may not
-have. Fills that answer carried may be missing from the ledger: compare that
+`cancel already pending`, `cancel sent, its answer not applied (<error>)` or
+`cancel sent, its answer not recorded (<error>)`; `cancel not confirmed
+(<error>)` or `no order id to cancel` mean it may not have. Fills that answer carried may be missing from the ledger: compare that
 order and its position at the broker with the ledger. Met while a running
 account finishes a cancel, such as a timeout's after a restart, the same
 answer halts it, as **Order Reconciliation Failed**, unless the cancel's own
-answer applied and ended the order, which then ends as any cancel does (one
-past its timeout as **Order Timeout**). Met by an operator flatten cancelling working orders, it alerts
+answer applied and ended the order: then the alert is **Order Report Not
+Applied** ending `cancel sent`, and the order ends as any cancel does, one
+past its timeout as **Order Timeout**. Met by an operator flatten cancelling
+working orders, it alerts
 **Order Report Not Applied** as a [lasting problem](#lasting-problems); the
 flatten sends the cancel again each cycle and goes ahead once the venue
 confirms the order ended. It never halts for it, since a halt would refuse
