@@ -540,6 +540,113 @@ jobs:
               connection.close()
           PY
 
+      - name: Verify backtest saves leave engine runs alone
+        run: |
+          set -a
+          source .env.example
+          source .env.secrets
+          set +a
+          docker run --rm --interactive \
+            --network quant_network \
+            --env TIMESCALE_DSN="${TRADE_TIMESCALE_DSN}" \
+            librae-trade:ci \
+            python - <<'PY'
+          import os
+
+          import pandas as pd
+          import psycopg2
+
+          from librae.core.market_data import MarketDataSubscription
+          from librae.core.run_config import AccountConfig, RunConfig
+          from librae.db.timescale_writer import save_signal_results, write_run_bars, write_run_metadata
+
+          subscription = MarketDataSubscription(
+              symbol="BTCUSDT",
+              timeframe="H1",
+              calendar_id="24/7",
+              session_mode="extended",
+              data_source="binance_spot",
+              instrument_type="spot",
+          )
+          index = pd.date_range("2026-08-01T00:00:00Z", periods=3, freq="h", name="ts")
+          frame = pd.DataFrame(
+              {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+              index=index,
+          ).assign(entry_signal=[1.0, 0.0, -1.0])
+          config = RunConfig(
+              strategy_name="save-guard-smoke",
+              symbols=["BTCUSDT"],
+              timeframe="H1",
+              market="crypto",
+              data_source="binance_spot",
+              account=AccountConfig(currency="USDT", initial_cash=10_000.0),
+              mode="backtest",
+          )
+          sim_run = "save-guard-sim"
+          runs = (sim_run, "save-guard-a", "save-guard-b")
+          connection = psycopg2.connect(os.environ["TIMESCALE_DSN"])
+          cursor = connection.cursor()
+
+
+          def count(table, run_id):
+              cursor.execute(f"SELECT count(*) FROM {table} WHERE run_id = %s", (run_id,))
+              return cursor.fetchone()[0]
+
+
+          def save(run_id, **kwargs):
+              return save_signal_results(
+                  frame,
+                  "BTCUSDT",
+                  "H1",
+                  "save-guard-smoke",
+                  "binance_spot",
+                  run_id=run_id,
+                  config=config,
+                  **kwargs,
+              )
+
+
+          try:
+              write_run_metadata(
+                  sim_run,
+                  "save-guard-smoke",
+                  ["BTCUSDT"],
+                  "H1",
+                  "sim",
+                  data_source="binance_spot",
+                  primary_subscriptions=(subscription,),
+              )
+              assert write_run_bars(sim_run, subscription, frame.drop(columns="entry_signal")) == 3
+
+              # A backtest save must not take over, clear or relabel an engine's run.
+              for mode in ("backtest", "sim"):
+                  try:
+                      save(sim_run, mode=mode, store_bars=True)
+                  except ValueError:
+                      pass
+                  else:
+                      raise AssertionError(f"a {mode} save onto a sim run was accepted")
+              cursor.execute("SELECT mode FROM backtest_runs WHERE run_id = %s", (sim_run,))
+              assert cursor.fetchone() == ("sim",)
+              assert count("run_bars", sim_run) == 3
+
+              # Replacing a canonical run leaves none of its rows behind, including the
+              # signal_events no foreign key cascades.
+              assert save("save-guard-a", backtest_revision="r1", store_bars=True)["signal_events"] == 2
+              assert save("save-guard-b", backtest_revision="r1", replace_existing=True)["signal_events"] == 2
+              assert count("backtest_runs", "save-guard-a") == 0
+              assert count("signal_events", "save-guard-a") == 0
+              assert count("run_bars", "save-guard-a") == 0
+          finally:
+              connection.rollback()
+              for run_id in runs:
+                  cursor.execute("DELETE FROM signal_events WHERE run_id = %s", (run_id,))
+                  cursor.execute("DELETE FROM backtest_runs WHERE run_id = %s", (run_id,))
+              connection.commit()
+              cursor.close()
+              connection.close()
+          PY
+
       - name: Verify Linux host-gateway routing
         run: |
           python3 -m http.server 17497 --bind 0.0.0.0 >/tmp/fake-broker.log 2>&1 &
