@@ -460,11 +460,11 @@ current valuation mark, so its exit could not be priced and was skipped
 produces a bar and the account is reset, request the flatten again.
 
 A **Close Rejected** or **Close Cancelled** alert during a flatten or
-drawdown breach means the broker rejected or cancelled that exit, it was
-cancelled after its timeout, or a later halt's cancellation ended it (the
-cause says `in a halt's cancellation`); the alert carries the cause, and the
-other exits kept working unless that halt cancelled them too (reason
-`close_rejected` or `close_cancelled`). A cause naming an
+drawdown breach means the broker rejected or cancelled that exit, or it was
+cancelled after its timeout; the alert carries the cause, and the other exits
+kept working (reason `close_rejected` or `close_cancelled`). A cause that ends
+`while a halt cancelled the account's orders` means another halt cancelled
+the exits, and the alert says the others went too. A cause naming an
 account-level refusal (credentials, permissions, clock) was recorded the same
 way, not halted on, because the flatten halts the account anyway. The
 position stays open in the ledger. Compare it with the venue: a reduce-only

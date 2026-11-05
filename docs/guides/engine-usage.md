@@ -1000,12 +1000,16 @@ adapter at submission.
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
   confirmed broker fills; a close below the venue minimum is skipped as above.
-  An exit that ends rejected, cancelled, cancelled after its timeout, or ended
-  by a later halt's cancellation is skipped too, with a `decision_skipped` event (reason `close_rejected` or
+  An exit that ends rejected, cancelled, or cancelled after its timeout is
+  skipped too, with a `decision_skipped` event (reason `close_rejected` or
   `close_cancelled`, carrying the venue's reason) and a **Close Rejected** or
   **Close Cancelled** alert, instead of halting and cancelling the other
   exits. That includes an `account_fault` refusal, since the flatten halts
-  the account anyway. A strategy close that merely carries a recovery reason
+  the account anyway. An engine halt of the already-halted account, such as
+  one for an exit whose cancel or placement cannot be resolved, cancels the
+  other exits too; each it ends short of a fill is recorded the same way, its
+  cause saying it ended while a halt cancelled the account's orders. A
+  strategy close that merely carries a recovery reason
   on a running account keeps the normal handling. The breach alert names what
   remains open. The halt persists across restart, emergency exits remain active while halted, and broker orders must
   reach a terminal state before `reset_halt()` is allowed. After operator review, `reset_halt()` starts

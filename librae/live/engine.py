@@ -4073,6 +4073,7 @@ class LiveTrader:
         reason: str,
         title: str,
         cause: str,
+        others: str = "other orders remain eligible",
     ) -> None:
         """Record a skipped exit every time; alert once per reason and held quantity.
 
@@ -4103,9 +4104,7 @@ class LiveTrader:
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}: {symbol}",
-            message=(
-                f"exit of {quantity:g} skipped: {cause}; {remaining}, other orders remain eligible."
-            ),
+            message=(f"exit of {quantity:g} skipped: {cause}; {remaining}, {others}."),
         )
 
     def _plan_live_orders(
@@ -4897,21 +4896,22 @@ class LiveTrader:
                     "rejected",
                 ):
                     return
+                # On a halted account the cancel was the halt's or the exit's
+                # own timeout's, which a restart leaves no way to tell apart;
+                # a recovery exit's position stays open either way, so it is
+                # recorded, and a strategy order's end was the halt's to name.
+                if self._halted:
+                    if _is_recovery_exit(request):
+                        self._report_exit_a_halt_ended(tracked)
+                        continue
+                    return
                 # Over age, the order fails as its timeout would have failed
                 # it, whichever cancel this was: a restart between the
                 # timeout's recorded cancel and its outcome leaves that to
                 # this pass, and drops a flatten request. A younger order's
-                # cancel was a halt's, a flatten's or a failed group's, each
-                # alerting on its own, as are the cancels of a flatten still
-                # waiting on them; but a recovery exit a halt cancelled leaves
-                # its position open, so it is recorded as any failed exit is.
-                if self._halted:
-                    if not _is_recovery_exit(request):
-                        return
-                    if not self._live_order_timed_out(tracked):
-                        self._report_exit_a_halt_ended(tracked)
-                        continue
-                elif self._flatten_request is not None or not self._live_order_timed_out(tracked):
+                # cancel was a flatten's or a failed group's, each alerting on
+                # its own, as are the cancels of a flatten still waiting on them.
+                if self._flatten_request is not None or not self._live_order_timed_out(tracked):
                     return
                 if self._fail_group_or_halt(
                     tracked, title="Order Timeout", message=_timeout_message(tracked)
@@ -5643,8 +5643,12 @@ class LiveTrader:
 
         A failure at one order does not stop the others, so an order queued
         behind it cannot go out ahead of a flatten that waits on this pass.
+        On a halted account, each recovery exit the pass ends short of a fill
+        is recorded once the pass is done, so a failing record cannot hold
+        back a cancel.
         """
         failure: Exception | None = None
+        ended_exits: list[TrackedOrder] = []
         for tracked in list(self._active_orders):
             try:
                 self._cancel_tracked_order(tracked)
@@ -5657,22 +5661,30 @@ class LiveTrader:
                         tracked.request.client_order_id,
                         exc_info=exc,
                     )
-            finally:
-                if (
-                    self._halted
-                    and _is_recovery_exit(tracked.request)
-                    and tracked not in self._active_orders
-                    and tracked.status in ("cancelled", "rejected")
-                ):
-                    self._report_exit_a_halt_ended(tracked)
+            if (
+                self._halted
+                and _is_recovery_exit(tracked.request)
+                and tracked not in self._active_orders
+                and tracked.status in ("cancelled", "rejected")
+            ):
+                ended_exits.append(tracked)
+        for tracked in ended_exits:
+            try:
+                self._report_exit_a_halt_ended(tracked)
+            except Exception:
+                logger.exception(
+                    "Skipped close not recorded for %s", tracked.request.client_order_id
+                )
         if failure is not None:
             raise failure
 
     def _report_exit_a_halt_ended(self, tracked: TrackedOrder) -> None:
-        """Record a recovery exit a halt's cancellation ended unfilled, as any failed exit is.
+        """Record a recovery exit that ended short of a fill on a halted account.
 
         Its position stays open, and the halt's own alert names only the
-        orders it has not yet seen end.
+        orders it has not yet seen end. Which cancel ended it, the halt's or
+        the exit's timeout's, or whether the venue ended it first, is not
+        known here, so the cause says only when it ended.
         """
         request = tracked.request
         position = self._positions.get(request.symbol)
@@ -5683,7 +5695,9 @@ class LiveTrader:
             ts=self._utc_now(),
             reason=f"close_{tracked.status}",
             title=f"Close {tracked.status.title()}",
-            cause=f"ended {tracked.status} in a halt's cancellation",
+            cause=(f"ended {tracked.status}" if tracked.placement_attempted else "dropped unsent")
+            + " while a halt cancelled the account's orders",
+            others="the halt cancels the account's other orders too",
         )
 
     def _process_bar(self, symbol: str, raw_df: pd.DataFrame, ts: datetime) -> None:
