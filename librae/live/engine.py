@@ -3291,7 +3291,7 @@ class LiveTrader:
                     # failed or late poll missed would otherwise let a window
                     # with a hole turn ready.
                     head = None if merged is None or merged.empty else merged["ts"].iloc[-1]
-                    recent, reaches_head = self._fetch_back_to(symbol, head, all_request_sizes[-1])
+                    recent, reaches_head = self._fetch_back_to(symbol, head, stop_when_short=False)
                     # Merge only the widest response, and only if it bridges
                     # the hole or fills the window alone: merging a narrower
                     # one first would move the head past a hole that a failed
@@ -3341,12 +3341,12 @@ class LiveTrader:
         else:
             self._warmup_exhausted.pop(symbol, None)
             # Bars that closed while a poll failed, or that a source held back
-            # and released together, are newer than the head but not the
-            # newest two; the cache would carry the hole unseen.
+            # and released together, sit between the head and the newest
+            # bars; the cache would carry the hole unseen.
             new_df, _ = self._fetch_back_to(
                 symbol,
                 None if cached is None or cached.empty else cached["ts"].iloc[-1],
-                (self._warmup_periods + 1) * 2 ** (self.WARMUP_MAX_FETCH_ATTEMPTS - 1),
+                stop_when_short=True,
             )
             if new_df.empty:
                 return cached
@@ -3362,21 +3362,29 @@ class LiveTrader:
 
         return self._store_runtime_cache(symbol, merged)
 
-    def _fetch_back_to(self, symbol: str, head: object, largest: int) -> tuple[pd.DataFrame, bool]:
+    def _fetch_back_to(
+        self, symbol: str, head: object, *, stop_when_short: bool
+    ) -> tuple[pd.DataFrame, bool]:
         """The newest completed bars, asked for in a widening request until
-        they reach back to ``head`` or the request reaches ``largest``; and
-        whether they reach it."""
-        # Adapters drop the forming bar from the requested count, so three
-        # rows reach back to the head after one new bar.
+        they reach back to ``head`` or the largest warmup request, which is
+        also the most a sim replays; and whether they reach it.
+
+        ``stop_when_short`` stops widening once the source answers with fewer
+        bars than asked, past a dropped forming bar: a count-based source then
+        has nothing older. A poll runs every cycle, so it stops there; warmup
+        does not, because an IBKR intraday request spans whole days and only a
+        wider one reaches past a market closure.
+        """
+        largest = (self._warmup_periods + 1) * self.WARMUP_MAX_FETCH_MULTIPLIER
+        # Some adapters count a dropped forming bar in the limit, so three rows
+        # reach back to the head after one new bar.
         limit = 3
         while True:
             fetched = self._fetchers[symbol](symbol, self._timeframe, limit, drop_incomplete=True)
             recent = self._eligible_runtime_rows(symbol, fetched)
             reaches_head = head is None or recent.empty or recent["ts"].iloc[0] <= head
-            # Fewer rows than asked for, past the forming bar, is all the
-            # source has: asking for more cannot reach further back.
-            exhausted = len(fetched) < limit - 1
-            if reaches_head or exhausted or limit >= largest:
+            short = stop_when_short and len(fetched) < limit - 1
+            if reaches_head or short or limit >= largest:
                 return recent, reaches_head
             limit = min(2 * limit, largest)
 
