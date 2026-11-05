@@ -274,10 +274,14 @@ class TestBacktestCacheKeyClaim:
         )
 
         assert claimed is True
-        cursor.execute.assert_any_call(
-            "DELETE FROM backtest_runs WHERE run_id = %s",
-            ("canonical-run",),
-        )
+        deletes = [call.args for call in cursor.execute.call_args_list if "DELETE" in call.args[0]]
+        # signal_events and position_events have no foreign key to cascade
+        # through, so they are deleted first or left orphaned.
+        assert deletes == [
+            ("DELETE FROM signal_events WHERE run_id = %s", ("canonical-run",)),
+            ("DELETE FROM position_events WHERE run_id = %s", ("canonical-run",)),
+            ("DELETE FROM backtest_runs WHERE run_id = %s", ("canonical-run",)),
+        ]
 
     def test_same_run_id_remains_idempotent(self) -> None:
         cursor = MagicMock()
@@ -1049,6 +1053,31 @@ class TestSaveSignalResults:
         # 1.0, -1.0, 1.0, 1.0, -0.5 = 5 non-zero non-NaN
         assert counts["signal_events"] == 5
 
+    def test_storing_bars_without_a_signal_is_refused_before_connecting(self) -> None:
+        """The run's range comes from its signals; with none the save wrote
+        nothing and returned, leaving a caller who asked for bars without them."""
+        idx = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
+        df = pd.DataFrame(
+            {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+            index=idx,
+        ).assign(entry_signal=0.0)
+
+        with (
+            patch("librae.db.timescale_writer.get_conn") as get_conn,
+            pytest.raises(ValueError, match="needs at least one signal"),
+        ):
+            save_signal_results(
+                df,
+                "BTCUSDT",
+                "H1",
+                "test_strategy",
+                "binance_spot",
+                run_id="run-1",
+                primary_subscription=_subscription(data_source="binance_spot"),
+                store_bars=True,
+            )
+        get_conn.assert_not_called()
+
     def test_storing_bars_needs_a_run(self) -> None:
         with pytest.raises(ValueError, match="store_bars=True requires run_id"):
             save_signal_results(
@@ -1170,6 +1199,22 @@ class TestSaveBacktestOutputBars:
             pytest.raises(ValueError, match="cover exactly the run symbols"),
         ):
             save_backtest_output(output, bars_by_symbol=bars_by_symbol)
+
+        get_conn.assert_not_called()
+
+    def test_a_symbol_without_bars_is_refused_before_connecting(self) -> None:
+        """An empty frame writes nothing, and the run's other bars would let a
+        later duplicate asking for bars be skipped as if it had them all."""
+        config = _test_cfg()
+        output = self._output(config)
+
+        with (
+            patch("librae.db.timescale_writer.get_conn") as get_conn,
+            pytest.raises(ValueError, match="no bars for"),
+        ):
+            save_backtest_output(
+                output, bars_by_symbol={symbol: pd.DataFrame() for symbol in config.symbols}
+            )
 
         get_conn.assert_not_called()
 
