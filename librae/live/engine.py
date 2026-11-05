@@ -5474,8 +5474,9 @@ class LiveTrader:
         out unless one this process sent still stands
         (``_cancel_outcome_so_far``): neither a pending state the venue set
         itself nor a failed status read holds it back, and in a later pass
-        one the venue turned down, leaving the order working, is sent again. NautilusTrader and LEAN likewise hold back a second
-        cancel only while their own is pending.
+        one the venue turned down, leaving the order working, is sent again.
+        NautilusTrader and LEAN likewise hold back a second cancel only while
+        their own is pending.
 
         A ValueError from a broker call or from applying its report is a venue
         answer that does not reconcile with the tracked order, raised by

@@ -115,8 +115,8 @@ so one that comes and goes alerts no faster than one that stays:
   timeout or a halt sends after an unappliable read, does not count: an order
   that ends that way is not resolved, since fills that read carried may be
   missing. A single unreadable answer, such as a fill whose fee the venue
-  has not reported yet, alerts at once and resolves an hour after its
-  answers apply again.
+  has not reported yet, alerts at once and resolves once the order ends, or
+  an hour after its answers apply again.
 - Operator Flatten Waiting: the same while the orders and statuses it lists
   are. It ends when the flatten goes ahead; a refused flatten says so
   instead.
