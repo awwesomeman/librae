@@ -7,7 +7,7 @@ The optional SDK contract is covered separately without a broker login.
 from __future__ import annotations
 
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -723,6 +723,57 @@ class TestDateWindow:
         pd.testing.assert_frame_equal(
             bars, uncut.loc[bars.index], check_dtype=False, check_index_type=False
         )
+
+
+class TestDatelessPoll:
+    """Live polls without dates. A dateless kbars() call answers yesterday and
+    today by stamp date, so on Monday 2026-11-02 it holds the day session
+    alone, while that trading day's bar opened on Friday night."""
+
+    NOW = "2026-11-02 13:50"
+
+    @classmethod
+    def _poll(cls, monkeypatch, timeframe: str, limit: int) -> tuple[pd.DataFrame, MagicMock]:
+        now = _taipei(cls.NOW)
+        monkeypatch.setattr(
+            pd.Timestamp, "now", classmethod(lambda _cls, tz=None: now.tz_convert(tz))
+        )
+        dated = _kbars_by_date(_txfr1_kbars())
+        today = now.tz_convert("Asia/Taipei").date()
+
+        def kbars(*, contract, start=None, end=None):
+            if start is None and end is None:
+                start, end = str(today - timedelta(days=1)), str(today)
+            return dated(contract=contract, start=start, end=end)
+
+        adapter = _make_adapter()
+        adapter._api.kbars.side_effect = kbars
+        adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
+        with patch("librae.brokers.base.datetime") as clock:
+            clock.now.return_value = now.to_pydatetime()
+            bars = adapter.fetch_ohlcv(
+                "TXFR1", timeframe, limit=limit, continuous_alias=True, drop_incomplete=True
+            )
+        return bars.set_index("ts"), adapter._api.kbars
+
+    def test_a_daily_bar_is_the_one_a_dated_fetch_returns(self, monkeypatch):
+        polled, kbars = self._poll(monkeypatch, "1d", limit=2)
+
+        whole = _fetch_txfr1("1d").loc[[_taipei("2026-10-30 15:00")]]
+        pd.testing.assert_frame_equal(polled, whole, check_dtype=False)
+        assert kbars.call_count == 1, "one kbars() query per poll"
+
+    def test_a_warmup_sized_daily_poll_stays_one_query(self, monkeypatch):
+        polled, kbars = self._poll(monkeypatch, "1d", limit=5000)
+
+        assert list(polled.index) == [_taipei("2026-10-30 15:00")]
+        assert kbars.call_count == 1
+
+    def test_an_intraday_poll_still_asks_without_dates(self, monkeypatch):
+        polled, kbars = self._poll(monkeypatch, "1h", limit=2)
+
+        assert list(polled.index) == [_taipei("2026-11-02 11:45"), _taipei("2026-11-02 12:45")]
+        assert set(kbars.call_args.kwargs) == {"contract"}
 
 
 class TestLiveBarClock:
