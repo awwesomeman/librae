@@ -562,9 +562,10 @@ broker fill is confirmed, using actual cash and positions, so slippage and
 confirmed fill outcomes change the remaining quantities instead of preserving a stale
 precomputed basket.
 
-Acknowledgement is not execution. Submitted/accepted/`cancel_pending`/cancelled/rejected
-reports never mutate positions. A partial report commits only its confirmed
-fill delta. Submitted, accepted, and partial orders remain in a durable,
+Acknowledgement is not execution: a status alone never changes positions,
+and every report commits only its confirmed fill delta, which a part-filled
+order's `cancel_pending`, cancelled or rejected report can carry too.
+Submitted, accepted, partial and `cancel_pending` orders remain in a durable,
 serial queue and are polled before another strategy decision. Repeated
 cumulative reports are idempotent; filled quantity, notional, commission,
 and tax can only advance. Live fills carry no slippage cost, because the
@@ -644,7 +645,10 @@ simulation-only because they cannot be inferred later from a completed range.
 Protective live orders require a broker-native implementation.
 
 Every exposure-increasing live fill is checked again against confirmed
-position, gross, and net limits. A breach halts dependent execution.
+position, gross, and net limits, whether a status read or a cancel's answer
+carries it. A breach halts the account, also for a grouped leg whose failure
+would otherwise cancel only its group; a flatten submitting its exits is not
+interrupted by one, and a halted account's cancels are not checked.
 
 The engine treats `ExecutionPolicy.warmup_periods` (default 720) as both the
 retained feature-history window and an all-symbol startup readiness condition.

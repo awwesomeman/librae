@@ -290,8 +290,9 @@ class ExecutionReport:
     Costs are denominated in the portfolio cash currency; commission may be
     negative for a broker rebate. There is no slippage cost: the average
     price already embeds it, and charging it again would count it twice. A
-    report with ``status="filled"`` or ``"partial"`` must carry
-    broker-confirmed quantity, average price, and execution timestamp.
+    report that carries a fill, whatever its status (a part-filled order can
+    be ``cancel_pending``, cancelled or rejected), must carry broker-confirmed
+    quantity, average price, and execution timestamp.
     ``rejection_reason`` and ``account_fault`` carry an
     ``OrderRejectedError`` raised at placement.
     """
@@ -843,11 +844,12 @@ class LiveExecutor:
                 raise ValueError("filled report is missing broker execution timestamp")
             if commission_raw is None:
                 raise ValueError("filled report is missing broker-confirmed commission/fee")
-            if filled_quantity < requested_quantity - EPSILON and status not in (
-                "cancelled",
-                "rejected",
-            ):
-                status = "partial"
+            if filled_quantity < requested_quantity - EPSILON:
+                # A partly filled order the venue is cancelling stays
+                # cancel_pending: read as partial, the engine would send its
+                # cancel again.
+                if status not in ("cancelled", "rejected", "cancel_pending"):
+                    status = "partial"
             elif status not in ("cancelled", "rejected"):
                 status = "filled"
         elif status in ("partial", "filled"):
