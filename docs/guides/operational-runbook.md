@@ -331,7 +331,7 @@ answer the engine cannot apply, as a **Manual Halt** alert that says
 again unless every one is a recovery exit, and those keep working; if the
 venue has not confirmed every cancelled order ended, it alerts **Halt
 Cancellation Owed** naming them, and **Halt Cancellation Completed** follows
-as above. A failure while the run starts stops it instead. Find the cause
+as above; if it has, Halt Cancellation Completed comes at once. A failure while the run starts stops it instead. Find the cause
 before `reset_halt()`.
 
 An error that says `broker report not applied` names an order the venue

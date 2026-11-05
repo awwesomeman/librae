@@ -6,7 +6,8 @@ not hold up the cycle or an operator flatten, and is named in an alert. A halt
 sends a cancel to every tracked order the venue has not confirmed ended,
 whether or not the venue reports a cancel pending and whether or not its
 status could be read, and stays unfinished until the venue confirms each one.
-A cancel the engine sent and the venue reports pending is not sent again.
+A cancel the engine sent and the venue reports pending, in an answer read
+that cycle, is not sent again.
 """
 
 from __future__ import annotations
@@ -631,3 +632,36 @@ class TestAnOrderWhoseStatusCannotBeRead:
             "(ConnectionError: venue did not answer)"
         ) in poll_error["message"]
         assert restarted._active_orders[0].request.client_order_id == aaa.request.client_order_id
+
+    @pytest.mark.parametrize("left", ["confirmed", "recovery_exit"])
+    def test_a_restart_that_owes_nothing_more_says_so_or_stays_quiet(self, left):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "pending_cancel")
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _timeout_trader(adapter, store, now)
+        if left == "recovery_exit":
+            trader._positions = {"AAA": _position("AAA")}
+            adapter.get_position.side_effect = lambda request: {
+                "symbol": request.symbol,
+                "size": 1.0 if request.symbol == "AAA" else 0.0,
+                "avg_price": 100.0,
+                "unrealized_pnl": 0.0,
+            }
+            trader.request_flatten("desk asked to close")
+            trader._poll_cycle()
+            assert trader._halted is True
+        else:
+            _buy_aaa(trader)
+            trader.halt("desk asked to stop")
+            adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
+
+        trader, _, alerts = _timeout_trader(adapter, store, now)
+        trader._initialize_run()
+
+        if left == "confirmed":
+            [completed] = _exactly(alerts, "Halt Cancellation Completed")
+            assert "restarted halted" in completed["message"]
+        else:
+            assert alerts == []
+        assert _exactly(alerts, "Halt Cancellation Owed") == []

@@ -2482,17 +2482,24 @@ class LiveTrader:
             # Not persisted: a start decides from the checkpoint, as a new process does.
             self._halt_cancels_pending = False
             restored_halted = self._halted
+            restored_orders = bool(self._active_orders)
             try:
                 if self._halted and not self._has_active_recovery_orders():
                     self._cancel_active_orders()
                     self._halt_cancels_pending = bool(self._active_orders)
+                    # The halt that owed these cancels alerted in the process
+                    # that is gone, so this one says how its own pass ended.
                     if self._halt_cancels_pending:
-                        # A restart sent these again; the halt that owed them
-                        # alerted in the process that is gone.
                         self._send_alert(
                             "Halt Cancellation Owed",
                             "restarted halted; awaiting cancel confirmation for "
                             f"{self._tracked_orders_summary()}",
+                        )
+                    elif restored_orders:
+                        self._send_alert(
+                            "Halt Cancellation Completed",
+                            "restarted halted; the venue confirmed every cancel the halt "
+                            "owed; no order is tracked.",
                         )
                 else:
                     self._advance_live_orders(submit_planned=False)

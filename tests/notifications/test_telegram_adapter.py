@@ -154,3 +154,15 @@ class TestTokenNeverReachesLogs:
         for record in caplog.records:
             assert "SECRET-TOKEN" not in record.getMessage()
         assert any("<bot-token>" in r.getMessage() for r in caplog.records)
+
+
+def test_an_alert_carrying_a_long_venue_error_is_cut_short_of_the_telegram_limit():
+    adapter = TestTelegramAdapter()._make_adapter(enabled=True)
+    adapter._client = MagicMock()
+    adapter._client.post.return_value = MagicMock(status_code=200)
+
+    assert adapter.send_alert("Poll Error", "503 Service Unavailable " + "<html>" * 2_000)
+
+    text = adapter._client.post.call_args.kwargs["json"]["text"]
+    assert len(text) < 4096
+    assert "… [cut]" in text
