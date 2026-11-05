@@ -63,6 +63,7 @@ from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
     OBSERVED_AT_COLUMN,
+    OHLCV_COLUMNS,
     BatchFeatureFn,
     FeatureBatch,
     MarketDataSubscription,
@@ -3453,6 +3454,11 @@ class LiveTrader:
         and a crash can keep only the last decision's window from the table.
         """
         fetched = self._normalize_runtime_rows(symbol, fetched)
+        if cached is not None and not cached.empty:
+            cached = self._normalize_runtime_rows(symbol, cached)
+            revised = self._revised_in_place(symbol, cached, fetched)
+        else:
+            revised = pd.Series(False, index=fetched.index)
         observed_at = self._record_observed_at(symbol, fetched)
         watermark = self._last_bar_ts.get(symbol)
         decided = watermark
@@ -3478,17 +3484,18 @@ class LiveTrader:
         if cached is None or cached.empty:
             merged = fetched
         else:
-            cached = self._normalize_runtime_rows(symbol, cached)
             if correction_sink is not None and not first_fill and watermark is not None:
                 previous_availability = cached.set_index("ts")[AVAILABLE_AT_COLUMN]
                 previous_versions = fetched["ts"].map(previous_availability)
-                accepted_corrections = audit_rows(
-                    fetched.loc[
-                        previous_versions.notna()
-                        & (fetched[AVAILABLE_AT_COLUMN] > pd.DatetimeIndex(previous_versions))
-                        & (fetched["ts"] <= pd.Timestamp(watermark))
-                    ]
+                later = previous_versions.notna() & (
+                    fetched[AVAILABLE_AT_COLUMN] > pd.DatetimeIndex(previous_versions)
                 )
+                accepted_corrections = audit_rows(
+                    fetched.loc[(later | revised) & (fetched["ts"] <= pd.Timestamp(watermark))]
+                )
+            # A revision replaces the version it revises; any other tie keeps
+            # the cached row, whose extra columns a fetch may lack.
+            cached = cached.loc[~cached["ts"].isin(fetched.loc[revised, "ts"])]
             cached = cached.assign(_librae_source_priority=0)
             fetched = fetched.assign(_librae_source_priority=1)
             merged = pd.concat([cached, fetched], ignore_index=True)
@@ -3510,6 +3517,46 @@ class LiveTrader:
         if correction_sink is not None:
             correction_sink.extend(accepted_corrections)
         return normalized
+
+    def _revised_in_place(
+        self, symbol: str, cached: pd.DataFrame, fetched: pd.DataFrame
+    ) -> pd.Series:
+        """Fetched rows that change a cached bar's values under its ``available_at``.
+
+        A source can revise a closed bar without moving the ``available_at``
+        its calendar derives, so such a row is a new version of the bar, as
+        ``run_bars`` keys it, and later windows read it. Its receipt time is
+        reset so it records when this version arrived.
+        """
+        prior = cached.set_index("ts")
+        revised = pd.Series(False, index=fetched.index)
+        known = fetched.loc[fetched["ts"].isin(prior.index)]
+        if known.empty:
+            return revised
+        before = prior.loc[known["ts"]].reset_index()
+        after = known.reset_index(drop=True)
+        changed = (
+            before[AVAILABLE_AT_COLUMN].eq(after[AVAILABLE_AT_COLUMN])
+            & before[list(OHLCV_COLUMNS)].ne(after[list(OHLCV_COLUMNS)]).any(axis=1)
+        ).to_numpy()
+        revised.loc[known.index[changed]] = True
+        received = self._bar_observed_at.get(symbol, {})
+        for (_, old), (_, new) in zip(
+            before.loc[changed].iterrows(), after.loc[changed].iterrows(), strict=True
+        ):
+            received.pop(
+                (pd.Timestamp(new["ts"]).value, pd.Timestamp(new[AVAILABLE_AT_COLUMN]).value), None
+            )
+            logger.warning(
+                "%s bar %s changed under the same available_at %s: %s -> %s; "
+                "later windows read the new values",
+                symbol,
+                new["ts"],
+                new[AVAILABLE_AT_COLUMN],
+                {column: old[column] for column in OHLCV_COLUMNS},
+                {column: new[column] for column in OHLCV_COLUMNS},
+            )
+        return revised
 
     def _record_observed_at(self, symbol: str, fetched: pd.DataFrame) -> pd.Series:
         """Stamp each fetched row version with the first time it was received.
