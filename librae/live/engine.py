@@ -73,6 +73,7 @@ from librae.core.market_data import (
     validate_feature_frame,
     validate_ohlcv_values,
 )
+from librae.core.readiness import next_expected_close
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -1437,6 +1438,15 @@ class LiveTrader:
     # tolerated on top of that before alerting. Live skips stale frames rather
     # than submitting decisions from obsolete market snapshots.
     STALE_DATA_TOLERANCE_BARS = 2
+
+    # How long past a bar's close the symbols that have it wait for a
+    # required symbol due the same bar. A venue starts each symbol's next
+    # candle at its own time, and an adapter releases a bar only then (58
+    # Binance perpetuals took 0.5 to 12 seconds after a close on 2026-11-05),
+    # so one poll can hold a bar for some symbols and not others. Deciding
+    # then would read the rest a bar stale, which a backtest never does. Past
+    # the hold the late symbols are decided on their own, a poll later.
+    COHORT_HOLD = timedelta(seconds=30)
 
     # The retry queue is in memory, one event per fill, so this sits far above
     # what a book trades through an outage. Reaching it means the sink keeps
@@ -3091,7 +3101,10 @@ class LiveTrader:
                 message=f"Skipped older uncommitted bars ({summary}); only latest bars are tradable.",
             )
 
+        held_from = self._held_cohort(frames, candidate_symbols_by_timestamp)
         for cycle_ts in sorted(candidate_symbols_by_timestamp):
+            if held_from is not None and cycle_ts >= held_from:
+                break
             if self._last_cycle_ts is not None and cycle_ts < self._last_cycle_ts:
                 raise RuntimeError(
                     "out-of-order completed bar cannot be applied after a newer event: "
@@ -3143,6 +3156,51 @@ class LiveTrader:
                 self._last_feature_as_of = committed_feature_as_of
             self._persist_state()
         self._trim_runtime_caches()
+
+    def _held_cohort(
+        self,
+        frames: Mapping[str, pd.DataFrame],
+        candidates: Mapping[datetime, set[str]],
+    ) -> datetime | None:
+        """The first event to hold back for a required symbol due it too (``COHORT_HOLD``).
+
+        A symbol is due the event when the bar after its newest one closes
+        by the event's close on its own calendar, so a market that is shut
+        then does not hold the rest.
+        """
+        now = self._utc_now()
+        required = [symbol for symbol in frames if symbol not in self._optional_symbols]
+        for event_ts in sorted(candidates):
+            released = candidates[event_ts]
+            event = pd.Timestamp(event_ts)
+            event_close = min(
+                frames[symbol].set_index("ts").at[event, AVAILABLE_AT_COLUMN] for symbol in released
+            )
+            if now >= event_close + self.COHORT_HOLD:
+                continue
+            late = []
+            for symbol in required:
+                newest = pd.Timestamp(frames[symbol]["ts"].iloc[-1])
+                if symbol in released or newest >= event:
+                    continue
+                subscription = self._market_data_subscriptions[symbol]
+                due = next_expected_close(
+                    newest.to_pydatetime(),
+                    timeframe=subscription.timeframe,
+                    calendar_id=subscription.calendar_id,
+                )
+                if due <= event_close:
+                    late.append(symbol)
+            if late:
+                logger.info(
+                    "Holding the %s bar of %s until %s have it or %s",
+                    event_ts,
+                    sorted(released),
+                    sorted(late),
+                    event_close + self.COHORT_HOLD,
+                )
+                return event_ts
+        return None
 
     def _fetch_with_cache(self, symbol: str) -> pd.DataFrame | None:
         """Fetch OHLCV and keep a complete, deduplicated rolling cache."""
