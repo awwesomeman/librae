@@ -192,7 +192,8 @@ class TestAReportThatCannotBeAppliedOnAPoll:
         assert len(_exactly(alerts, "Operator Flatten")) == 1
         assert _submitted(adapter) == ["AAA", "AAA"], "the entry, then the flatten's exit"
 
-    def test_after_a_halt_it_alerts_naming_the_order_without_resending_a_pending_cancel(self):
+    def test_after_a_halt_it_alerts_naming_the_order_and_resends_a_pending_cancel(self):
+        """The venue said pending once; with no status that applies since, it may have put the order back."""
         adapter = _resting_adapter()
         adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "pending_cancel")
         trader, alerts, _ = _trader(adapter)
@@ -204,10 +205,10 @@ class TestAReportThatCannotBeAppliedOnAPoll:
         trader._poll_cycle()
         trader._poll_cycle()
 
-        adapter.cancel_order.assert_called_once()
+        assert adapter.cancel_order.call_count == 3, "one per pass"
         [alert] = _titled(alerts, NOT_APPLIED)
         assert f"AAA order_id={aaa.order_id} broker report not applied" in alert["message"]
-        assert "cancel already pending" in alert["message"]
+        assert "cancel sent" in alert["message"]
 
         adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
         trader._poll_cycle()
@@ -561,3 +562,72 @@ class TestAFillPastARiskLimitHaltsWhicheverReportCarriesIt:
         assert trader._halted is True
         assert trader._positions == {}
         assert [alert["title"] for alert in alerts] == ["[test] Operator Flatten"]
+
+
+def _unreachable(_order_id, _symbol):
+    raise ConnectionError("venue did not answer")
+
+
+class TestAnOrderWhoseStatusCannotBeRead:
+    """An order the venue will not report on is named, and a cancel owed to it goes out again."""
+
+    def test_a_halt_resends_a_cancel_it_last_saw_pending(self):
+        adapter = _resting_adapter()
+        adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "pending_cancel")
+        trader, alerts, _ = _trader(adapter)
+        _buy_aaa(trader)
+        trader.halt("desk asked to stop")
+        adapter.get_order.side_effect = _unreachable
+
+        trader._poll_cycle()
+        trader._poll_cycle()
+
+        assert adapter.cancel_order.call_count == 3, "the venue may have put it back to work"
+
+        adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
+        trader._poll_cycle()
+
+        assert trader._active_orders == []
+        assert len(_titled(alerts, "Halt Cancellation Completed")) == 1
+
+    def test_a_restart_into_a_halt_names_the_cancels_still_owed(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        adapter.cancel_order.side_effect = lambda order_id, _s: _resting(order_id, "pending_cancel")
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _timeout_trader(adapter, store, now)
+        aaa = _buy_aaa(trader)
+        trader.halt("desk asked to stop")
+
+        trader, _, alerts = _timeout_trader(adapter, store, now)
+        trader._initialize_run()
+
+        [owed] = _exactly(alerts, "Halt Cancellation Owed")
+        assert f"AAA order_id={aaa.order_id} (cancel_pending)" in owed["message"]
+
+        adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id, "canceled")
+        trader._poll_cycle()
+
+        assert len(_exactly(alerts, "Halt Cancellation Completed")) == 1
+
+    def test_a_read_that_keeps_failing_is_named_in_the_poll_error(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _resting_adapter()
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _timeout_trader(adapter, store, now)
+        aaa = _buy_aaa(trader)
+        reads = iter([_resting(aaa.order_id)])
+        adapter.get_order.side_effect = lambda order_id, symbol: (
+            next(reads, None) or _unreachable(order_id, symbol)
+        )
+        restarted, _, alerts = _timeout_trader(adapter, store, now)
+        restarted._live_order_timeout_seconds = None
+
+        restarted.run(max_iterations=3)
+
+        [poll_error] = _exactly(alerts, "Poll Error")
+        assert (
+            f"the last RuntimeError: AAA order_id={aaa.order_id} status unavailable "
+            "(ConnectionError: venue did not answer)"
+        ) in poll_error["message"]
+        assert restarted._active_orders[0].request.client_order_id == aaa.request.client_order_id

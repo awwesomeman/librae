@@ -316,8 +316,9 @@ through; they may still fill. A halt or Halt Persisted alert that says `cancelli
 tracked orders failed (<error>)` is recorded, and its cancellation went on to
 every other tracked order, but the one the error names may still be working.
 Either way every later cycle retries the cancellation before any other order
-work, sending a cancel again unless the venue reports one the engine sent as
-pending; a failure stops the cycle there, so a Poll Error alert follows if it
+work, sending a cancel again unless the venue, in an answer the engine can
+read and apply that cycle, reports one the engine sent as pending; a failure
+stops the cycle there, so a Poll Error alert follows if it
 persists, except an answer the engine cannot apply, which alerts **Order
 Report Not Applied** instead. **Halt Cancellation Completed** follows only once
 no order is tracked; until then cancel at the venue anything that must not
@@ -326,15 +327,18 @@ orders still tracked, it answers with a **Manual Halt** alert that says
 `cancellation owed, <N> tracked: <orders>`; while the retry fails, `halt()`
 raises that error and a signalled halt shows as a poll-cycle error, or, for an
 answer the engine cannot apply, as a **Manual Halt** alert that says
-`cancellation owed: <error>`. A failure while the run starts stops it instead; the next start cancels
-tracked orders again unless every one is a recovery exit, and those keep
-working. Find the cause before `reset_halt()`.
+`cancellation owed: <error>`. A restart into the halt cancels tracked orders
+again unless every one is a recovery exit, and those keep working; if the
+venue has not confirmed every cancelled order ended, it alerts **Halt
+Cancellation Owed** naming them, and **Halt Cancellation Completed** follows
+as above. A failure while the run starts stops it instead. Find the cause
+before `reset_halt()`.
 
 An error that says `broker report not applied` names an order the venue
 answered about with something the engine could not match to it. Its cancel
-went out anyway if the error ends `cancel sent`, `cancel already sent` or
-`cancel already pending`; `cancel not confirmed (<error>)` or `no order id to
-cancel` mean it may not have. Fills that answer carried may be missing from
+went out anyway if the error ends `cancel sent` or `cancel already sent`;
+`cancel not confirmed (<error>)` or `no order id to cancel` mean it may not
+have. Fills that answer carried may be missing from
 the ledger: compare that order and its position at the broker with the
 ledger. Met while a running account finishes a cancel, such as a timeout's
 after a restart, the same answer then halts it, as **Order Reconciliation

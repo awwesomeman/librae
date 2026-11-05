@@ -622,7 +622,10 @@ An optional local wall-clock timeout cancels an over-age order, preserves any
 confirmed partial fill, and halts dependent work for review. A cancel the
 engine sent goes out at most once per cycle, and not again while the venue
 reports it `cancel_pending`; one the venue turns down, leaving the order
-working, is sent again. An order the venue reports `cancel_pending` on its own
+working, is sent again, and so is one whose status a later cycle cannot read
+or apply, since the venue may have put the order back to work. A status read
+the venue does not answer before the order's timeout fails the cycle, naming
+the order, so a **Poll Error** that follows says which order it is. An order the venue reports `cancel_pending` on its own
 is polled until it ends, and is under its timeout again if it reverts to
 working. A status report that cannot be applied to its order (another order
 id, a cumulative fill that went backwards) leaves the order tracked and under
