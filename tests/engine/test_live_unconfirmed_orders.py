@@ -518,3 +518,28 @@ class TestAFillPastARiskLimitHaltsWhicheverReportCarriesIt:
         assert trader._halted is True
         assert trader._positions == {}
         assert [alert["title"] for alert in alerts] == ["[test] Operator Flatten"]
+
+    def test_one_a_halt_books_does_not_halt_the_first_exit_after_a_reset(self):
+        adapter = _resting_adapter()
+        trader, alerts, _ = _trader(adapter)
+        _entry(trader, grouped=False)
+        trader._risk_policy = RiskPolicy(max_position_weight=0.0001)
+        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(order_id)
+        adapter.cancel_order.side_effect = lambda order_id, _s: _partly_filled(order_id, "canceled")
+        trader.halt("desk asked to stop")
+        assert trader._positions["AAA"].quantity == pytest.approx(0.5)
+        trader._last_bar_ts = {symbol: TEST_CLOCK_NOW for symbol in ("AAA", "BBB", "DUST")}
+        trader.reset_halt()
+        trader._resume_unverified = False
+        adapter.place_order.side_effect = lambda signal: {
+            **_resting(signal["client_order_id"]),
+            "amount": signal["quantity"],
+        }
+
+        trader._execute_live_decision(
+            [OrderIntent(action="close", symbol="AAA")], _bars(), TEST_CLOCK_NOW
+        )
+
+        assert _submitted(adapter) == ["AAA", "AAA"]
+        assert trader._halted is False
+        assert _exactly(alerts, "Post-fill Risk Breach") == []

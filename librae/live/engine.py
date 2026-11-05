@@ -2190,6 +2190,7 @@ class LiveTrader:
         self._pending_decision = []
         self._pending_resting_since = {}
         self._live_rebalance = None
+        self._entry_fill_unchecked = None
         self._drop_pending_halt_reset()
 
     def _persist_halt(self, *, cancel_on_retry: bool) -> tuple[Exception | None, str]:
@@ -5402,7 +5403,9 @@ class LiveTrader:
                 time_in_force=request.time_in_force,
             )
             self._record_adv_fill(report.symbol, delta_quantity, adv_session)
-            if request.position_effect in ("open", "add"):
+            # A halted account is not checked, and a mark left from its cancel
+            # passes would halt the first exit after a reset.
+            if request.position_effect in ("open", "add") and not self._halted:
                 self._entry_fill_unchecked = tracked
             if self._live_rebalance is not None:
                 consumed = self._live_rebalance.filled_bar_quantity_by_symbol
