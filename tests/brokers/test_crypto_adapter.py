@@ -432,8 +432,8 @@ def test_fetch_ohlcv_drops_the_forming_bar_after_assembling_pages(monkeypatch):
 def _candles_at(monkeypatch, now: str, starts: list[str], timeframe: str) -> list[str]:
     """Fetch ``starts`` as the venue's newest candles at ``now``; return what survives."""
     monkeypatch.setattr(
-        "librae.brokers.crypto_adapter.time",
-        SimpleNamespace(time=lambda: pd.Timestamp(now).timestamp()),
+        "librae.brokers.base.datetime",
+        SimpleNamespace(now=lambda tz: pd.Timestamp(now).to_pydatetime()),
     )
     exchange = MagicMock()
     exchange.fetch_ohlcv.return_value = [

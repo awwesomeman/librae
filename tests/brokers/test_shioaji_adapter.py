@@ -786,13 +786,17 @@ class TestLiveBarClock:
             clock.now.return_value = _taipei(now).to_pydatetime()
             return _fetch_txfr1(timeframe, _txfr1_kbars(through=through), drop_incomplete=True)
 
-    def test_an_hourly_bar_completes_with_its_last_minute(self):
+    def test_an_hourly_bar_completes_once_a_later_minute_shows_its_last_one_ended(self):
         forming = self._fetch_completed_at("2026-11-02 09:44:30", "1h", through="2026-11-02 09:45")
-        completed = self._fetch_completed_at(
+        unconfirmed = self._fetch_completed_at(
             "2026-11-02 09:45:00", "1h", through="2026-11-02 09:45"
+        )
+        completed = self._fetch_completed_at(
+            "2026-11-02 09:45:01", "1h", through="2026-11-02 09:46"
         )
 
         assert forming.index[-1] == _taipei("2026-10-31 04:00")
+        assert unconfirmed.index[-1] == _taipei("2026-10-31 04:00")
         assert completed.index[-1] == _taipei("2026-11-02 08:45")
         assert completed.iloc[-1]["close"] == 10900
 
@@ -800,6 +804,31 @@ class TestLiveBarClock:
         minutes = self._fetch_completed_at("2026-11-02 09:00:30", "1m", through="2026-11-02 09:01")
 
         assert minutes.index[-1] == _taipei("2026-11-02 08:59")
+
+    @pytest.mark.parametrize(
+        ("timeframe", "now", "through", "newest"),
+        [
+            ("1m", "2026-11-02 09:34:00.5", "2026-11-02 09:34", "2026-11-02 09:32"),
+            ("1m", "2026-11-02 09:34:01", "2026-11-02 09:35", "2026-11-02 09:33"),
+            ("5m", "2026-11-02 09:35:00.5", "2026-11-02 09:35", "2026-11-02 09:25"),
+            ("5m", "2026-11-02 09:35:01", "2026-11-02 09:36", "2026-11-02 09:30"),
+        ],
+    )
+    def test_a_closed_bar_waits_for_the_next_minute(self, timeframe, now, through, newest):
+        """Shioaji serves a minute short of its final trades after its close:
+        on 2026-11-05 TXFR1's 11:33 minute read 81 lots half a second after
+        it, 91 once the next minute was served. That next minute is what
+        shows the bar ended."""
+        bars = self._fetch_completed_at(now, timeframe, through=through)
+
+        assert bars.index[-1] == _taipei(newest)
+
+    def test_the_last_bar_of_a_session_waits_only_the_settle(self):
+        held = self._fetch_completed_at("2026-11-02 13:45:30", "1h", through="2026-11-02 13:45")
+        settled = self._fetch_completed_at("2026-11-02 13:46:00", "1h", through="2026-11-02 13:45")
+
+        assert held.index[-1] == _taipei("2026-11-02 11:45")
+        assert settled.index[-1] == _taipei("2026-11-02 12:45")
 
     @pytest.mark.parametrize(("timeframe", "length"), [("1m", "1min"), ("1h", "1h")])
     def test_every_bar_is_available_one_bar_after_it_starts(self, timeframe, length):

@@ -49,8 +49,7 @@ def test_a_candle_the_venue_is_still_filling_is_neither_decided_nor_recorded(mon
     # Warm up mid-bar first, so the short candle reaches the steady-state poll.
     clock = {"now": CLOSE - timedelta(minutes=2)}
     monkeypatch.setattr(
-        "librae.brokers.crypto_adapter.time",
-        SimpleNamespace(time=lambda: clock["now"].timestamp()),
+        "librae.brokers.base.datetime", SimpleNamespace(now=lambda tz: clock["now"])
     )
     venue = _FillingVenue()
     starts = [CLOSE - timedelta(minutes=5 * n) for n in range(4, 0, -1)]
