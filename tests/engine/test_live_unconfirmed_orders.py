@@ -543,3 +543,21 @@ class TestAFillPastARiskLimitHaltsWhicheverReportCarriesIt:
         assert _submitted(adapter) == ["AAA", "AAA"]
         assert trader._halted is False
         assert _exactly(alerts, "Post-fill Risk Breach") == []
+
+    def test_a_flatten_requested_in_that_cycle_still_closes_the_book(self):
+        adapter = _resting_adapter()
+        trader, alerts, _ = _trader(adapter)
+        aaa = _entry(trader, grouped=True)
+        trader._risk_policy = RiskPolicy(max_position_weight=0.0001)
+        adapter.get_order.side_effect = lambda order_id, _s: _partly_filled(order_id, "canceled")
+        adapter.place_order.side_effect = lambda signal: _broker_report(
+            order_id=signal["client_order_id"], quantity=signal["quantity"]
+        )
+        trader.request_flatten("desk asked to close")
+
+        trader._poll_cycle()
+
+        assert aaa.filled_quantity == pytest.approx(0.5)
+        assert trader._halted is True
+        assert trader._positions == {}
+        assert [alert["title"] for alert in alerts] == ["[test] Operator Flatten"]

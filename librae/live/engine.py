@@ -2386,10 +2386,10 @@ class LiveTrader:
         """Halt if an entry fill booked since the last check took the account past a limit.
 
         Any report can carry a fill, whichever path applied it: a status
-        read, a cancel's answer, a sibling's cancel. Not while the account
-        is halted, or a flatten submits its exits: both are closing the book
-        already, and a halt here would cancel the exits. Returns whether it
-        halted.
+        read, or the answer to a timeout's or another engine cancel. Not
+        while the account is halted, or a flatten submits its exits: both are
+        closing the book already, and a halt here would cancel the exits.
+        Returns whether it halted.
         """
         filled, self._entry_fill_unchecked = self._entry_fill_unchecked, None
         if filled is None or self._halted or self._flatten_at is not None:
