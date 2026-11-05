@@ -437,7 +437,7 @@ class TestWarmupFetcher:
             ("ETHUSDT", 6),
             ("ETHUSDT", 12),
             ("ETHUSDT", 24),
-            ("BTCUSDT", 2),
+            ("BTCUSDT", 3),
             ("ETHUSDT", 3),
         ]
         assert not trader.warmup_ready
@@ -1020,7 +1020,7 @@ class TestWarmupFetcher:
         trader._poll_cycle()
         trader._poll_cycle()
 
-        assert requests == [6, 12, 2]
+        assert requests == [6, 12, 3]
         assert feature_inputs == [
             [100.0, 102.0, 101.0, 105.0, 104.0],
             [102.0, 101.0, 105.0, 104.0, 108.0],

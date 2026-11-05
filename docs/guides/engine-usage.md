@@ -672,8 +672,10 @@ diagnostic if the window is still short. Once the largest request stops
 returning new history, later polls fetch only bars newer than the cache and
 repeat the largest request at doubling poll intervals, capped by
 `LiveTrader.WARMUP_REPROBE_MAX_INTERVAL_POLLS`; a repeat that finds older
-history is retried on the next poll. After every symbol is ready, ordinary
-two-bar incremental polling resumes. A custom
+history is retried on the next poll. After every symbol is ready, each poll
+asks for the newest few bars and widens the request until it reaches the
+newest cached one, so bars that closed while a poll failed, or that a source
+held back and released together, are not skipped. A custom
 `warmup_fetcher` remains responsible for returning completed observations and
 for any DB-first/API gap-filling policy.
 

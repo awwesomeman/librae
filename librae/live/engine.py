@@ -3291,20 +3291,7 @@ class LiveTrader:
                     # failed or late poll missed would otherwise let a window
                     # with a hole turn ready.
                     head = None if merged is None or merged.empty else merged["ts"].iloc[-1]
-                    # Adapters drop the forming bar from the requested count,
-                    # so three rows reach back to the head after one new bar.
-                    limit = 3
-                    while True:
-                        recent = self._eligible_runtime_rows(
-                            symbol,
-                            self._fetchers[symbol](
-                                symbol, self._timeframe, limit, drop_incomplete=True
-                            ),
-                        )
-                        reaches_head = head is None or recent.empty or recent["ts"].iloc[0] <= head
-                        if reaches_head or limit >= all_request_sizes[-1]:
-                            break
-                        limit = min(2 * limit, all_request_sizes[-1])
+                    recent, reaches_head = self._fetch_back_to(symbol, head, all_request_sizes[-1])
                     # Merge only the widest response, and only if it bridges
                     # the hole or fills the window alone: merging a narrower
                     # one first would move the head past a hole that a failed
@@ -3353,13 +3340,14 @@ class LiveTrader:
                 raise
         else:
             self._warmup_exhausted.pop(symbol, None)
-            new_df = self._fetchers[symbol](
+            # Bars that closed while a poll failed, or that a source held back
+            # and released together, are newer than the head but not the
+            # newest two; the cache would carry the hole unseen.
+            new_df, _ = self._fetch_back_to(
                 symbol,
-                self._timeframe,
-                2,
-                drop_incomplete=True,
+                None if cached is None or cached.empty else cached["ts"].iloc[-1],
+                (self._warmup_periods + 1) * 2 ** (self.WARMUP_MAX_FETCH_ATTEMPTS - 1),
             )
-            new_df = self._eligible_runtime_rows(symbol, new_df)
             if new_df.empty:
                 return cached
             validate_ohlcv_values(new_df, context=f"{symbol} runtime data")
@@ -3373,6 +3361,24 @@ class LiveTrader:
             )
 
         return self._store_runtime_cache(symbol, merged)
+
+    def _fetch_back_to(self, symbol: str, head: object, largest: int) -> tuple[pd.DataFrame, bool]:
+        """The newest completed bars, asked for in a widening request until
+        they reach back to ``head`` or the request reaches ``largest``; and
+        whether they reach it."""
+        # Adapters drop the forming bar from the requested count, so three
+        # rows reach back to the head after one new bar.
+        limit = 3
+        while True:
+            fetched = self._fetchers[symbol](symbol, self._timeframe, limit, drop_incomplete=True)
+            recent = self._eligible_runtime_rows(symbol, fetched)
+            reaches_head = head is None or recent.empty or recent["ts"].iloc[0] <= head
+            # Fewer rows than asked for, past the forming bar, is all the
+            # source has: asking for more cannot reach further back.
+            exhausted = len(fetched) < limit - 1
+            if reaches_head or exhausted or limit >= largest:
+                return recent, reaches_head
+            limit = min(2 * limit, largest)
 
     def _store_runtime_cache(
         self,
