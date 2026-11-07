@@ -20,9 +20,11 @@ def _mock_conn(mock_cur: MagicMock) -> MagicMock:
     return mock_conn
 
 
-def _subscription(*, instrument_type: str = "spot") -> MarketDataSubscription:
+def _subscription(
+    symbol: str = "BTCUSDT", *, instrument_type: str = "spot"
+) -> MarketDataSubscription:
     return MarketDataSubscription(
-        symbol="BTCUSDT",
+        symbol=symbol,
         timeframe="H1",
         calendar_id="24/7",
         session_mode="regular",
@@ -41,7 +43,7 @@ class TestGetRun:
         mock_cur.fetchone.return_value = (
             "demo-20260729t1200-abcdef",
             "demo",
-            '["BTCUSDT"]',
+            ["BTCUSDT"],
             "1h",
             "fixture",
             started_at,
@@ -70,6 +72,32 @@ class TestGetRun:
         )
         sql = mock_cur.execute.call_args[0][0]
         assert "WHERE run_id = %s" in sql
+
+    @patch("librae.db.timescale_reader.get_conn")
+    def test_returns_run_metadata_with_json_string_symbols(self, mock_conn_ctx):
+        mock_cur = MagicMock()
+        started_at = datetime(2026, 7, 29, tzinfo=UTC)
+        ended_at = datetime(2026, 7, 30, tzinfo=UTC)
+        run_at = datetime(2026, 7, 30, 1, tzinfo=UTC)
+        mock_cur.fetchone.return_value = (
+            "demo-20260729t1200-abcdef",
+            "demo",
+            '["BTCUSDT", "ETHUSDT"]',
+            "1h",
+            "fixture",
+            started_at,
+            ended_at,
+            run_at,
+            "backtest",
+            "regular",
+            json.dumps([_subscription("BTCUSDT").to_dict(), _subscription("ETHUSDT").to_dict()]),
+        )
+        mock_conn_ctx.return_value = _mock_conn(mock_cur)
+
+        result = get_run("demo-20260729t1200-abcdef")
+
+        assert result is not None
+        assert result.symbols == ("BTCUSDT", "ETHUSDT")
 
     @patch("librae.db.timescale_reader.get_conn")
     def test_returns_none_when_not_found(self, mock_conn_ctx):

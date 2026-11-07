@@ -23,6 +23,14 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
+def _parse_symbols(value: object) -> tuple[str, ...]:
+    """Parse persisted run symbols, accepting a JSON-encoded string or decoded sequence."""
+    decoded = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(decoded, (list, tuple)):
+        raise ValueError("symbols must be a JSON array")
+    return tuple(str(item) for item in decoded)
+
+
 def _parse_primary_subscriptions(value: object) -> tuple[MarketDataSubscription, ...]:
     """Parse persisted exact identities without filling legacy omissions."""
     decoded = json.loads(value) if isinstance(value, str) else value
@@ -114,7 +122,7 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
     return RunMetadata(
         run_id=row[0],
         strategy_name=row[1],
-        symbols=json.loads(row[2]),
+        symbols=_parse_symbols(row[2]),
         timeframe=row[3],
         data_source=row[4],
         started_at=row[5],
