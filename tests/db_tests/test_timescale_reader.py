@@ -41,7 +41,7 @@ class TestGetRun:
         mock_cur.fetchone.return_value = (
             "demo-20260729t1200-abcdef",
             "demo",
-            '["BTCUSDT"]',
+            ["BTCUSDT"],
             "1h",
             "fixture",
             started_at,

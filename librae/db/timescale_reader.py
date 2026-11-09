@@ -114,7 +114,7 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
     return RunMetadata(
         run_id=row[0],
         strategy_name=row[1],
-        symbols=json.loads(row[2]),
+        symbols=tuple(json.loads(row[2]) if isinstance(row[2], str) else row[2]),
         timeframe=row[3],
         data_source=row[4],
         started_at=row[5],
