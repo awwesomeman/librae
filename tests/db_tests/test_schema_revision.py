@@ -17,9 +17,11 @@ class FakeCursor:
         self.revision = revision
         self.has_table = has_table
         self._row: tuple[object, ...] | None = None
+        self.queries: list[str] = []
 
     def execute(self, query: str, params: object = None) -> None:
-        if query == "SELECT to_regclass('public.librae_schema_revision')":
+        self.queries.append(query)
+        if query == "SELECT to_regclass('librae_schema_revision')":
             self._row = ("librae_schema_revision" if self.has_table else None,)
         elif query == "SELECT revision FROM librae_schema_revision WHERE singleton = TRUE":
             self._row = None if self.revision is None else (self.revision,)
@@ -88,3 +90,12 @@ def test_the_instrument_type_domain_survives_a_rerun() -> None:
 
     assert "EXCEPTION WHEN duplicate_object" in block
     assert start < schema.index("CREATE TABLE IF NOT EXISTS run_bars")
+
+
+def test_gate_queries_follow_search_path() -> None:
+    """A hard-coded schema prefix would break engine tables living outside public."""
+    cursor = FakeCursor(CURRENT_SCHEMA_REVISION)
+    require_current_schema(cursor)
+    assert cursor.queries
+    assert not any("public." in q for q in cursor.queries)
+    assert "to_regclass('public." not in BOOTSTRAP.read_text()

@@ -778,6 +778,9 @@ here.
 an existing database to it is the deployment's job, specified by the diff of
 `timescale_init.sql` between versions (see
 [Schema revisions](docs/guides/optional-infrastructure.md#schema-revisions)).
+A shared deployment's upgrade migrations are applied by its deployment repo,
+`awwesomeman/quant-data`; Librae only provides the current schema and its
+revision number.
 
 ```mermaid
 flowchart TD
