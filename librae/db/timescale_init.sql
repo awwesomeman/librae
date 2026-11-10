@@ -7,10 +7,14 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- Refuse to stamp an unversioned existing database as current.
+-- Every existence check here looks in current_schema() only, the schema that the
+-- unqualified CREATEs below write to and the one librae.db.schema checks.
 DO $$
+DECLARE
+    target text := quote_ident(current_schema());
 BEGIN
-    IF to_regclass('backtest_runs') IS NOT NULL
-       AND to_regclass('librae_schema_revision') IS NULL THEN
+    IF to_regclass(target || '.backtest_runs') IS NOT NULL
+       AND to_regclass(target || '.librae_schema_revision') IS NULL THEN
         RAISE EXCEPTION
             'unversioned Librae schema; its deployment must migrate it before this bootstrap runs';
     END IF;
@@ -431,13 +435,15 @@ CREATE INDEX IF NOT EXISTS idx_signal_events_lookup
     ON signal_events (strategy_name, symbol, mode, ts DESC);
 
 DO $$
+DECLARE
+    target text := quote_ident(current_schema());
 BEGIN
-    IF to_regclass('backtest_runs') IS NULL
-       OR to_regclass('execution_runtime_state') IS NULL
-       OR to_regclass('broker_orders') IS NULL
-       OR to_regclass('position_events') IS NULL
-       OR to_regclass('runtime_events') IS NULL
-       OR to_regclass('run_bars') IS NULL
+    IF to_regclass(target || '.backtest_runs') IS NULL
+       OR to_regclass(target || '.execution_runtime_state') IS NULL
+       OR to_regclass(target || '.broker_orders') IS NULL
+       OR to_regclass(target || '.position_events') IS NULL
+       OR to_regclass(target || '.runtime_events') IS NULL
+       OR to_regclass(target || '.run_bars') IS NULL
        OR NOT EXISTS (
            SELECT 1
            FROM information_schema.columns
