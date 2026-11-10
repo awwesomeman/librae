@@ -9,8 +9,8 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 -- Refuse to stamp an unversioned existing database as current.
 DO $$
 BEGIN
-    IF to_regclass('public.backtest_runs') IS NOT NULL
-       AND to_regclass('public.librae_schema_revision') IS NULL THEN
+    IF to_regclass('backtest_runs') IS NOT NULL
+       AND to_regclass('librae_schema_revision') IS NULL THEN
         RAISE EXCEPTION
             'unversioned Librae schema; its deployment must migrate it before this bootstrap runs';
     END IF;
@@ -432,16 +432,16 @@ CREATE INDEX IF NOT EXISTS idx_signal_events_lookup
 
 DO $$
 BEGIN
-    IF to_regclass('public.backtest_runs') IS NULL
-       OR to_regclass('public.execution_runtime_state') IS NULL
-       OR to_regclass('public.broker_orders') IS NULL
-       OR to_regclass('public.position_events') IS NULL
-       OR to_regclass('public.runtime_events') IS NULL
-       OR to_regclass('public.run_bars') IS NULL
+    IF to_regclass('backtest_runs') IS NULL
+       OR to_regclass('execution_runtime_state') IS NULL
+       OR to_regclass('broker_orders') IS NULL
+       OR to_regclass('position_events') IS NULL
+       OR to_regclass('runtime_events') IS NULL
+       OR to_regclass('run_bars') IS NULL
        OR NOT EXISTS (
            SELECT 1
            FROM information_schema.columns
-           WHERE table_schema = 'public'
+           WHERE table_schema = current_schema()
              AND table_name = 'backtest_runs'
              AND column_name = 'execution_identity'
        ) THEN
