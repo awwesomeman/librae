@@ -43,7 +43,7 @@ from librae.core.market_data import (
     validate_ohlcv_values,
 )
 from librae.core.utils import to_canonical
-from librae.db import get_conn
+from librae.db import _storable_text, get_conn
 from librae.db.schema import require_current_schema
 from librae.live.execution_identity import ExecutionIdentity
 
@@ -1085,10 +1085,21 @@ def write_runtime_event(
                 run_id,
                 event_type,
                 symbol,
-                json.dumps(detail) if detail is not None else None,
+                json.dumps(_storable_json(detail)) if detail is not None else None,
             ),
         )
         cur.close()
+
+
+def _storable_json(value: object) -> object:
+    """``value`` with every string made storable; a halt's detail quotes venue errors."""
+    if isinstance(value, str):
+        return _storable_text(value)
+    if isinstance(value, Mapping):
+        return {_storable_json(key): _storable_json(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_storable_json(item) for item in value]
+    return value
 
 
 def write_strategy_performance(

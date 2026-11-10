@@ -90,9 +90,13 @@ jobs:
           def halt(*_args):
               Path("/tmp/librae-halt-requested").write_text("SIGUSR1\n", encoding="utf-8")
 
+          def reset(*_args):
+              Path("/tmp/librae-reset-requested").write_text("SIGUSR2\n", encoding="utf-8")
+
           signal.signal(signal.SIGTERM, stop)
           signal.signal(signal.SIGINT, stop)
           signal.signal(signal.SIGUSR1, halt)
+          signal.signal(signal.SIGUSR2, reset)
           # After a crash CI holds readiness, so it can check the restarted
           # container is not ready until this process writes its marker.
           restarted = Path("/tmp/librae-restarted")
@@ -293,6 +297,12 @@ jobs:
             sleep 1
           done
           docker exec quant_smoke-ci test -f /tmp/librae-halt-requested
+          ./deploy/trade.sh reset smoke-ci
+          for attempt in $(seq 1 10); do
+            docker exec quant_smoke-ci test -f /tmp/librae-reset-requested && break
+            sleep 1
+          done
+          docker exec quant_smoke-ci test -f /tmp/librae-reset-requested
           ./deploy/trade.sh inspect smoke-ci | grep -Fx "phase=running"
           # Crash the halted runner: the restart policy must still restart it,
           # and the restarted container must not read ready before its runner.

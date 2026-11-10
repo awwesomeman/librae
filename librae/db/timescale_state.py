@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 import psycopg2.extras
 
-from librae.db import get_conn, get_pool
+from librae.db import _storable_text, get_conn, get_pool
 from librae.db.schema import require_current_schema
 from librae.live.state import LiveRuntimeState, TrackedOrder
 
@@ -132,9 +132,8 @@ class TimescaleLiveStateStore:
                             request.submitted_at,
                             tracked.executed_at,
                             json.dumps(tracked.to_dict()["request"]),
-                            # psycopg2 refuses a string holding NUL, and the
-                            # refused row would block every later write of it.
-                            tracked.error.replace("\x00", "") or None,
+                            # A refused row would block every later write of it.
+                            _storable_text(tracked.error) or None,
                         )
                     )
                 psycopg2.extras.execute_values(

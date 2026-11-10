@@ -1073,7 +1073,8 @@ adapter at submission.
   and its own, and a halt repeated on an already-halted account records again.
   An operator `halt()` of an already-halted account changes nothing and records
   none. Each `reset_halt()` that applies records `halt_reset`, with
-  `persisted: false` when its checkpoint failed, and each order group failure
+  `persisted: false` when the reset's own checkpoint write failed, even if the
+  event is written later, and each order group failure
   that leaves the account trading records `group_failed`. `halted` and
   `group_failed` carry the alert's title as `reason` and its cause as
   `message`; `group_failed` also says in `rebalance_stopped` whether it
@@ -1317,7 +1318,10 @@ I/O, so an ambiguous placement outcome is looked up rather than blindly
 retried, and local order age survives restart. The row's `error` keeps what a
 failed placement raised: the venue's reason for a definite refusal, which is
 `rejected`, or the error of an unknown outcome, whose status stays unresolved
-because the order may still rest at the venue. A row whose checkpoint write
+because the order may still rest at the venue; an unknown outcome's error is
+written before the lookup that follows it, since the checkpoint leaves it out.
+Venue text is stored with NUL dropped and lone surrogates escaped, which
+PostgreSQL would otherwise refuse, and so is a runtime event's detail. A row whose checkpoint write
 fails is carried by the next checkpoint that lands, even when the order went
 terminal meanwhile and left the snapshot. A row the store refuses while it
 still accepts the snapshot is dropped rather than failing every later

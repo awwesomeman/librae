@@ -185,8 +185,10 @@ until it has taken its leases, and after it stops. It reports one of
 and what to do next. A refused reset is also recorded as a `decision_skipped`
 runtime event with reason `halt_reset_blocked`; every halt alert and applied
 reset is recorded too, as `halted` and `halt_reset`. The strategy dashboard's
-Runtime Events panel lists them per run, so reviewing why a run stopped does
-not depend on container logs.
+Runtime Events panel lists them per run. One recorded during a database outage
+is written once the store recovers; if the process stops first, its shutdown
+log names it as dropped, and after a crash only the container log and alert
+record it, even when the run restores halted.
 
 A missing mark clears itself: the engine establishes marks from completed
 bars, so a restored non-flat account becomes resettable once its symbols

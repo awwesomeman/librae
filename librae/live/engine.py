@@ -935,6 +935,11 @@ class LiveTrader:
         self._unpersisted_orders: dict[str, TrackedOrder] = {}
         self._unpublished_results: list[ExecutionResult] = []
         self._order_ledger_degraded = False
+        # Whether the last checkpoint write failed, and the halts, resets and
+        # group failures recorded since, held until a checkpoint lands: their
+        # sink usually writes to the same database.
+        self._checkpoint_failing = False
+        self._held_runtime_events: list[RuntimeEvent] = []
         self._pending_decision: StrategyDecision = []
         # Bar timestamp each pending intent first rested on, keyed by symbol.
         # A resting "day" limit expires against the session it first rested in.
@@ -1310,6 +1315,7 @@ class LiveTrader:
         for tracked in orders:
             self._unpersisted_orders[tracked.request.client_order_id] = tracked
         snapshot = self._snapshot_state()
+        self._checkpoint_failing = True
         try:
             self._state_store.save(snapshot, tuple(self._unpersisted_orders.values()))
         except Exception as exc:
@@ -1318,6 +1324,7 @@ class LiveTrader:
                 raise
             self._write_rows_one_by_one(snapshot)
         self._unpersisted_orders.clear()
+        self._checkpoint_failing = False
 
     def _store_accepts(self, snapshot: LiveRuntimeState) -> bool:
         """Write the snapshot with no rows; False means the store itself is failing."""
@@ -2191,17 +2198,29 @@ class LiveTrader:
         several can fall in one bar, and the checkpoint or broker call each
         makes first keeps two from sharing a timestamp, which the table's
         dedupe key would merge.
+
+        While the checkpoint is failing the event is held and offered once
+        one lands, since a sink on the same database would drop it. The hold
+        is in memory and shutdown offers or logs it, but a crash before it is
+        offered loses it, even when the halt's own checkpoint landed and the
+        account restores halted.
         """
         if not self._on_runtime_event:
             return
-        try:
-            self._on_runtime_event(
-                RuntimeEvent(
-                    ts=self._utc_now(), event_type=event_type, symbol=symbol, detail=detail
-                )
-            )
-        except Exception:
-            logger.exception("Runtime event %s not recorded", event_type)
+        self._held_runtime_events.append(
+            RuntimeEvent(ts=self._utc_now(), event_type=event_type, symbol=symbol, detail=detail)
+        )
+        self._offer_held_runtime_events()
+
+    def _offer_held_runtime_events(self) -> None:
+        if self._checkpoint_failing:
+            return
+        events, self._held_runtime_events = self._held_runtime_events, []
+        for event in events:
+            try:
+                self._on_runtime_event(event)
+            except Exception:
+                logger.exception("Runtime event %s not recorded", event.event_type)
 
     def _enter_halt(self) -> None:
         """Mark the account halted, dropping work and any reset that must not outlive it."""
@@ -2654,6 +2673,15 @@ class LiveTrader:
             logger.warning("Dropped halt requests at shutdown: %s", "; ".join(dropped))
         if self._drain_halt_reset_requests():
             logger.warning("Dropped a halt reset request at shutdown")
+        self._offer_held_runtime_events()
+        if self._held_runtime_events:
+            logger.warning(
+                "Dropped runtime events at shutdown, the checkpoint still failing: %s",
+                "; ".join(
+                    f"{event.event_type} at {event.ts.isoformat()}"
+                    for event in self._held_runtime_events
+                ),
+            )
         self._release_lease()
 
     def _require_running(self) -> None:
@@ -2999,6 +3027,9 @@ class LiveTrader:
         if self._unpersisted_orders:
             self._persist_state()
         self._publish_checkpointed_results()
+        # After the halt retry, which may land the checkpoint they wait on,
+        # and never ahead of a requested halt.
+        self._offer_held_runtime_events()
         self._flush_pending_position_events(count_attempt=True)
         if not self._executor.simulation and self._active_orders and not cancelled:
             self._advance_live_orders()
@@ -5095,11 +5126,20 @@ class LiveTrader:
                     )
                 except Exception as exc:
                     # The order may rest at the venue, so its status stays
-                    # unresolved. The error lands with this order's next row
-                    # write (the lookup's report, or the halt's cancellation),
-                    # not a write of its own that could fail ahead of them.
+                    # unresolved. The error is written now, since the checkpoint
+                    # leaves it out and the lookup below may fail the cycle. A
+                    # failed write keeps the row carried and must not stop the
+                    # lookup that resolves the order or halts.
                     tracked.error = f"{type(exc).__name__}: {exc}"
                     report = None
+                    try:
+                        self._persist_state(tracked)
+                    except Exception as write_exc:
+                        logger.warning(
+                            "Placement error of %s not yet written: %s",
+                            request.client_order_id,
+                            write_exc,
+                        )
                 if report is None:
                     report = self._timed_order_call(
                         lambda request=request: self._executor.find_order(request)
