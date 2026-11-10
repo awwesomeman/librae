@@ -84,8 +84,10 @@ Applies to every doc except `docs/plans/`, `docs/research/`, and
    document, or an explicit "unverified". A library exposing a name is not
    evidence the venue supports it. Unsourced claims are assumptions, and
    should read as such.
-6. **Language.** English outside `docs/`; preserve each existing document's
-   language.
+6. **Language.** English for everything: code, comments, docstrings, docs
+   (including `docs/`), commit messages, issues and pull requests. Some older
+   documents under `docs/` are in Chinese; keep an existing document's
+   language when editing it, and write every new document in English.
 
 Rules 1, 2 and 5 apply to docstrings and code comments too. A comment states
 why the code is the way it is; what it currently does is stated by the code.
