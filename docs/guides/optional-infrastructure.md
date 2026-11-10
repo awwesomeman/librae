@@ -158,6 +158,9 @@ Librae owns the current schema, not the upgrade of an existing database:
 - The reference writer and the live state store read that revision before
   registering a run or restoring a checkpoint, and fail closed when the table
   is missing or holds any other revision.
+- Both look only in the connection's current schema, the first existing
+  schema on `search_path`; same-named tables further down the path are
+  ignored, so the bootstrap and the check cannot settle on different copies.
 - Bringing an existing database to the required revision is the deployment's
   job, run as the role that owns the tables. The spec for a revision bump is
   the diff of `timescale_init.sql` between the two Librae versions.

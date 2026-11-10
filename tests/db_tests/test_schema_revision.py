@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -9,22 +10,49 @@ from librae.db.schema import CURRENT_SCHEMA_REVISION, require_current_schema
 
 BOOTSTRAP = Path(__file__).resolve().parents[2] / "librae/db/timescale_init.sql"
 
+CURRENT_SCHEMA_PROBE = (
+    "SELECT to_regclass(quote_ident(current_schema()) || '.librae_schema_revision')"
+)
+REVISION_READ = "SELECT revision FROM librae_schema_revision WHERE singleton = TRUE"
+
 
 class FakeCursor:
-    """Answers only the reads the gate may make; quant_app is granted no more."""
+    """Answers only the reads the gate may make; quant_app is granted no more.
 
-    def __init__(self, revision: int | None, *, has_table: bool = True) -> None:
-        self.revision = revision
-        self.has_table = has_table
+    ``copies`` maps each schema holding a revision table to its revision row
+    (``None`` for an empty table). Names resolve as PostgreSQL resolves them:
+    a bare name takes the first schema on ``search_path`` that has it, and
+    ``current_schema()`` is the first schema on ``search_path``.
+    """
+
+    def __init__(
+        self,
+        revision: int | None,
+        *,
+        has_table: bool = True,
+        search_path: tuple[str, ...] = ("public",),
+        copies: dict[str, int | None] | None = None,
+    ) -> None:
+        self.search_path = search_path
+        if copies is None:
+            copies = {search_path[0]: revision} if has_table else {}
+        self.copies = copies
         self._row: tuple[object, ...] | None = None
         self.queries: list[str] = []
 
+    def _resolve(self, path: tuple[str, ...]) -> str | None:
+        return next((schema for schema in path if schema in self.copies), None)
+
     def execute(self, query: str, params: object = None) -> None:
         self.queries.append(query)
-        if query == "SELECT to_regclass('librae_schema_revision')":
-            self._row = ("librae_schema_revision" if self.has_table else None,)
-        elif query == "SELECT revision FROM librae_schema_revision WHERE singleton = TRUE":
-            self._row = None if self.revision is None else (self.revision,)
+        if query == CURRENT_SCHEMA_PROBE:
+            schema = self._resolve(self.search_path[:1])
+            self._row = (None if schema is None else f"{schema}.librae_schema_revision",)
+        elif query == REVISION_READ:
+            schema = self._resolve(self.search_path)
+            assert schema is not None, "relation librae_schema_revision does not exist"
+            revision = self.copies[schema]
+            self._row = None if revision is None else (revision,)
         else:
             raise AssertionError(f"unexpected query: {query}")
 
@@ -99,3 +127,34 @@ def test_gate_queries_follow_search_path() -> None:
     assert cursor.queries
     assert not any("public." in q for q in cursor.queries)
     assert "to_regclass('public." not in BOOTSTRAP.read_text()
+
+
+def test_gate_ignores_a_revision_table_outside_the_current_schema() -> None:
+    """The bootstrap creates its tables in the current schema; a current
+    revision further down search_path must not vouch for that empty schema."""
+    cursor = FakeCursor(
+        None, search_path=("engine", "public"), copies={"public": CURRENT_SCHEMA_REVISION}
+    )
+    assert "has no librae_schema_revision table" in _refusal(cursor)
+
+
+def test_gate_reads_the_current_schema_copy_ahead_of_a_stale_one() -> None:
+    cursor = FakeCursor(
+        None,
+        search_path=("engine", "public"),
+        copies={"engine": CURRENT_SCHEMA_REVISION, "public": CURRENT_SCHEMA_REVISION - 1},
+    )
+    require_current_schema(cursor)
+
+
+def test_bootstrap_checks_tables_only_in_the_current_schema() -> None:
+    """The unqualified CREATEs write to current_schema(); an existence check
+    that searched all of search_path would see other schemas' tables instead."""
+    schema = BOOTSTRAP.read_text(encoding="utf-8")
+    probes = re.findall(r"to_regclass\(([^)]*)\)", schema)
+
+    assert probes
+    assert all(probe.startswith("target || '.") for probe in probes), probes
+    for block in re.findall(r"DO \$\$.*?END\s*\$\$;", schema, flags=re.DOTALL):
+        if "to_regclass(" in block:
+            assert "target text := quote_ident(current_schema());" in block

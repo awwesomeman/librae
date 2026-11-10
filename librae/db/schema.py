@@ -21,8 +21,10 @@ class _Cursor(Protocol):
 def require_current_schema(cur: _Cursor) -> None:
     """Fail closed before persistence or order-capable startup."""
     # to_regclass, not a bare SELECT: a missing table would abort the caller's transaction.
-    # Unqualified so the connection's search_path decides which schema holds the engine tables.
-    cur.execute("SELECT to_regclass('librae_schema_revision')")
+    # current_schema(), the first schema on search_path, is where timescale_init.sql creates
+    # the engine tables; a bare name would also accept a stale copy further down the path.
+    # quote_ident keeps a NULL schema NULL, where format('%I') would raise.
+    cur.execute("SELECT to_regclass(quote_ident(current_schema()) || '.librae_schema_revision')")
     row = cur.fetchone()
     if row is None or row[0] is None:
         found = "has no librae_schema_revision table"
