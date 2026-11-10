@@ -41,4 +41,6 @@ general industry practice and these docs disagree, these docs win.
 ## Rules shared across repos
 
 Rules common to the maintainer's repos live in the maintainer's quant-platform repo (`../quant-platform/AGENTS.md` in a local checkout); read them before changing anything.
-This file holds only what is specific to Librae.
+This file holds only what is specific to Librae. Those shared rules are written
+in Chinese; everything you write in this repo is still in English (see the
+language rule in [CONTRIBUTING.md](CONTRIBUTING.md)).
