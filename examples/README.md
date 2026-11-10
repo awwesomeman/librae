@@ -219,7 +219,7 @@ holidays are absent rather than inferred from missing rows.
 ## Add infrastructure only when needed
 
 `--no-db` skips analytics and state-store writes, so the backtests above need
-no PostgreSQL or TimescaleDB. Database initialization, Grafana data flow, and
+no PostgreSQL or TimescaleDB. Database initialization, the monitoring console, and
 deployment examples are deliberately documented outside this tutorial:
 [Optional infrastructure](../docs/guides/optional-infrastructure.md).
 

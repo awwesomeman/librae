@@ -1,4 +1,4 @@
-"""Golden signal-outcome fixture shared by Python and Grafana contract tests."""
+"""Golden signal-outcome fixture shared by the metrics and console tests."""
 
 from __future__ import annotations
 

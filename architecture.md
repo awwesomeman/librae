@@ -4,7 +4,7 @@
 > rationale stays in `docs/decisions/`.
 >
 > **Scope**: engine layering, the DB access layer, and naming conventions.
-> Optional Grafana, Docker, and VM operations are documented in
+> The optional monitoring console, Docker, and VM operations are documented in
 > `docs/guides/optional-infrastructure.md`. Usage examples and runtime
 > behavior are documented in `docs/guides/engine-usage.md`.
 
@@ -78,7 +78,7 @@ through explicit constructor injection.
 |---|---|---|
 | `librae/core`, `backtest`, `live` | Canonical bars, strategy decisions, accounting, execution state, risk, results | Documented public types and small call-site protocols |
 | Caller/strategy project | Point-in-time data preparation, features, strategy semantics, instrument and cost configuration | Prepared DataFrames, strategy classes, injected callables and adapters |
-| Reference integrations | Broker SDKs, TimescaleDB, Telegram, Grafana, CLI and deployment examples | Optional extras that may be used, replaced, or omitted |
+| Reference integrations | Broker SDKs, TimescaleDB, Telegram, monitoring console, CLI and deployment examples | Optional extras that may be used, replaced, or omitted |
 
 Librae is not a general ingestion platform, streaming/tick engine, broker
 abstraction framework, cross-account ledger, or hosted trading platform.
@@ -95,7 +95,7 @@ librae/orchestration -> librae public contracts
 librae/orchestration -> librae/brokers       -> librae public contracts
 librae/orchestration -> librae/db            -> librae public contracts
 librae/orchestration -> librae/notifications -> librae public contracts
-librae/app           -> librae/db schema
+librae/console       -> librae public contracts + reference DB schema (read-only)
 librae/backtest      -> librae/core
 librae/live          -> librae/core
 librae/core          -> librae/brokers   (venue capability tables only)
@@ -132,7 +132,7 @@ Static integration contracts live in `librae.integrations`; offline bar,
 order-adapter, execution-report, and feature look-ahead checks live in
 `librae.testing`. Reference
 implementations live in the regular `librae.brokers`, `librae.db`,
-`librae.notifications`, `librae.orchestration`, and `librae.app` packages.
+`librae.notifications`, `librae.orchestration`, and `librae.console` packages.
 The distribution exposes only the `librae` top-level namespace. The former
 repository-level imports are intentionally unsupported and have no
 compatibility aliases. The ownership decision and migration constraints are
@@ -220,8 +220,8 @@ columns from the same adapter snapshot; see
 
 Runtime health follows that polling contract rather than the strategy bar
 timeframe. `poll_seconds` is persisted with run metadata, and a heartbeat is
-stale after three missed poll cycles. The standalone watchdog and generated
-Grafana dashboards consume the same multiplier.
+stale after three missed poll cycles. The standalone watchdog and the console
+consume the same multiplier.
 
 ## Broker Adapter Design (`librae/brokers/`)
 
@@ -395,6 +395,8 @@ librae/
 │   ├── halt_recovery.py      whether a halted run may reset, and the blocking reason
 │   ├── persistent_alerts.py  alerts for a lasting problem — first, repeat, resolved
 │   └── resting_orders.py     live intent lifetime — replace, expire, prune (mirrors backtest)
+│
+├── console/                  read-only Streamlit monitoring console (`console` extra)
 │
 └── config/                   configuration management
     ├── market_config.py      MarketConfig dataclass + built-in market registry (costs, tick size, margin rates)
@@ -755,8 +757,7 @@ own. The diagram shows which reference writers fill which tables.
 ### Who owns which table
 
 A table is Librae's when an engine path reads or writes it: the live runtime's
-callbacks and state store, the schema revision gate, or the shipped Grafana
-dashboards. Its definition then sits beside the code that depends on its shape,
+callbacks and state store, the schema revision gate, or the console. Its definition then sits beside the code that depends on its shape,
 so changing either is one reviewed diff. `timescale_init.sql` holds those
 tables and nothing else, and
 [`test_schema_ownership.py`](tests/db_tests/test_schema_ownership.py) fails
@@ -868,13 +869,11 @@ the backtest savers store backtest runs only, so no save clears the rows a sim
 or live engine recorded.
 
 `signal_events` and the run's `run_bars` are the source facts for
-signal-quality analysis, so a backtest feeds the signal dashboard only when
-saved with `store_bars=True`.
-Forward return, MFE, and MAE are derived on demand: local callers use
-`compute_signal_outcomes()` on one symbol at a time, while the optional Grafana
-dashboard uses its PostgreSQL query path. Both follow the same observed-bar,
-direction, zero-floor excursion, and unit-conversion contract; no derived
-outcome table is maintained.
+signal-quality analysis, so a backtest feeds the console's Signals page only
+when saved with `store_bars=True`.
+Forward return, MFE, and MAE are derived on demand by
+`compute_signal_outcomes()`, one symbol at a time, for local callers and the
+console alike; no derived outcome table is maintained.
 
 ### Handling quantity ambiguity
 
@@ -922,7 +921,7 @@ bar's values, since a source can revise a closed bar without moving its
 A correction is a new row beside the version it corrects. Each row says when
 the engine received that version, so the versions a decision read are, per
 bar, the latest received before it; readers that want one row per bar take the
-one received last (`load_run_bars()`, the dashboards).
+one received last (`load_run_bars()`, the console).
 
 ## Maintenance rules
 

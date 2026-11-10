@@ -13,7 +13,7 @@ execution, notifications, monitoring, or deployment.
 | Broker market data and order routing | `librae/brokers/` | `adapter` and `order_adapter` |
 | Telegram notifications | `librae/notifications/` | `notifier` |
 | Strategy CLI/config wiring | `librae/orchestration/` | strategy-owned `run.py` helpers |
-| Grafana dashboards | `librae/app/grafana/` | queries the reference DB schema |
+| Monitoring console | `librae/console/` | reads the reference DB schema |
 | Docker and VM scripts | `deploy/` | process/infrastructure examples |
 
 These are replaceable integrations, not required dependencies of the
@@ -50,7 +50,7 @@ live factory treats `backtest_runs` registration as a startup precondition: if t
 foreign-key parent cannot be written, construction fails before polling or
 order execution and emits a distinct `DB Startup Failed` alert when a notifier
 is configured. That alert means persistence startup failed, not that a run
-started without a dashboard row. Other analytics callbacks remain best-effort
+started without a run row. Other analytics callbacks remain best-effort
 after successful registration.
 
 For a database outside the reference Compose setup, run the script with a
@@ -172,66 +172,60 @@ the current revision, for example when refreshing role grants:
 docker exec -i quant_timescaledb psql -U quant -d quant < librae/db/timescale_init.sql
 ```
 
-## Grafana
+## Console
 
-Grafana provisioning lives under `librae/app/grafana/provisioning/`. Dashboard JSON
-is generated with:
+`librae/console/` is a read-only Streamlit app over the engine tables: every
+run's latest account state, one run's performance, its positions and fills,
+its signals against the bars it stored, and its runtime events. Nothing in
+`deploy/` starts it: run it on any machine that can reach the database.
 
 ```bash
-uv run python -m librae.app.grafana.generate_dashboards
+uv sync --extra console            # or: pip install "librae[console] @ git+..."
+export LIBRAE_CONSOLE_DSN=postgresql://grafana_reader:<password>@localhost:5432/quant
+uv run python -m librae.console --server.port 8501
 ```
 
-The strategy dashboard selects `run_id`, `account_id`, and `symbol`. Equity,
-PnL, metrics, and trade events always retain their currency label; it does
-not combine accounts, including accounts that share a currency. Price Trend
-and Entry/Exit Signals show one symbol at a time — Open Positions and
-Portfolio Exposure cover the full multi-symbol/portfolio state.
+Arguments after `python -m librae.console` go to `streamlit run`. The console
+has no login, so it listens on `127.0.0.1` unless `--server.address` (or
+`STREAMLIT_SERVER_ADDRESS`) names another interface. Choose one deliberately,
+such as a private-network address like a Tailscale IP, never a public one; see
+`SECURITY.md`.
 
-The account overview dashboard answers the other question: what every run in
-one account is doing right now. It shows one latest-state row per run —
-equity, exposure, concentration, open-position count, and last heartbeat —
-for a single currency and account over the selected time range, and its
-currency and account variables are single-select so a query cannot span
-either. Nothing is summed across rows: combined PnL, Sharpe, drawdown, and
-reporting-currency conversion stay caller-owned, per `architecture.md`. Open
-positions are reconstructed at each run's own equity timestamp rather than at
-"now", so a row never mixes moments. See
-[the dashboard-scope ADR](../decisions/2026-09-07-account-overview-is-a-separate-dashboard.md).
+- `LIBRAE_CONSOLE_DSN` must name a role that can only `SELECT`: the reference
+  schema's `grafana_reader` (password `POSTGRES_GRAFANA_PASSWORD`). The
+  console also opens its session read-only, and it never writes.
+- Status panels (run status, halt flag, last decision bar, equity, open
+  positions, runtime events) rerun every `LIBRAE_CONSOLE_REFRESH_SECONDS`
+  (default 30) as Streamlit fragments; charts and tables of history redraw
+  only when the page reloads. Queries are cached for a few seconds, so several
+  open tabs share one database read.
+- A status panel shows how old its newest row is and warns when it is older
+  than two bars plus three poll cycles. Market closures are not modelled, so
+  a run on a session calendar shows the warning while its market is closed.
+  Alerting stays with the notifier and health checks, not the console.
+- The halt flag and last decision bar come from the run's checkpoint in
+  `execution_runtime_state`; a backtest has none.
+- Every query is bounded: the most recent runs, the newest rows of a run's
+  history (a caption says when that cut it), and a 30 s statement timeout.
+- Accounts are never combined: every account-level panel shows one
+  account in its own currency. Combined PnL and reporting-currency conversion
+  stay caller-owned, per `architecture.md`.
+- Price panels read the bars the run stored in `run_bars`, the latest version
+  of each. A sim or live run stores the bars behind its decisions (see
+  [architecture.md](../../architecture.md#data-acquisition-and-ownership-boundary));
+  a backtest only when saved with `store_bars=True`, so one saved without it
+  has no price chart, no mark for its open positions, and no forward-return
+  statistics.
+- Signal forward returns, MFE and MAE come from
+  `librae.compute_signal_outcomes()`, so the console and an offline report
+  measure the same thing.
 
-Price panels read the bars the selected run stored in `run_bars`, the latest
-version of each. A sim or live run stores the bars behind its decisions (see
-[architecture.md](../../architecture.md#data-acquisition-and-ownership-boundary)); a backtest stores
-its inputs only when saved with `store_bars=True`. A backtest saved without it
-is expected to show empty price panels, no mark for its open positions, and
-no forward-return statistics on the signal dashboard.
-
-Dashboards query the TimescaleDB tables and remain empty until a strategy has
-written data. To inspect the panels before running a real strategy, load the
-bundled fake rows:
+To look at the pages before running a real strategy, load the bundled fake
+rows into a development database:
 
 ```bash
 psql "$TIMESCALE_DSN" -f librae/db/seed_fake_data.sql
 ```
-
-For a local Grafana instance connected to an existing database:
-
-```bash
-cd deploy
-docker compose --env-file ../.env --env-file ../.env.secrets -f docker-compose.local.yml up -d
-```
-
-Open `http://localhost:3000`. The remote database connection comes from
-`.env`; admin/Grafana passwords come from `.env.secrets` (copy
-`.env.secrets.example` and fill in the Docker Compose infra secrets section)
-as documented in the compose file.
-
-The Signal Monitor dashboard's forward-return/MFE/MAE panels (Cumulative
-Signal Return, Rolling Mean Return, Rolling Edge Ratio) recompute that logic
-directly in SQL rather than calling `librae.compute_signal_outcomes()` —
-Grafana runs against Postgres and cannot call Python. This is a deliberate,
-independent implementation for a live/rolling-window dashboard, not
-duplication to be unified with the offline Python path; keep both correct
-under review rather than trying to merge them.
 
 ## Brokers
 
@@ -327,23 +321,21 @@ independent options. You can instead inject your own notifier or persistence
 callbacks without installing that extra.
 
 See the LiveTrader callback signatures in `architecture.md` for the exact
-callable contracts. When Grafana is unnecessary, callbacks such
-as `on_bar`, `on_order_event`, and `on_heartbeat` can feed an existing
+callable contracts. Callbacks such as `on_bar`, `on_order_event`, and `on_heartbeat` can feed an existing
 observability stack.
 `on_funding_cash_flow` receives each applied shadow-simulation funding event;
 live broker balances remain authoritative.
 
 ## Deployment examples
 
-The `deploy/`, `librae/app/`, and `scripts/` directories are operational examples,
-not engine APIs. They show one Docker/Grafana/VM arrangement and can be used,
+The `deploy/` and `scripts/` directories are operational examples, not
+engine APIs. They show one Docker/VM arrangement and can be used,
 replaced, or ignored. Read `SECURITY.md` before
 deploying them to a host with a public IP.
 
 The `deploy/` and `scripts/` trees are checkout-only and are not installed in
-the Python wheel. The packaged distribution does include the SQL schema and
-Grafana provisioning resources under `librae.*` for caller-owned
-infrastructure. The reference VM flow below requires a Librae checkout on the
+the Python wheel. The packaged distribution does include the SQL schema under
+`librae.db` for caller-owned infrastructure. The reference VM flow below requires a Librae checkout on the
 build machine, Bash for the local scripts, and a compatible Linux target; it
 is not part of the OS-independent Python package contract.
 
@@ -402,7 +394,7 @@ TLS exceptions.
 
 Infrastructure-only deployment via `cloud_deploy.sh` does not copy either
 application repository; it syncs the compose file, the schema bootstrap under
-`librae/db/`, Grafana provisioning, and `.env`.
+`librae/db/`, and `.env`.
 
 This combined-source builder is optional. A caller-owned image may instead
 install a pinned Librae distribution and copy its own strategy package, as
@@ -432,12 +424,11 @@ or flat-account reset procedure below.
 
 ### Reference VM flow
 
-The target must provide Bash, rsync, and Docker Compose. Its SSH account must
-permit local TCP forwarding from the caller to the target's `localhost:3000`.
-The deployment fails when any required capability is unavailable.
+The target must provide Bash, rsync, and Docker Compose with `up --wait`. The
+deployment fails when any required capability is unavailable.
 
-The steps below reach Grafana and TimescaleDB over an SSH tunnel. On a VPS
-with Tailscale, `GF_BIND`/`TSDB_BIND` can instead be set to the VPS's
+The steps below reach TimescaleDB over an SSH tunnel. On a VPS
+with Tailscale, `TSDB_BIND` can instead be set to the VPS's
 Tailscale IP for direct access without a tunnel; avoid `0.0.0.0`, which has
 been used as an intrusion entry point before.
 
@@ -460,7 +451,7 @@ been used as an intrusion entry point before.
    secret.
 
 4. Run `deploy/cloud_deploy.sh <user>@<host>` to sync infrastructure files and
-   start TimescaleDB and Grafana. It does not start a strategy.
+   start TimescaleDB. It does not start a strategy.
 5. Create account configuration files and copy `.env.secrets.example` to one
    `.credentials/<account>.env` file per live account directly on the VM.
    Deployment scripts never sync broker credentials.
@@ -559,8 +550,7 @@ registry authentication, image signing, cloud hardening, broker APIs, or real
 credentials.
 
 `cloud_deploy.sh` reports file transfer, Compose startup, TimescaleDB
-readiness, schema loading, Grafana readiness, and dashboard publication as
-separate stages. Readiness waits are bounded to 180 seconds by default; set
+readiness, and schema loading as separate stages. Readiness waits are bounded to 180 seconds by default; set
 `CLOUD_DEPLOY_TIMEOUT_SECONDS` to another positive integer for a slower host.
 
 Before the first account-specific live launch, stop any container created by

@@ -1139,7 +1139,6 @@ def test_remote_schema_path_matches_compose_source() -> None:
         "POSTGRES_PASSWORD",
         "POSTGRES_APP_PASSWORD",
         "POSTGRES_GRAFANA_PASSWORD",
-        "GF_SECURITY_ADMIN_PASSWORD",
     ):
         assert f"${{{variable}:?Set {variable} in .env.secrets}}" in script
     scp_block = script[script.index("scp -q") : script.index("scp -q") + 200]
@@ -1162,7 +1161,6 @@ def test_cloud_deploy_reports_the_failed_stage(tmp_path: Path) -> None:
                 "POSTGRES_PASSWORD=test",
                 "POSTGRES_APP_PASSWORD=test",
                 "POSTGRES_GRAFANA_PASSWORD=test",
-                "GF_SECURITY_ADMIN_PASSWORD=test",
             )
         ),
         encoding="utf-8",
@@ -1190,68 +1188,19 @@ def test_cloud_deploy_reports_the_failed_stage(tmp_path: Path) -> None:
     assert "Cloud deployment failed during file transfer (exit 17)." in result.stderr
 
 
-def test_dashboard_generator_does_not_import_the_engine_package() -> None:
-    """The deploy venv installs what the dashboard push needs, not the engine.
-
-    Running the generator as a module executes librae/__init__.py first, which
-    imports numpy and fails there, so the generator is invoked by path and must
-    not import its own package.
-    """
-    script = (ROOT / "scripts/dev_push_dashboard.py").read_text(encoding="utf-8")
-
-    assert '"librae/app/grafana/generate_dashboards.py"' in script
-    assert '"-m", "librae.app.grafana.generate_dashboards"' not in script
-
-    generator = (ROOT / "librae/app/grafana/generate_dashboards.py").read_text(encoding="utf-8")
-    engine_imports = [
-        line
-        for line in generator.splitlines()
-        if line.lstrip().startswith(("from librae", "import librae"))
-    ]
-    assert not engine_imports, engine_imports
-
-
-def test_dashboard_staleness_matches_the_runtime_contract() -> None:
-    """The generator restates the threshold because it cannot import it, so the
-    two representations are pinned together here instead."""
-    from librae.app.grafana.generate_dashboards import HEARTBEAT_STALE_AFTER_POLLS as dashboard
-    from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS as runtime
-
-    assert dashboard == runtime
-
-
-def test_grafana_receives_only_its_database_password() -> None:
-    for compose_name in ("docker-compose.yml", "docker-compose.local.yml"):
-        compose = yaml.safe_load((DEPLOY / compose_name).read_text(encoding="utf-8"))
-        grafana = compose["services"]["grafana"]
-        environment = grafana["environment"]
-
-        assert "env_file" not in grafana
-        assert "POSTGRES_GRAFANA_PASSWORD" in environment
-        assert "POSTGRES_PASSWORD" not in environment
-        assert "POSTGRES_APP_PASSWORD" not in environment
-
-
 def test_reference_services_use_private_bindings_and_versioned_images() -> None:
     compose = yaml.safe_load((DEPLOY / "docker-compose.yml").read_text(encoding="utf-8"))
-    local = yaml.safe_load((DEPLOY / "docker-compose.local.yml").read_text(encoding="utf-8"))
 
-    assert compose["services"]["grafana"]["image"] == "grafana/grafana:13.1.1"
-    assert local["services"]["grafana"]["image"] == "grafana/grafana:13.1.1"
     assert compose["services"]["timescaledb"]["image"] == "timescale/timescaledb:2.28.3-pg16"
-    assert "127.0.0.1" in compose["services"]["grafana"]["ports"][0]
-    assert "127.0.0.1" in local["services"]["grafana"]["ports"][0]
+    assert "127.0.0.1" in compose["services"]["timescaledb"]["ports"][0]
 
 
 def test_database_roles_match_runtime_boundaries() -> None:
-    schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
-    datasource = yaml.safe_load(
-        (ROOT / "librae/app/grafana/provisioning/datasources/timescaledb.yaml").read_text(
-            encoding="utf-8"
-        )
-    )
+    from librae.config.env import DSN_ROLES
 
-    assert datasource["datasources"][0]["user"] == "grafana_reader"
+    schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
+
+    assert DSN_ROLES["LIBRAE_CONSOLE_DSN"][0] == "grafana_reader"
     assert "GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_reader;" in schema
     assert (
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO quant_app;"
@@ -1369,7 +1318,6 @@ def _cloud_deploy_project(tmp_path: Path, env_body: str) -> Path:
                 "POSTGRES_PASSWORD=test",
                 "POSTGRES_APP_PASSWORD=test",
                 "POSTGRES_GRAFANA_PASSWORD=test",
-                "GF_SECURITY_ADMIN_PASSWORD=test",
             )
         ),
         encoding="utf-8",
@@ -1405,7 +1353,7 @@ def test_cloud_deploy_refuses_to_sync_an_env_holding_secrets(tmp_path: Path) -> 
         tmp_path,
         "\n".join(
             (
-                "GF_BIND=127.0.0.1",
+                "TSDB_BIND=127.0.0.1",
                 "TELEGRAM_CHAT_ID=12345",
                 "TELEGRAM_BOT_TOKEN=8000:AAsecretvalue",
                 "BINANCE_API_SECRET=another-secret",
@@ -1432,7 +1380,7 @@ def test_cloud_deploy_preflight_allows_a_clean_env(tmp_path: Path) -> None:
         tmp_path,
         "\n".join(
             (
-                "GF_BIND=127.0.0.1",
+                "TSDB_BIND=127.0.0.1",
                 "TELEGRAM_CHAT_ID=12345",
                 "# TELEGRAM_BOT_TOKEN=not-set-here",
                 "TS_AUTHKEY=",
@@ -1516,7 +1464,7 @@ def test_pip_scaffold_template_is_a_declared_subset_without_deploy_settings() ->
     names = _assigned_names(ROOT / "librae/_scaffold/env.example")
 
     assert names <= set(DECLARED)
-    assert "GF_BIND" not in names
+    assert "TSDB_BIND" not in names
     assert "TIMESCALE_DSN" in names
 
 

@@ -22,7 +22,8 @@ strategy interface.
 - **Portfolio-aware core** — positions, cash, costs, exposure, concentration,
   turnover, target drift, and risk limits share one state model.
 - **Composable boundaries** — the engine runs in memory; persistence, broker,
-  notification, and operational integrations remain optional.
+  notification, monitoring-console, and operational integrations remain
+  optional.
 - **Explicit boundaries** — no hidden optimizer, feature pipeline, exchange
   calendar-driven event generation, FX ledger, or silent data repair.
 

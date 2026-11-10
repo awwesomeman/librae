@@ -51,15 +51,7 @@ def _validate_metadata_and_package_data(*, expect_editable: bool) -> None:
     package_root = files("librae")
     assert (package_root / "_scaffold" / "env.example").is_file()
     assert (package_root / "db" / "timescale_init.sql").is_file()
-    assert (
-        package_root
-        / "app"
-        / "grafana"
-        / "provisioning"
-        / "dashboards"
-        / "json"
-        / "strategy_dashboard.json"
-    ).is_file()
+    assert (package_root / "console" / "app.py").is_file()
 
 
 def _validate_console_entry_point() -> None:

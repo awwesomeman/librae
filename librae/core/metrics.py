@@ -801,13 +801,11 @@ def compute_signal_outcomes(
 ) -> pd.DataFrame:
     """Per-signal, per-offset forward-return/MFE/MAE curve.
 
-    Computed on demand (nothing persisted), alongside Grafana's own on-demand
-    ``_FWD_CTE``/``_EXC_CTE`` panels. Python signal and trade
-    callers share ``_walk_forward_matrices``; Grafana keeps its independent
-    SQL path, pinned to the same mathematical contract by golden tests.
+    Computed on demand (nothing persisted). Signal and trade callers, the
+    console's Signals page included, share ``_walk_forward_matrices``.
 
-    Matches the Grafana SQL's reference convention: each signal's reference
-    price is the *next* bar's ``price_col`` (default "open"), not the
+    Each signal's reference price is the *next* bar's ``price_col``
+    (default "open"), not the
     signal's own bar. Offset T=1 is the first observed bar after that
     reference bar. Results are gross hypothetical outcomes, not executable
     fills, and are returned in percentage points.
@@ -819,8 +817,7 @@ def compute_signal_outcomes(
         max_periods: How many bars forward to compute, per signal.
         direction: Expected "long" or "short" price direction for this batch.
             This is independent of an event's entry/exit label.
-        price_col: Which next-observed-bar OHLCV field is the reference price;
-            matches Grafana's ``$fill_price_field`` variable.
+        price_col: Which next-observed-bar OHLCV field is the reference price.
 
     Returns:
         Long-format DataFrame, one row per (signal, offset) that has data:
@@ -879,11 +876,8 @@ def summarize_signal_mae_mfe(
 ) -> pd.DataFrame:
     """Aggregate forward-return/MFE/MAE across signals, at a fixed set of horizons.
 
-    Local-report counterpart to Grafana's on-demand, freely-adjustable-``$n``
-    ``signal_monitor`` panels. The Python report uses
-    ``compute_signal_outcomes`` -> ``_walk_forward_matrices`` at a small fixed
-    set of horizons, while Grafana remains independently implemented in SQL
-    against the same golden contract. Nothing is persisted.
+    Uses ``compute_signal_outcomes`` at a small fixed set of horizons;
+    nothing is persisted.
 
     MFE and MAE are non-negative excursion magnitudes in percentage points.
     ``n`` is reported separately at every horizon because recent signals may

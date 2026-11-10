@@ -1430,8 +1430,8 @@ def save_signal_results(
 
     Use this for signal quality analysis without running a full backtest.
     When config is provided, stores its execution identity and policies.
-    ``store_bars`` also keeps the input bars in ``run_bars``, which the signal
-    dashboard's price and forward-return panels read; it needs a ``run_id``.
+    ``store_bars`` also keeps the input bars in ``run_bars``, which the
+    console's price charts and signal outcomes read; it needs a ``run_id``.
     """
     if store_bars and run_id is None:
         raise ValueError("store_bars=True requires run_id: run_bars rows belong to a run")

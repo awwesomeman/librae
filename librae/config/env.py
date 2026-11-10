@@ -119,9 +119,6 @@ class EnvVar:
 
 ENV_VARS: tuple[EnvVar, ...] = (
     # .env — deployment settings that are safe on every host
-    EnvVar("GF_BIND", Where.ENV),
-    EnvVar("GRAFANA_URL", Where.ENV),
-    EnvVar("VPS_DB_HOST", Where.ENV),
     EnvVar("TELEGRAM_CHAT_ID", Where.ENV),
     EnvVar("BINANCE_EXCHANGE_ID", Where.ENV),
     EnvVar("TSDB_BIND", Where.ENV),
@@ -129,6 +126,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("TRADE_STRATEGY_PATH", Where.ENV),
     EnvVar("TRADE_IMAGE", Where.ENV),
     EnvVar("TRADE_IMAGE_REF", Where.ENV),
+    EnvVar("LIBRAE_CONSOLE_REFRESH_SECONDS", Where.ENV),
     # .env.secrets — trading credentials and the venue settings that travel with them
     EnvVar("BINANCE_API_KEY", Where.SECRETS, secret=True),
     EnvVar("BINANCE_API_SECRET", Where.SECRETS, secret=True),
@@ -147,11 +145,11 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("POSTGRES_PASSWORD", Where.SECRETS, secret=True),
     EnvVar("POSTGRES_APP_PASSWORD", Where.SECRETS, secret=True),
     EnvVar("POSTGRES_GRAFANA_PASSWORD", Where.SECRETS, secret=True),
-    EnvVar("GF_SECURITY_ADMIN_PASSWORD", Where.SECRETS, secret=True),
     EnvVar("TELEGRAM_BOT_TOKEN", Where.SECRETS, secret=True),
     EnvVar("TS_AUTHKEY", Where.SECRETS, secret=True),
     EnvVar("TIMESCALE_DSN", Where.SECRETS, secret=True),
     EnvVar("TRADE_TIMESCALE_DSN", Where.SECRETS, secret=True),
+    EnvVar("LIBRAE_CONSOLE_DSN", Where.SECRETS, secret=True),
 )
 
 DECLARED: Mapping[str, EnvVar] = {v.name: v for v in ENV_VARS}
@@ -174,11 +172,13 @@ PAIRED_NAMES: tuple[tuple[str, str], ...] = (
 # Each connection string names one role and carries that role's password.
 # The split is a privilege boundary, not a convention: quant owns the tables
 # and quant_app is granted DML alone, so a DSN naming the owner would hand the
-# engine the ability to change the schema it runs against.
+# engine the ability to change the schema it runs against. The console only
+# reads, so its DSN names the SELECT-only role.
 COMPOSE_LAYOUT_MARKER = "POSTGRES_APP_PASSWORD"
 DSN_ROLES: Mapping[str, tuple[str, str]] = {
     "TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
     "TRADE_TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
+    "LIBRAE_CONSOLE_DSN": ("grafana_reader", "POSTGRES_GRAFANA_PASSWORD"),
 }
 
 
@@ -317,7 +317,7 @@ def doctor(project_root: Path) -> list[Finding]:
                 Finding(
                     "error",
                     f"{name} connects as {parts.username or '<none>'}, not {role}"
-                    " — the engine must not hold schema-changing rights",
+                    " — each connection string holds only its own role's rights",
                 )
             )
         if not password:

@@ -12,8 +12,8 @@ patterns live in the [examples index](../examples/README.md).
 - Git only for a repository clone or direct Git installation
 - [`uv`](https://docs.astral.sh/uv/) for the repository development workflow
 
-The base install depends only on NumPy and pandas. TimescaleDB, Grafana,
-chart viewing, exchange calendars, CLI wiring, notification clients, and
+The base install depends only on NumPy and pandas. TimescaleDB, the
+monitoring console, chart viewing, exchange calendars, CLI wiring, notification clients, and
 broker SDKs are optional. A direct Python backtest needs none of them.
 
 ## Choose an installation workflow
@@ -21,12 +21,12 @@ broker SDKs are optional. A direct Python backtest needs none of them.
 | Workflow | Network at install time | Provides | Does not provide |
 |---|---|---|---|
 | Clone + editable install | Git host and package index or configured caches | Installed package plus repository examples, tests, Compose files, and deployment scripts | A frozen application dependency graph unless the caller keeps one |
-| Direct Git dependency | Git host and package index or configured caches | Installed package and packaged SQL/Grafana resources | Repository examples, Compose files, deployment scripts, or offline installation |
+| Direct Git dependency | Git host and package index or configured caches | Installed package and packaged SQL resources | Repository examples, Compose files, deployment scripts, or offline installation |
 | Built wheel | Only the wheel's runtime dependencies | Installed package and packaged resources without a checkout | Repository-only files |
 | Target-specific wheelhouse | No network on the target | Installed package, selected extras, and their runtime dependencies | One wheelhouse that is automatically portable across every OS, architecture, and Python version |
 
 The wheel intentionally contains `librae.*`, the console entry point, SQL
-schema files, and Grafana provisioning data. It does not contain `examples/`,
+schema files, and the monitoring console. It does not contain `examples/`,
 `deploy/`, `tests/`, or the documentation tree. Clone the repository when you
 want the runnable examples or reference Docker/VM workflow. A package-only
 application can use the installed integrations with its own infrastructure.
@@ -73,6 +73,7 @@ Install only the integration you use:
 | `stocks-data` | Binance Stocks catalog and latest quotes |
 | `telegram` | Telegram notifications |
 | `viz` | Local trade-chart viewer |
+| `console` | Read-only Streamlit monitoring console over the database |
 
 For example:
 
