@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,6 +73,32 @@ def test_write_runtime_event_upserts_same_event(mock_get_conn: MagicMock) -> Non
         "BTCUSDT",
         '{"reason": "insufficient_cash"}',
     )
+
+
+@patch("librae.db.timescale_writer.get_conn")
+def test_write_runtime_event_stores_venue_text_postgres_would_refuse(
+    mock_get_conn: MagicMock,
+) -> None:
+    """jsonb refuses a NUL or lone surrogate escape, and a halt's message quotes the venue."""
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    cursor = connection.cursor.return_value
+    mock_get_conn.return_value = connection
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+
+    write_runtime_event(
+        run_id="run-1",
+        ts=ts,
+        event_type="halted",
+        detail={"message": "bad\x00 \udc80", "orders": [{"error": "\x00x"}], "equity": 1.5},
+    )
+
+    _, values = cursor.execute.call_args.args
+    assert json.loads(values[-1]) == {
+        "message": "bad \\udc80",
+        "orders": [{"error": "x"}],
+        "equity": 1.5,
+    }
 
 
 @patch("librae.db.timescale_writer.get_conn")

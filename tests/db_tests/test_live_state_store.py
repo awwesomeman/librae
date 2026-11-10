@@ -120,6 +120,32 @@ def test_a_nul_in_a_placement_error_cannot_freeze_the_order_row(mock_get_conn, m
 
 @patch("librae.db.timescale_state.psycopg2.extras.execute_values")
 @patch("librae.db.timescale_state.get_conn")
+def test_a_lone_surrogate_in_a_placement_error_cannot_freeze_the_order_row(
+    mock_get_conn, mock_execute_values
+):
+    """psycopg2 cannot encode a lone surrogate, so the row would be refused."""
+    mock_get_conn.return_value.__enter__.return_value = MagicMock()
+    tracked = TrackedOrder(
+        request=OrderRequest(
+            client_order_id="client-1",
+            symbol="BTC/USDT",
+            side="buy",
+            quantity=1.0,
+            order_type="market",
+            submitted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            reference_price=100.0,
+        ),
+        error="RuntimeError: bad \udc80 payload",
+    )
+
+    TimescaleLiveStateStore().save(_state(), [tracked])
+
+    written = mock_execute_values.call_args.args[2][0][-1]
+    assert written == "RuntimeError: bad \\udc80 payload"
+
+
+@patch("librae.db.timescale_state.psycopg2.extras.execute_values")
+@patch("librae.db.timescale_state.get_conn")
 def test_order_row_carries_reference_price_and_signed_shortfall(mock_get_conn, mock_execute_values):
     mock_get_conn.return_value.__enter__.return_value = MagicMock()
     tracked = TrackedOrder(

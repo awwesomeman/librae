@@ -12,6 +12,19 @@ import psycopg2.pool
 _pool = None
 
 
+def _storable_text(text: str) -> str:
+    """Return ``text`` as PostgreSQL stores it: NUL dropped, lone surrogates escaped.
+
+    psycopg2 cannot encode a lone surrogate, and PostgreSQL refuses a NUL in
+    text and either one as a jsonb escape, so a single such character in a
+    venue's error text would fail the whole write. Neither change can be
+    undone on read: an escaped surrogate reads back as the six characters
+    ``\\udc80``, the same as text that held them literally, and a dropped
+    NUL is gone.
+    """
+    return text.replace("\x00", "").encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _resolve_dsn(dsn: str | None) -> str:
     resolved = dsn if dsn is not None else os.getenv("TIMESCALE_DSN")
     if not resolved:

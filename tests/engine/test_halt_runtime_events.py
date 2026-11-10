@@ -3,7 +3,8 @@
 Every halt alert records one ``halted`` event, so one stop can record several.
 Each event is offered to ``on_runtime_event`` after the action it records, so
 a slow or failing sink can neither delay it nor undo it: a sink that raises is
-logged, and the halt still happens and still raises its own error. A failed
+logged, and the halt still happens and still raises its own error. One recorded
+while the checkpoint is failing is held until one lands. A failed
 grouped leg also stops a target rebalance, which would otherwise send it
 again in the same cycle, and so does one whose cancel ends in a later cycle,
 after a restart or a pending acknowledgement. A placement's error text reaches its
@@ -51,6 +52,17 @@ def _of_type(events, event_type: str) -> list:
 
 def _failing_sink(event) -> None:
     raise RuntimeError("event sink down")
+
+
+def _sink_on_the_store(trader, events: list, outage: dict) -> None:
+    """A runtime-event sink that writes to the store, so it fails during its outage."""
+
+    def sink(event) -> None:
+        if outage["down"]:
+            raise OSError(OUTAGE)
+        events.append(event)
+
+    trader._on_runtime_event = sink
 
 
 def _live_trader(adapter, *symbols: str):
@@ -263,6 +275,65 @@ class TestAFailingSinkNeverBreaksAHalt:
         assert "flattened account positions" in flatten["message"]
 
 
+class TestAnEventDuringAStoreOutageIsHeld:
+    """Its sink usually writes to the store, so offering it then would drop it."""
+
+    def test_a_halt_during_an_outage_is_recorded_once_the_store_recovers(self):
+        trader, events, _ = _trader(_adapter())
+        outage = _store_outage(trader)
+        _sink_on_the_store(trader, events, outage)
+
+        with pytest.raises(OSError, match=OUTAGE):
+            trader.halt("desk asked to stop")
+        outage["down"] = False
+        trader._poll_cycle()
+
+        [halted] = _of_type(events, "halted")
+        assert halted.ts == TEST_CLOCK_NOW
+        assert halted.detail == {"reason": "Manual Halt", "message": "desk asked to stop"}
+        assert trader._state_store.load(trader._state_key).halted is True
+
+    def test_held_events_wait_while_the_store_stays_down(self):
+        trader, events, _ = _trader(_adapter())
+        outage = _store_outage(trader)
+
+        with pytest.raises(OSError, match=OUTAGE):
+            trader.halt("desk asked to stop")
+        with pytest.raises(OSError, match=OUTAGE):
+            trader._poll_cycle()
+
+        assert events == []
+        outage["down"] = False
+        trader._poll_cycle()
+        assert [event.event_type for event in events] == ["halted"]
+
+    def test_shutdown_offers_what_a_landed_checkpoint_released(self):
+        trader, events, _ = _trader(_adapter())
+        outage = _store_outage(trader)
+        _sink_on_the_store(trader, events, outage)
+        with pytest.raises(OSError, match=OUTAGE):
+            trader.halt("desk asked to stop")
+        outage["down"] = False
+        trader._persist_state()
+
+        trader._close()
+
+        assert [event.event_type for event in events] == ["halted"]
+
+    def test_shutdown_names_what_a_store_still_down_drops(self, caplog):
+        trader, events, _ = _trader(_adapter())
+        outage = _store_outage(trader)
+        _sink_on_the_store(trader, events, outage)
+        with pytest.raises(OSError, match=OUTAGE):
+            trader.halt("desk asked to stop")
+
+        with caplog.at_level(logging.WARNING, logger="librae.live.engine"):
+            trader._close()
+
+        assert events == []
+        assert f"halted at {TEST_CLOCK_NOW.isoformat()}" in caplog.text
+
+
 class TestResetIsRecorded:
     def test_a_successful_reset_records_the_new_epoch(self):
         trader, events, _ = _trader(_adapter())
@@ -280,18 +351,25 @@ class TestResetIsRecorded:
             "persisted": True,
         }
 
-    def test_a_reset_whose_checkpoint_fails_is_still_recorded(self):
+    def test_a_reset_whose_checkpoint_fails_is_recorded_once_the_store_recovers(self):
         """It already applied in memory, so the process trades on it."""
         trader, events, _ = _trader(_adapter())
         trader._positions = {}
         trader.halt("desk asked to stop")
-        _store_outage(trader)
+        outage = _store_outage(trader)
+        _sink_on_the_store(trader, events, outage)
 
         with pytest.raises(OSError, match=OUTAGE):
             trader.reset_halt()
-
         assert trader._halted is False
+        assert _of_type(events, "halt_reset") == []
+
+        outage["down"] = False
+        trader._persist_state()
+        trader._poll_cycle()
+
         [reset] = _of_type(events, "halt_reset")
+        assert reset.ts == TEST_CLOCK_NOW
         assert reset.detail["persisted"] is False
         assert reset.detail["was_halted"] is True
 
@@ -656,8 +734,8 @@ class TestPlacementErrorReachesTheOrderRow:
         assert [order.error for order in trader._active_orders] == [row.error]
 
     def test_a_store_outage_after_a_failed_lookup_still_halts_on_the_next_lookup(self):
-        """The error waits for the order's own next write, so a store that is
-        down cannot fail the cycle before the lookup that halts the account."""
+        """A store that is down cannot fail the cycle before the lookup that
+        halts the account."""
         adapter = _mock_order_adapter()
         adapter.place_order.side_effect = TimeoutError("read timed out")
         adapter.find_order.side_effect = ConnectionError("lookup failed")
@@ -675,6 +753,45 @@ class TestPlacementErrorReachesTheOrderRow:
         assert trader._halted is True
         [halt] = _titled(alerts, "Ambiguous Restored Order")
         assert "not persisted" in halt["message"]
+
+    def test_an_unknown_outcome_whose_lookup_fails_still_records_the_error(self):
+        """The checkpoint leaves the error out, so it must not wait for a later
+        write that a restart would never make."""
+        adapter = _mock_order_adapter()
+        adapter.place_order.side_effect = TimeoutError("read timed out")
+        adapter.find_order.side_effect = ConnectionError("lookup failed")
+        trader, _, _ = _live_trader(adapter, "BTCUSDT")
+
+        with pytest.raises(ConnectionError, match="lookup failed"):
+            _buy_btc(trader)
+
+        [row] = trader._state_store.orders.values()
+        assert row.status == "submitted"
+        assert row.error == "TimeoutError: read timed out"
+
+    def test_an_error_write_the_store_fails_still_halts_on_the_lookup(self):
+        adapter = _mock_order_adapter()
+        adapter.find_order.return_value = None
+        trader, _, alerts = _live_trader(adapter, "BTCUSDT")
+        outage = _store_outage(trader)
+        outage["down"] = False
+
+        def place_order(_request):
+            outage["down"] = True
+            raise TimeoutError("read timed out")
+
+        adapter.place_order.side_effect = place_order
+
+        with pytest.raises(OSError, match=OUTAGE):
+            _buy_btc(trader)
+
+        adapter.find_order.assert_called_once()
+        assert trader._halted is True
+        assert _titled(alerts, "Ambiguous Order Placement")
+        outage["down"] = False
+        trader._poll_cycle()
+        [row] = trader._state_store.orders.values()
+        assert row.error == "TimeoutError: read timed out"
 
     def test_an_unknown_outcome_found_by_lookup_keeps_the_error(self):
         adapter = _mock_order_adapter()
