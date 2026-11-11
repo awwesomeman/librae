@@ -40,10 +40,12 @@ from librae.config.symbols import (
 )
 from librae.core.trading_calendar import (
     TAIFEX_INDEX_CALENDAR,
+    TAIFEX_LATE_OPEN_CALENDAR,
     next_segment_open_after,
     period_close,
     period_start,
     resample_session_ohlcv,
+    segment_closes,
     session_lookback_days,
 )
 from librae.core.utils import (
@@ -351,10 +353,11 @@ class ShioajiAdapter:
                 fetched as far either side as those bars reach (a TAIFEX
                 daily bar opens the night before its trading day). If both
                 are omitted, fetches the most recent *limit* bars, daily
-                ones through such a window of their trading days; a future's
-                then come from its tick subscription (see
-                ``shioaji_stream``), since Shioaji rules out polling kbars()
-                during the session. A range longer than Shioaji's 30-day
+                ones through such a window of their trading days, from the
+                future's tick subscription (see ``shioaji_stream``), since
+                Shioaji rules out polling kbars() during the session. That
+                path is verified for futures only: a dateless fetch of any
+                other contract raises ``ValueError``. A range longer than Shioaji's 30-day
                 kbars() query limit is fetched in multiple chunked calls and
                 concatenated transparently.
             limit: Max bars (used only when start/end are omitted).
@@ -374,13 +377,24 @@ class ShioajiAdapter:
             continuous_alias=continuous_alias,
             contract_month=contract_month,
         )
+        security_type = getattr(contract, "security_type", None)
+        dateless = not start and not end
+        if dateless and security_type != "FUT":
+            # The tick path is verified on TAIFEX futures only; how stock,
+            # index and option ticks make kbars() minutes is unverified.
+            # kbars() is capped at 270 queries a session
+            # (https://sinotrade.github.io/zh/tutor/limit/), so it cannot
+            # stand in for it.
+            raise ValueError(
+                f"Shioaji {symbol!r} ({security_type}) cannot be polled without a date "
+                "window: the tick path is verified for futures only, and polling "
+                "kbars() would exhaust its query quota; pass start (and end)"
+            )
         resolved_calendar = calendar_id or (
-            TAIFEX_INDEX_CALENDAR if getattr(contract, "security_type", None) == "FUT" else "XTAI"
+            TAIFEX_INDEX_CALENDAR if security_type == "FUT" else "XTAI"
         )
 
         empty = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
-        dateless = not start and not end
-        streamed = dateless and getattr(contract, "security_type", None) == "FUT"
         if dateless and interval_to_timedelta(timeframe) == timedelta(days=1):
             start = _dateless_first_day(limit, resolved_calendar)
         today = pd.Timestamp.now(tz=_TAIPEI).date()
@@ -397,9 +411,9 @@ class ShioajiAdapter:
         elif end:
             raise ValueError("a date window needs start; end alone has no first date")
         else:
-            # A dateless kbars() call's documented window.
+            # The stream's seed window: yesterday and today by stamp date.
             first_query_day, last_query_day = today - timedelta(days=1), today
-        if streamed:
+        if dateless:
             df, complete_through = self._bar_stream.minutes(
                 contract,
                 first_query_day,
@@ -407,10 +421,8 @@ class ShioajiAdapter:
                 resolved_calendar,
                 complete_only=drop_incomplete,
             )
-        elif start:
-            df = self._kbars_minutes(contract, first_query_day, last_query_day)
         else:
-            df = _kbar_frame([self._api.kbars(contract=contract)])
+            df = self._kbars_minutes(contract, first_query_day, last_query_day, resolved_calendar)
         if df.empty:
             return empty
 
@@ -454,18 +466,23 @@ class ShioajiAdapter:
 
         return df[["ts", "open", "high", "low", "close", "volume"]]
 
-    def _kbars_minutes(self, contract: object, first_day: date, last_day: date) -> pd.DataFrame:
+    def _kbars_minutes(
+        self, contract: object, first_day: date, last_day: date, calendar_id: str
+    ) -> pd.DataFrame:
         """kbars() minutes stamped ``first_day`` to ``last_day``, start-stamped
         in UTC, in as few queries as Shioaji's 30-day limit allows."""
         return _kbar_frame(
-            self._api.kbars(
-                contract=contract,
-                start=chunk_start.isoformat(),
-                end=chunk_end.isoformat(),
-            )
-            for chunk_start, chunk_end in _kbar_date_chunks(
-                first_day, last_day, _MAX_KBAR_QUERY_DAYS
-            )
+            (
+                self._api.kbars(
+                    contract=contract,
+                    start=chunk_start.isoformat(),
+                    end=chunk_end.isoformat(),
+                )
+                for chunk_start, chunk_end in _kbar_date_chunks(
+                    first_day, last_day, _MAX_KBAR_QUERY_DAYS
+                )
+            ),
+            calendar_id,
         )
 
     # ------------------------------------------------------------------
@@ -976,8 +993,9 @@ def _dateless_first_day(limit: int, calendar_id: str) -> str:
     return (now.date() - timedelta(days=days)).isoformat()
 
 
-def _kbar_frame(responses: Iterable[Mapping[str, list]]) -> pd.DataFrame:
-    """kbars() answers as one frame of lower-case columns and minute starts."""
+def _kbar_frame(responses: Iterable[Mapping[str, list]], calendar_id: str) -> pd.DataFrame:
+    """kbars() answers as one frame of lower-case columns and minute starts,
+    each segment's closing trades in its last minute."""
     frames = [frame for response in responses if not (frame := pd.DataFrame({**response})).empty]
     if not frames:
         return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
@@ -985,7 +1003,53 @@ def _kbar_frame(responses: Iterable[Mapping[str, list]]) -> pd.DataFrame:
     # Shioaji names the price columns capitalised.
     df.columns = df.columns.str.lower()
     df["ts"] = shioaji_kbar_starts(df["ts"])
-    return df
+    return _fold_closing_minutes(
+        df.sort_values("ts", kind="stable", ignore_index=True), calendar_id
+    )
+
+
+def _fold_closing_minutes(df: pd.DataFrame, calendar_id: str) -> pd.DataFrame:
+    """Merge a TAIFEX minute starting at a segment close into the segment's last minute.
+
+    TAIFEX matches trades at a segment's closing instant, and for some
+    contracts kbars() puts them in a minute of their own stamped one past
+    the close, which starts at the close and so lies outside every segment.
+    Observed for TMF 202611 on 2026-11-05: TAIFEX's tick file has its last
+    day-session trade at 13:45:00 (41905, 1 lot), which kbars() returns
+    stamped 13:46; night trades at 05:00:00 come stamped 05:01 the same way.
+    TXF and MTX kbars hold them in the minute stamped at the close, which is
+    also where the tick stream counts a closing print. A minute that starts
+    at a close holds only those trades, since nothing trades between
+    segments; any other minute outside the segments is left for the
+    resampler to handle.
+
+    TAIFEX calendars only: stock and index kbars past the close are
+    unverified, and index kbars run minutes past it (see
+    ``shioaji_kbar_starts``), so a minute there is not known to hold the
+    closing trades.
+    """
+    if calendar_id not in (TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR):
+        return df
+    starts = pd.DatetimeIndex(df["ts"])
+    previous = starts - pd.Timedelta(minutes=1)
+    at_close = segment_closes(previous, "1m", calendar_id) == starts
+    at_close &= segment_closes(starts, "1m", calendar_id).isna()
+    if not at_close.any():
+        return df
+    closing = df.loc[at_close].assign(ts=previous[at_close])
+    rest = df.loc[~at_close]
+    last = rest["ts"].isin(closing["ts"])
+    rules = {column: "sum" for column in df.columns if column != "ts"}
+    rules.update(open="first", high="max", low="min", close="last")
+    # Only each closing minute and the last minute it joins are merged.
+    merged = (
+        pd.concat([rest.loc[last], closing])
+        .sort_values("ts", kind="stable")
+        .groupby("ts", sort=True)
+        .agg(rules)
+        .reset_index()
+    )
+    return pd.concat([rest.loc[~last], merged]).sort_values("ts", kind="stable", ignore_index=True)
 
 
 def _kbar_date_chunks(start: date, end: date, max_days: int) -> list[tuple[date, date]]:

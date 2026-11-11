@@ -301,8 +301,10 @@ class _MinuteBook:
             ),
             default=None,
         )
-        if late is not None and (newest is None or late >= newest):
-            trusted = late if newest is None else newest
+        # A late minute is a streamed one, so the empty-answer return above
+        # did not apply and the answer has a newest minute.
+        if late is not None and late >= newest:
+            trusted = newest
             logger.warning(
                 "Shioaji kbars() for %s runs behind the stream from %s; "
                 "its minutes from there wait for the next refill",
@@ -351,7 +353,9 @@ class _MinuteBook:
 class ShioajiBarStream:
     """Tick subscriptions and minute books for one Shioaji session."""
 
-    def __init__(self, api: Any, query_minutes: Callable[[Any, date, date], pd.DataFrame]) -> None:
+    def __init__(
+        self, api: Any, query_minutes: Callable[[Any, date, date, str], pd.DataFrame]
+    ) -> None:
         self._api = api
         self._query_minutes = query_minutes
         self._lock = threading.Lock()
@@ -439,7 +443,9 @@ class ShioajiBarStream:
                 else:
                     book.last_refill_ns = now
                 book.take_kbars(
-                    self._query_minutes(contract, query_from, last_day), query_from, now
+                    self._query_minutes(contract, query_from, last_day, calendar_id),
+                    query_from,
+                    now,
                 )
                 if seed and book.first_day == query_from:
                     book.seed_retry_ns = None

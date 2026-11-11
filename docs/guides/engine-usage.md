@@ -64,6 +64,22 @@ currency conversion, cash yield, or settlement lag. Adjusted/continuous
 series can be research inputs, but using them as fill prices makes the
 cash-and-position simulation economically incomplete.
 
+**A TAIFEX continuous alias cannot be held through a contract switch.** An
+alias such as `TXFR1` or `MXFR2` (`continuous_alias=True` on the `XTAIFEX`
+calendar) moves to the next contract partway through the final settlement
+session, at a time its bars do not show, so a position held across the switch
+would book the price gap between the two contracts as PnL. A backtest raises
+when such a position is still held at the close of any bar in that session,
+when a fill in that session is not at a bar's open (a stop, take-profit or
+limit reached inside the bar may be priced on the next contract), or when a
+position is carried over the session and the session has no bar. Only the
+session's first open still belongs to the old contract: exit by then and
+re-enter after the session if the strategy wants to stay exposed. When to roll
+stays a strategy decision.
+`librae.core.taifex.taifex_final_settlement_day` gives the settlement day of a
+contract month. Exact contracts (`contract_month`) and other venues'
+continuous aliases are not checked.
+
 The backtest boundary fails fast on malformed input. Index levels must be
 exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps
 are timezone-aware and increasing within each symbol; and `config.symbols`, when
@@ -461,7 +477,11 @@ returns whole bars only:
 intraday bars that start on its dates and daily bars of its trading days, with
 the minutes fetched as far either side as those bars reach. Keeping the
 vendor's bar start avoids shifting shortened or session-ending bars to an
-invented duration.
+invented duration. A Shioaji poll without dates is served from the tick
+subscription, which is verified for futures only; a stock, index or option
+symbol needs a date window, and a poll of one raises `ValueError` before any
+query, because `kbars()` is capped at 270 queries a session and cannot be
+polled.
 
 `SymbolInfo.calendar_id` is the SSOT for mapping an observed timestamp to its
 trading-session label. The built-ins use `24/7`, `XNYS`, and `XTAIFEX`;
@@ -472,7 +492,11 @@ Taiwan-futures night session with its following regular-session date.
 Shioaji's clock correction remains adapter-specific and is not a calendar:
 `librae.brokers.shioaji_time.shioaji_kbar_starts` turns its raw kbar stamp, a
 Taipei wall clock posing as UTC that marks the minute's end, into the UTC
-minute start.
+minute start. Some TAIFEX futures' kbars give the trades matched at a
+segment's closing instant a minute of their own, stamped one past the close;
+on the TAIFEX calendars the adapter merges that minute into the segment's last
+one, so those trades count toward the session they closed. Stock and index
+kbars are not covered: whether theirs do the same is unverified.
 
 Session bars follow the venue's attribution rule. Intraday buckets count from
 each segment's open (`XTAIFEX`: 15:00 night, 08:45 day), so a bucket the
@@ -488,9 +512,10 @@ session, and Q11 publishes each session's prices separately. TradingView's
 45000/45265/44700/45057).
 
 Segments are half-open: `XTAIFEX`'s are `[15:00, 05:00)` and `[08:45, 13:45)`,
-so the last day minute starts at 13:44. A print stamped at a close or later
-came after it and belongs to no bar of that session: resampling drops it with
-a warning rather than opening a one-minute stub bar. An execution is an
+so the last day minute starts at 13:44. A minute starting at a close or later
+belongs to no bar of that session: resampling drops it with a warning rather
+than opening a one-minute stub bar. An adapter whose vendor puts the closing
+trades in such a minute folds them into the last one first. An execution is an
 instant, not a bar: a fill stamped at a close, or between segments, counts
 toward the session that last traded (`execution_session_label`), and that is
 the session its ADV budget books; one stamped after a close is logged.
