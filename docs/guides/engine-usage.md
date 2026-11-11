@@ -680,8 +680,9 @@ or apply, since the venue may have put the order back to work. A status read
 that fails, other than with an answer the executor refuses, fails the cycle
 before the order's timeout, and the next cycle reads again. The poll error
 names the order: a read the venue left unanswered (`BrokerUnavailableError`)
-only alerts, while any other failure halts once it persists (persistent poll
-errors, below). An order the venue reports `cancel_pending`
+alerts, and halts only once the reads have failed as long as reconciliation
+may go unanswered, while any other failure halts once it persists (persistent
+poll errors, below). An order the venue reports `cancel_pending`
 on its own is polled until it ends, and is under its timeout again if it
 reverts to working. An order still tracked with nothing ending it alerts
 **Order Stuck**, naming it and repeating while it lasts, and the engine keeps
@@ -1127,7 +1128,17 @@ adapter at submission.
   order status read the venue left unanswered is an outage when the adapter
   classifies it ([Broker Adapter Design](../../architecture.md#broker-adapter-design-libraebrokers));
   one it does not classify counts as any other error. While the order poll
-  fails, the cycle stops before the drawdown check, as before.
+  fails, the cycle stops before the drawdown check, so a tracked order whose
+  status reads keep failing, outage or not, with no answer between, halts the
+  account with **Order Status Unavailable** once they have failed for
+  `LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS` reconciliation
+  intervals: the span an account with no working order may go unanswered
+  before [reconciliation](#reconciliation-live-only) halts it, which a
+  working order must not stretch. It also ends refusals no retry clears that
+  an adapter classifies as outages, such as a revoked key ccxt reports that
+  way (see `CryptoAdapter`). Like the reconciliation skips, that span is not
+  checkpointed: a restart reads the head of the order queue and the venue's
+  open orders, and halts if either read fails.
   On a halted account failures only alert.
 - Halt durability: every halt applies in memory, writes its checkpoint, and
   only then cancels, each cancel recording itself before it is sent. Every

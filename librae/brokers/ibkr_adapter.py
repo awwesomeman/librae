@@ -676,10 +676,12 @@ class IBKRAdapter:
             )
 
     def _require_connected(self) -> None:
-        # ib_async keeps serving its position, trade and account caches after
-        # an unexpected socket drop (only an explicit disconnect resets them;
-        # ib_async 2.1.0 Wrapper.connectionClosed), so a read on a dropped
-        # session would reconcile against stale facts.
+        # ib_async empties its position, trade and account caches once it
+        # processes a socket drop (ib_async 2.1.0 Client._onSocketDisconnected
+        # calls Wrapper.connectionClosed, which resets them), so a read after
+        # one would see a flat book with no open orders. A drop its event loop
+        # has not run since is not caught here: until then the old caches are
+        # served and the client still reports itself connected.
         if not self._ib.isConnected():
             raise BrokerUnavailableError("IBKR client is not connected to TWS/IB Gateway")
 

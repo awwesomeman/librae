@@ -80,8 +80,19 @@ Poll cycle alerts (rules in
 
 | Alert title | Meaning | Action |
 |---|---|---|
-| Poll Error | Three cycles in a row failed, the message naming the last error: an outage (the venue or the state store gave no answer, such as an order status read that timed out), or any failure on a halted account. Each poll retries; not halted by this. While an order status read fails, the drawdown check waits with it | Restore the store or check the venue, and watch the book if it lasts; nothing to do once it recovers |
+| Poll Error | Three cycles in a row failed, the message naming the last error: an outage (the venue or the state store gave no answer, such as an order status read that timed out), or any failure on a halted account. Each poll retries; not halted by this. While an order status read fails, the drawdown check waits with it, until Order Status Unavailable halts | Restore the store or check the venue, and watch the book if it lasts; nothing to do once it recovers |
 | Persistent Poll Error | Three cycles failed with an error that is not an outage, with no clean cycle between, such as a decision preflight refuses, a strategy or feature that raises, or an order status read the venue refused. Halted, tracked orders cancelled; the message names the last error | Fix what the error names, then `reset_halt()` |
+| Order Status Unavailable | A tracked order's status reads kept failing, with no answer between, for as long as Periodic Reconciliation Unavailable (below) lets reconciliation go unanswered; the message names the order and the last error. The book had no drawdown check all that time. Halted; the order's cancel goes by its order id, and one the venue does not confirm is sent again each cycle and alerts Order Stuck | Check the venue and the API key: a revoked key or a lost IP whitelist can read as an outage. Once Halt Cancellation Completed arrives, check the order and positions at the broker, then `reset_halt()` without delay: the drawdown check stays off until then |
+
+Order Status Unavailable halts rather than alerting on, for two reasons. An
+account with no working order halts after the same unanswered span, so a
+resting order must not stretch the time the book goes unverified and without
+the drawdown check. And ccxt raises some refusals no retry clears as outages,
+such as Binance's `-2015` (invalid key, IP or permissions) once a session has
+authenticated (ccxt 4.5.66 `binance.handle_errors`), which nothing in the
+error tells from a passing outage. The cost is the one reconciliation already
+accepts: after a real outage that long, the drawdown check stays off until
+`reset_halt()`.
 
 Periodic reconciliation alerts (thresholds and rules in
 [Engine usage → Reconciliation](engine-usage.md#reconciliation-live-only)):

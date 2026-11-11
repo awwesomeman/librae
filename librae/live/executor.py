@@ -373,10 +373,12 @@ class BrokerUnavailableError(Exception):
     reads, and only for failures they know are transient (timeouts,
     connection loss, rate limits, venue maintenance). Anything else,
     including authentication and permission errors, must propagate
-    unchanged: periodic reconciliation tolerates this type for a bounded
-    number of rounds, the poll loop retries an order poll that meets it, and
-    both fail closed on every other exception. ``cancel_order`` never raises
-    it, even from a read after the cancel went out, which has had an effect.
+    unchanged: periodic reconciliation and the order poll tolerate this type
+    for a bounded time, and both fail closed on every other exception.
+    ``cancel_order`` raises it only when it sent no cancel, as
+    ``IBKRAdapter`` does by reading an order that is no longer open instead;
+    a read after a cancel went out keeps its SDK error, since that call had
+    an effect.
     """
 
 
