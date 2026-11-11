@@ -675,13 +675,13 @@ class TestACancelThatEndsAnOrderPastAnAnswerThatCannotApply:
         assert trader._halted is False
         assert _exactly(alerts, "Order Reconciliation Failed") == []
         assert len(_exactly(alerts, NOT_APPLIED)) == 1
+        # Either way the unsent BBB leaves with it: the group can no longer fill together.
+        assert trader._active_orders == []
         if past_timeout:
             [timeout] = _exactly(alerts, "Order Timeout")
             assert "group 'pair' cancelled" in timeout["message"]
-            assert trader._active_orders == []
         else:
             assert _exactly(alerts, "Order Timeout") == []
-            assert [order.request.symbol for order in trader._active_orders] == ["BBB"]
 
     def test_a_fill_its_answer_carries_past_a_risk_limit_halts(self):
         adapter = _resting_adapter()
