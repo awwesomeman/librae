@@ -477,7 +477,11 @@ returns whole bars only:
 intraday bars that start on its dates and daily bars of its trading days, with
 the minutes fetched as far either side as those bars reach. Keeping the
 vendor's bar start avoids shifting shortened or session-ending bars to an
-invented duration.
+invented duration. A Shioaji poll without dates is served from the tick
+subscription, which is verified for futures only; a stock, index or option
+symbol needs a date window, and a poll of one raises `ValueError` before any
+query, because `kbars()` is capped at 270 queries a session and cannot be
+polled.
 
 `SymbolInfo.calendar_id` is the SSOT for mapping an observed timestamp to its
 trading-session label. The built-ins use `24/7`, `XNYS`, and `XTAIFEX`;

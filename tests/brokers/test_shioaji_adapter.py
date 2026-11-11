@@ -361,7 +361,12 @@ class TestFetchOhlcv:
             adapter.fetch_ohlcv(
                 "TXFR1",
                 "5m",
-                continuous_alias=security_type == "FUT",
+                # Only a future may be polled without dates.
+                **(
+                    {"continuous_alias": True}
+                    if security_type == "FUT"
+                    else {"start": "2026-04-01", "end": "2026-04-01"}
+                ),
             )
 
         assert resample.call_args.args[2] == expected_calendar
@@ -870,6 +875,38 @@ class TestDatelessPoll:
         assert list(polled.index) == [_taipei("2026-11-02 11:45"), _taipei("2026-11-02 12:45")]
         assert kbars.call_args.kwargs["start"] == "2026-11-01"
         assert kbars.call_args.kwargs["end"] == "2026-11-02"
+
+
+class TestDatelessPollRefusal:
+    """The tick path is verified for futures only; polling any other contract
+    would spend kbars() queries on every poll."""
+
+    @pytest.mark.parametrize("security_type", ["STK", "IND", "OPT"])
+    @pytest.mark.parametrize("timeframe", ["1m", "1d"])
+    def test_a_poll_without_dates_is_refused_before_any_query(self, security_type, timeframe):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(security_type=security_type, code="2330")
+        )
+
+        with pytest.raises(ValueError, match="without a date window"):
+            adapter.fetch_ohlcv("2330", timeframe, drop_incomplete=True)
+
+        adapter._api.kbars.assert_not_called()
+        adapter._api.subscribe.assert_not_called()
+
+    def test_a_dated_fetch_of_a_stock_still_reads_kbars(self):
+        adapter = _make_adapter()
+        adapter._api.kbars.return_value = _make_kbars_response()
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(security_type="STK", code="2330")
+        )
+
+        bars = adapter.fetch_ohlcv("2330", "1m", start="2026-04-01", end="2026-04-01")
+
+        assert len(bars) == 3
+        adapter._api.kbars.assert_called_once()
+        assert adapter._api.kbars.call_args.kwargs["start"] == "2026-04-01"
 
 
 class TestLiveBarClock:

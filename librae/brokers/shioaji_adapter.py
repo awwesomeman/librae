@@ -353,10 +353,11 @@ class ShioajiAdapter:
                 fetched as far either side as those bars reach (a TAIFEX
                 daily bar opens the night before its trading day). If both
                 are omitted, fetches the most recent *limit* bars, daily
-                ones through such a window of their trading days; a future's
-                then come from its tick subscription (see
-                ``shioaji_stream``), since Shioaji rules out polling kbars()
-                during the session. A range longer than Shioaji's 30-day
+                ones through such a window of their trading days, from the
+                future's tick subscription (see ``shioaji_stream``), since
+                Shioaji rules out polling kbars() during the session. That
+                path is verified for futures only: a dateless fetch of any
+                other contract raises ``ValueError``. A range longer than Shioaji's 30-day
                 kbars() query limit is fetched in multiple chunked calls and
                 concatenated transparently.
             limit: Max bars (used only when start/end are omitted).
@@ -376,13 +377,24 @@ class ShioajiAdapter:
             continuous_alias=continuous_alias,
             contract_month=contract_month,
         )
+        security_type = getattr(contract, "security_type", None)
+        dateless = not start and not end
+        if dateless and security_type != "FUT":
+            # The tick path is verified on TAIFEX futures only; how stock,
+            # index and option ticks make kbars() minutes is unverified.
+            # kbars() is capped at 270 queries a session
+            # (https://sinotrade.github.io/zh/tutor/limit/), so it cannot
+            # stand in for it.
+            raise ValueError(
+                f"Shioaji {symbol!r} ({security_type}) cannot be polled without a date "
+                "window: the tick path is verified for futures only, and polling "
+                "kbars() would exhaust its query quota; pass start (and end)"
+            )
         resolved_calendar = calendar_id or (
-            TAIFEX_INDEX_CALENDAR if getattr(contract, "security_type", None) == "FUT" else "XTAI"
+            TAIFEX_INDEX_CALENDAR if security_type == "FUT" else "XTAI"
         )
 
         empty = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
-        dateless = not start and not end
-        streamed = dateless and getattr(contract, "security_type", None) == "FUT"
         if dateless and interval_to_timedelta(timeframe) == timedelta(days=1):
             start = _dateless_first_day(limit, resolved_calendar)
         today = pd.Timestamp.now(tz=_TAIPEI).date()
@@ -399,9 +411,9 @@ class ShioajiAdapter:
         elif end:
             raise ValueError("a date window needs start; end alone has no first date")
         else:
-            # A dateless kbars() call's documented window.
+            # The stream's seed window: yesterday and today by stamp date.
             first_query_day, last_query_day = today - timedelta(days=1), today
-        if streamed:
+        if dateless:
             df, complete_through = self._bar_stream.minutes(
                 contract,
                 first_query_day,
@@ -409,10 +421,8 @@ class ShioajiAdapter:
                 resolved_calendar,
                 complete_only=drop_incomplete,
             )
-        elif start:
-            df = self._kbars_minutes(contract, first_query_day, last_query_day, resolved_calendar)
         else:
-            df = _kbar_frame([self._api.kbars(contract=contract)], resolved_calendar)
+            df = self._kbars_minutes(contract, first_query_day, last_query_day, resolved_calendar)
         if df.empty:
             return empty
 

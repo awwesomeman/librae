@@ -495,6 +495,25 @@ class TestSegments:
         assert settled.loc["15:00", ["close", "volume"]].tolist() == [150, 3 * 300 + 500]
         assert len(session.kbars_calls) == 3
 
+    def test_the_day_close_is_refilled_once_after_its_settle(self, adapter, session, clock):
+        _poll(adapter, clock, "2026-11-05 08:30:00")
+        _trade_each_minute(session, "2026-11-05 08:45", "2026-11-05 13:44")
+        session.trade("2026-11-05 13:45:00.024", 150, 500)
+
+        closing = _poll(adapter, clock, "2026-11-05 13:45:30")
+        assert len(session.kbars_calls) == 1, "the settle has not passed"
+        assert closing.index[-1] == "13:43", "13:44 waits for kbars()"
+
+        refilled = _poll(adapter, clock, "2026-11-05 13:46:05")
+        for later in ("2026-11-05 13:51:00", "2026-11-05 14:30:00"):
+            _poll(adapter, clock, later)
+
+        assert refilled.index[-1] == "13:44"
+        assert refilled.loc["13:44"].tolist() == [144, 150, 143, 150, 503]
+        assert session.kbars_calls == [("2026-11-04", "2026-11-05")] * 2, (
+            "one refill, asking only the day the stream took over"
+        )
+
     def test_the_segment_end_is_held_until_kbars_settles_it(self, adapter, session, clock):
         _poll(adapter, clock, "2026-11-05 08:30:00")
         _trade_each_minute(session, "2026-11-05 13:40", "2026-11-05 13:44")
