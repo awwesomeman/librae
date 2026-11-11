@@ -49,11 +49,13 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 30
-# The one exception: it lacks only ``pending_flatten``, which no build writing
-# it could hold, so it loads with none. A later bump decides afresh whether
-# its previous version is additive in the same way; most are not.
-_ADDITIVE_PREVIOUS_SCHEMA_VERSION = 29
+_STATE_SCHEMA_VERSION = 31
+# The one exception: previous versions that lack only fields no build writing
+# them recorded, which load empty, as that build's own restart would. Version
+# 30 lacks ``rebalance_stopped_at`` and ``failed_rebalance_symbols``; version
+# 29 lacks ``pending_flatten`` too. A later bump decides afresh which of its
+# previous versions are additive in the same way; most are not.
+_ADDITIVE_PREVIOUS_SCHEMA_VERSIONS = (29, 30)
 
 
 def normalize_runtime_revision(
@@ -325,6 +327,10 @@ class LiveRuntimeState:
     status_period_count: int = 0
     halted: bool = False
     pending_flatten: PendingFlatten | None = None
+    # The bar the last target rebalance stopped on, which no decision replans,
+    # and the symbols whose rebalance leg last ended unfilled with no fill since.
+    rebalance_stopped_at: datetime | None = None
+    failed_rebalance_symbols: list[str] = field(default_factory=list)
     entries_paused: bool = False
     # Queued groups that have sent no leg yet, so the entry checks still judge them.
     unstarted_groups: list[str] = field(default_factory=list)
@@ -408,6 +414,10 @@ class LiveRuntimeState:
             "status_period_count": self.status_period_count,
             "halted": self.halted,
             "pending_flatten": self.pending_flatten.to_dict() if self.pending_flatten else None,
+            "rebalance_stopped_at": (
+                self.rebalance_stopped_at.isoformat() if self.rebalance_stopped_at else None
+            ),
+            "failed_rebalance_symbols": list(self.failed_rebalance_symbols),
             "entries_paused": self.entries_paused,
             "unstarted_groups": list(self.unstarted_groups),
             "adv_session_labels": self.adv_session_labels,
@@ -417,7 +427,10 @@ class LiveRuntimeState:
     @classmethod
     def from_dict(cls, raw: dict) -> LiveRuntimeState:
         schema_version = raw.get("schema_version")
-        if schema_version not in (_STATE_SCHEMA_VERSION, _ADDITIVE_PREVIOUS_SCHEMA_VERSION):
+        if (
+            schema_version != _STATE_SCHEMA_VERSION
+            and schema_version not in _ADDITIVE_PREVIOUS_SCHEMA_VERSIONS
+        ):
             raise ValueError(
                 "unsupported live runtime-state checkpoint: this build writes "
                 f"version {_STATE_SCHEMA_VERSION}, the stored document is "
@@ -487,8 +500,18 @@ class LiveRuntimeState:
             halted=bool(raw["halted"]),
             pending_flatten=(
                 PendingFlatten.from_dict(raw["pending_flatten"])
-                if schema_version == _STATE_SCHEMA_VERSION and raw["pending_flatten"] is not None
+                if schema_version != 29 and raw["pending_flatten"] is not None
                 else None
+            ),
+            rebalance_stopped_at=(
+                _to_utc(raw["rebalance_stopped_at"])
+                if schema_version == _STATE_SCHEMA_VERSION
+                else None
+            ),
+            failed_rebalance_symbols=(
+                [str(symbol) for symbol in raw["failed_rebalance_symbols"]]
+                if schema_version == _STATE_SCHEMA_VERSION
+                else []
             ),
             entries_paused=bool(raw["entries_paused"]),
             unstarted_groups=[str(group_id) for group_id in raw["unstarted_groups"]],
