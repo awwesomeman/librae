@@ -31,7 +31,7 @@ from librae.live.interfaces import (
     MarketDataRouteOwner,
     Notifier,
 )
-from librae.live.state import LiveStateStore
+from librae.live.state import LiveStateStore, StateStoreUnavailableError
 
 
 class AdapterFactory(Protocol):
@@ -61,5 +61,6 @@ __all__ = [
     "OrderRequest",
     "OrderSignal",
     "PositionRequest",
+    "StateStoreUnavailableError",
     "account_fingerprint",
 ]

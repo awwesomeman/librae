@@ -6,11 +6,13 @@ import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+import psycopg2
+import psycopg2.errors
 import pytest
 from librae.db.timescale_state import TimescaleLiveStateStore
 from librae.live.execution_identity import ExecutionIdentity
 from librae.live.executor import OrderRequest
-from librae.live.state import LiveRuntimeState, TrackedOrder
+from librae.live.state import LiveRuntimeState, StateStoreUnavailableError, TrackedOrder
 
 
 def _state() -> LiveRuntimeState:
@@ -203,21 +205,90 @@ def test_delete_reports_whether_a_checkpoint_existed(mock_get_conn):
     assert TimescaleLiveStateStore().delete("live:missing") is False
 
 
-@patch("librae.db.timescale_state.get_pool")
-def test_advisory_lease_holds_connection_until_release(mock_get_pool):
-    pool = MagicMock()
+@patch("librae.db.timescale_state._connect_unpooled")
+def test_advisory_lease_holds_its_own_connection_until_release(mock_connect):
     conn = MagicMock()
-    conn.closed = 0
     cursor = conn.cursor.return_value
     cursor.fetchone.return_value = (True,)
-    mock_get_pool.return_value = pool
-    pool.getconn.return_value = conn
+    mock_connect.return_value = conn
     store = TimescaleLiveStateStore()
 
     assert store.acquire_lease("live:abc") is True
-    pool.putconn.assert_not_called()
+    conn.close.assert_not_called()
 
     store.release_lease("live:abc")
 
     assert cursor.execute.call_count == 2
-    pool.putconn.assert_called_once_with(conn, close=False)
+    conn.close.assert_called_once()
+
+
+@patch("librae.db.timescale_state._connect_unpooled")
+def test_a_lease_held_elsewhere_closes_its_connection(mock_connect):
+    conn = MagicMock()
+    conn.cursor.return_value.fetchone.return_value = (False,)
+    mock_connect.return_value = conn
+
+    assert TimescaleLiveStateStore().acquire_lease("live:abc") is False
+    conn.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda store: store.save(_state()),
+        lambda store: store.load("live:abc"),
+        lambda store: store.delete("live:abc"),
+    ],
+    ids=["save", "load", "delete"],
+)
+def test_every_checkpoint_statement_is_bounded(call):
+    """The engine waits on them in its loop, halts and order lookups included."""
+    import librae.db as db
+
+    bounded: list[bool] = []
+
+    def checkout(_dsn):
+        bounded.append(db._bounded.get())
+        checkout_cm = MagicMock()
+        cursor = checkout_cm.__enter__.return_value.cursor.return_value
+        cursor.fetchone.return_value = None
+        cursor.rowcount = 0
+        return checkout_cm
+
+    with (
+        patch("librae.db.timescale_state.get_conn", side_effect=checkout),
+        patch("librae.db.timescale_state.require_current_schema"),
+    ):
+        call(TimescaleLiveStateStore())
+
+    assert bounded == [True]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        psycopg2.errors.QueryCanceled("canceling statement due to statement timeout"),
+        psycopg2.OperationalError("could not receive data from server: Connection timed out"),
+        psycopg2.InterfaceError("connection already closed"),
+    ],
+    ids=["statement_timeout", "lost_connection", "closed_connection"],
+)
+@patch("librae.db.timescale_state.get_conn")
+def test_a_save_the_server_never_judged_is_unavailable(mock_get_conn, error):
+    """A timeout, e.g. behind a lock on an order row, is no refusal of that row."""
+    cursor = mock_get_conn.return_value.__enter__.return_value.cursor.return_value
+    cursor.execute.side_effect = error
+
+    with pytest.raises(StateStoreUnavailableError, match=type(error).__name__) as raised:
+        TimescaleLiveStateStore().save(_state())
+
+    assert raised.value.__cause__ is error
+
+
+@patch("librae.db.timescale_state.get_conn")
+def test_a_save_the_server_refused_keeps_its_error(mock_get_conn):
+    cursor = mock_get_conn.return_value.__enter__.return_value.cursor.return_value
+    cursor.execute.side_effect = psycopg2.errors.NumericValueOutOfRange("numeric field overflow")
+
+    with pytest.raises(psycopg2.errors.NumericValueOutOfRange):
+        TimescaleLiveStateStore().save(_state())

@@ -1327,7 +1327,11 @@ terminal meanwhile and left the snapshot. A row the store refuses while it
 still accepts the snapshot is dropped rather than failing every later
 checkpoint, a halt's included: it is recorded as an `order_row_rejected`
 runtime event, alerts once, and sets `LiveTrader.order_ledger_degraded` for
-the rest of the process. Analytics callbacks remain
+the rest of the process. A save the store fails with
+`StateStoreUnavailableError` (from `librae.integrations`), as the reference
+store does for a timeout or lost connection, is an outage instead and keeps
+every row carried; a store raises it only when the rows got no verdict.
+Analytics callbacks remain
 projections; they are not broker fill truth. `runtime_revision` deliberately
 does not form part of the checkpoint key; `architecture.md` is the canonical
 home for what that key contains.

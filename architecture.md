@@ -904,6 +904,22 @@ distinguish single-table writes, partial updates, multi-table saves, and
 aggregate refreshes. Reader helpers distinguish small
 lookups, DataFrame loads, and derived results.
 
+A call to a server that stops answering ends on the connect, TCP and keepalive
+bounds every pooled connection carries
+([`librae/db/__init__.py`](librae/db/__init__.py)) rather than on the OS TCP
+retries; none fires while the server answers, and a DSN that sets one keeps
+its own value. On an OS without `TCP_USER_TIMEOUT`, such as macOS, a query the
+server never acknowledges still waits out the OS retransmission limit. The
+live state store and the reference live callbacks also bound each
+transaction's statements and idle time, because the engine waits on them in
+its loop; the KPI refresh bounds only its upsert, since its reads cover the
+whole run. The store raises a timeout or lost connection as
+`StateStoreUnavailableError`, so the engine never takes it for a refused order
+row. Other callers get no statement bound, since a backtest or bulk load may
+run long statements. Lease connections stay outside the pool with only their
+connect bounded, so a short outage cannot end a lease's session on the client
+while the server keeps its lock.
+
 Backtest and signal-result persistence serialize writers for the same
 non-null `backtest_cache_key` with a transaction-scoped PostgreSQL advisory
 lock. After taking the lock, a normal duplicate writer skips the complete run

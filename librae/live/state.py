@@ -556,6 +556,17 @@ class HaltResetReadiness:
     required_action: str = ""
 
 
+class StateStoreUnavailableError(Exception):
+    """A save ended before the store judged its rows: a timeout or lost connection.
+
+    A store raises it, chained from the driver error, so the engine treats
+    the failure as an outage and keeps every row for the next checkpoint. Any
+    other error from a save that carried rows may be a refusal of one row,
+    which the engine drops once the snapshot alone still lands; a timeout
+    there would drop a row the store never refused.
+    """
+
+
 class LiveStateStore(Protocol):
     """Minimal persistence boundary used by ``LiveTrader``.
 

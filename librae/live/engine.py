@@ -135,6 +135,7 @@ from .state import (
     LiveRuntimeState,
     LiveStateStore,
     PendingOhlcvDelivery,
+    StateStoreUnavailableError,
     TrackedOrder,
     normalize_runtime_revision,
 )
@@ -1309,6 +1310,8 @@ class LiveTrader:
         written on its own and one the store still refuses is dropped loudly:
         a carried row the store never accepts would otherwise fail every
         later checkpoint, including a halt's, and its cancellation with it.
+        A ``StateStoreUnavailableError`` skips that check: a timed-out row
+        write, e.g. behind a lock on the row, was not refused.
         """
         if self._state_store is None:
             return
@@ -1319,7 +1322,11 @@ class LiveTrader:
         try:
             self._state_store.save(snapshot, tuple(self._unpersisted_orders.values()))
         except Exception as exc:
-            if not self._unpersisted_orders or not self._store_accepts(snapshot):
+            if (
+                isinstance(exc, StateStoreUnavailableError)
+                or not self._unpersisted_orders
+                or not self._store_accepts(snapshot)
+            ):
                 self._log_checkpoint_failure(exc)
                 raise
             self._write_rows_one_by_one(snapshot)
@@ -1340,13 +1347,14 @@ class LiveTrader:
         A row is tried twice, so a connection lost mid-write does not read as
         a refusal, and its second failure is re-checked with the snapshot
         alone, so a store that goes down partway keeps the rest carried and
-        raises, as an outage does.
+        raises, as an outage does. A ``StateStoreUnavailableError`` raises at
+        once, the same way.
         """
         for client_order_id, tracked in list(self._unpersisted_orders.items()):
             try:
                 self._save_row(snapshot, tracked)
             except Exception as exc:
-                if not self._store_accepts(snapshot):
+                if isinstance(exc, StateStoreUnavailableError) or not self._store_accepts(snapshot):
                     self._log_checkpoint_failure(exc)
                     raise
                 del self._unpersisted_orders[client_order_id]
@@ -1357,6 +1365,8 @@ class LiveTrader:
     def _save_row(self, snapshot: LiveRuntimeState, tracked: TrackedOrder) -> None:
         try:
             self._state_store.save(snapshot, (tracked,))
+        except StateStoreUnavailableError:
+            raise
         except Exception:
             self._state_store.save(snapshot, (tracked,))
 

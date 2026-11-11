@@ -369,3 +369,35 @@ def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:
         pytest.raises(ValueError, match="entry_commission"),
     ):
         refresh_performance("run-1", "alpha", config=_config())
+
+
+def test_refresh_performance_bounds_only_its_upsert() -> None:
+    """The live loop waits on it; its reads cover the whole run and may run long."""
+    import librae.db as db
+
+    timestamps = pd.date_range(datetime(2026, 1, 1, tzinfo=UTC), periods=2, freq="h")
+    equity = pd.DataFrame({"_time": timestamps, "equity": [100.0, 101.0]})
+    bounded: dict[str, bool] = {}
+
+    def recorded(name: str, result):
+        def call(*_args, **_kwargs):
+            bounded[name] = db._bounded.get()
+            return result
+
+        return call
+
+    with (
+        patch("librae.db.timescale_reader.load_equity_curve", recorded("equity", equity)),
+        patch(
+            "librae.db.timescale_reader.load_position_events", recorded("events", pd.DataFrame())
+        ),
+        patch(
+            "librae.db.timescale_reader.load_financing_cash_flows",
+            recorded("funding", pd.DataFrame()),
+        ),
+        patch("librae.core.metrics.compute_all", return_value=StrategyMetrics(total_return=0.01)),
+        patch("librae.db.timescale_writer.write_strategy_performance", recorded("upsert", None)),
+    ):
+        refresh_performance("run-1", "alpha", config=_config())
+
+    assert bounded == {"equity": False, "events": False, "funding": False, "upsert": True}

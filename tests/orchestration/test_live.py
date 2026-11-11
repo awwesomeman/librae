@@ -856,6 +856,37 @@ def test_timescale_callbacks_writes_trade_event() -> None:
     assert write.call_args.kwargs["margin_roi"] == 11.1
 
 
+def test_timescale_callbacks_bound_each_write_on_the_loop() -> None:
+    """A hung statement would otherwise stall the loop, halts included."""
+    import librae.db as db
+
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)
+    bounded: list[bool] = []
+
+    with patch("librae.db.timescale_writer.update_heartbeat", autospec=True) as write:
+        write.side_effect = lambda *args, **kwargs: bounded.append(db._bounded.get())
+        callbacks.on_heartbeat("run-1")
+
+    assert bounded == [True]
+    assert db._bounded.get() is False
+
+
+def test_timescale_callbacks_leave_the_kpi_refresh_reads_unbounded() -> None:
+    """Its reads cover the whole run, so a long run may exceed the bound."""
+    import librae.db as db
+
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)
+    bounded: list[bool] = []
+
+    with patch("librae.db.timescale_writer.refresh_performance", autospec=True) as refresh:
+        refresh.side_effect = lambda *args, **kwargs: bounded.append(db._bounded.get())
+        callbacks.on_performance("run-1", config.account_id)
+
+    assert bounded == [False]
+
+
 def test_register_run_seeds_zero_baseline_strategy_performance() -> None:
     """Without this seed row, strategy_performance has no row at all until
     the first close/reduce (on_performance is dirty-flag gated — see
