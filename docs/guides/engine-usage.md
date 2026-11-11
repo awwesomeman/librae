@@ -494,7 +494,9 @@ invented duration. A Shioaji poll without dates is served from the tick
 subscription, which is verified for futures only; a stock, index or option
 symbol needs a date window, and a poll of one raises `ValueError` before any
 query, because `kbars()` is capped at 270 queries a session and cannot be
-polled.
+polled. A live or sim run polls without dates, so `LiveTrader` refuses at
+construction, before any fetch, a Shioaji-routed symbol that is not a future:
+a declared `security_type` other than `FUT`, or none on a `spot` instrument.
 
 `SymbolInfo.calendar_id` is the SSOT for mapping an observed timestamp to its
 trading-session label. The built-ins use `24/7`, `XNYS`, and `XTAIFEX`;
@@ -662,6 +664,10 @@ for example when a withdrawal left the account holding less than the ledger.
 
 While an order remains active, polling still refreshes the OHLCV cache,
 heartbeat, and staleness state, but it does not run a new strategy decision.
+It still marks the open book on each poll's newest completed bars and checks
+`max_drawdown_rate` (below), since a `day` or `gtc` limit with no timeout can
+hold decisions for days; the equity curve and periodic status wait for the
+next decided bar, and periodic reconciliation for the order to end.
 An optional local wall-clock timeout cancels an over-age order, preserves any
 confirmed partial fill, and halts dependent work for review. A timeout's
 cancel the venue takes without ending the order, such as one answered
@@ -672,8 +678,10 @@ reports it `cancel_pending`; one the venue turns down, leaving the order
 working, is sent again, and so is one whose status a later cycle cannot read
 or apply, since the venue may have put the order back to work. A status read
 that fails, other than with an answer the executor refuses, fails the cycle
-before the order's timeout, naming the order, so a **Poll Error** that
-follows says which order it is. An order the venue reports `cancel_pending`
+before the order's timeout, and the next cycle reads again. The poll error
+names the order: a read the venue left unanswered (`BrokerUnavailableError`)
+only alerts, while any other failure halts once it persists (persistent poll
+errors, below). An order the venue reports `cancel_pending`
 on its own is polled until it ends, and is under its timeout again if it
 reverts to working. An order still tracked with nothing ending it alerts
 **Order Stuck**, naming it and repeating while it lasts, and the engine keeps
@@ -1061,8 +1069,12 @@ adapter at submission.
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
   confirmed broker fills; a close below the venue minimum is skipped as above.
-  The closes are sized from the book any working strategy order leaves, so
-  such an order is cancelled first, as for an operator flatten; while the
+  Live also checks on every poll while a strategy order works, on each
+  symbol's newest completed bar, unless an operator flatten is already
+  waiting on that order. Like a decision, that check waits while a required
+  feed of a held symbol has no usable bar, rather than value one leg of a
+  hedge at an old mark; the feed's own stale or not-ready alert covers it. The closes are sized from the book any working
+  strategy order leaves, so such an order is cancelled first, as for an operator flatten; while the
   venue has not confirmed it ended, the account is halted owing that
   cancellation, the breach alert names the order, and the closes go out once
   the cancellation completes. The wait is checkpointed, so a restart resumes
@@ -1103,6 +1115,20 @@ adapter at submission.
   mode then re-verifies the broker before the first new decision (see
   [Reconciliation](#reconciliation-live-only)). See the recovery procedure in
   [the operational runbook](operational-runbook.md).
+- Persistent poll errors: a poll cycle that raises is retried on the next
+  poll, in sim and live. An outage, an error that is or is chained from
+  `BrokerUnavailableError` or `StateStoreUnavailableError` (the venue or the
+  state store gave no answer), only alerts **Poll Error** once
+  `LiveTrader.CONSECUTIVE_ERROR_THRESHOLD` cycles in a row have failed. Any
+  other error may be a defect every cycle repeats, such as a decision that
+  preflight refuses or a strategy that raises, so that many of them with no
+  clean cycle between halt the account with **Persistent Poll Error**,
+  carrying the last error as the reason, and cancel its tracked orders. An
+  order status read the venue left unanswered is an outage when the adapter
+  classifies it ([Broker Adapter Design](../../architecture.md#broker-adapter-design-libraebrokers));
+  one it does not classify counts as any other error. While the order poll
+  fails, the cycle stops before the drawdown check, as before.
+  On a halted account failures only alert.
 - Halt durability: every halt applies in memory, writes its checkpoint, and
   only then cancels, each cancel recording itself before it is sent. Every
   tracked order the venue has not confirmed ended gets a cancel, whether its
@@ -1556,7 +1582,8 @@ bar already decided is rare and is what the audit keeps, so it rides the
 queue; a burst of them is flushed whenever the queue fills, so a healthy sink
 loses none to the bound. A sink with `on_ohlcv_batch` takes queued rows of one
 symbol in one call, so a burst does not hold the decision for a write per row;
-a durable sink's batch path must raise on a failed write, as `on_ohlcv` does.
+a durable sink's batch path must raise on a failed write, as `on_ohlcv` does,
+and declare `durable_ohlcv_delivery` too, or the constructor refuses it.
 
 Any other callback keeps the documented best-effort contract: it is invoked,
 its failure is logged, and nothing is queued. The engine cannot acknowledge on

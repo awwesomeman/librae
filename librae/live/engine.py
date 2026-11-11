@@ -490,6 +490,7 @@ def _resolve_market_data_subscription_snapshot(
         )
         for symbol in instruments
     }
+    _validate_market_data_poll_routes(instruments, route_owners)
     effective_calendars = _resolve_effective_calendars_from_capabilities(
         instruments,
         source_capabilities,
@@ -507,6 +508,38 @@ def _resolve_market_data_subscription_snapshot(
         effective_calendars,
     )
     return _MarketDataSubscriptionSnapshot(route_owners, subscriptions)
+
+
+def _validate_market_data_poll_routes(
+    instruments: Mapping[str, SymbolInfo],
+    route_owners: Mapping[str, str | None],
+) -> None:
+    """Fail before polling when a route cannot serve the engine's poll.
+
+    The runtime polls without a date window, which a Shioaji route serves
+    from its tick subscription for futures only (``ShioajiAdapter.fetch_ohlcv``),
+    so any other contract would fail every poll. The route is named here for
+    the reason given in ``_validate_market_data_calendar_preconditions``. A
+    declared ``security_type`` names the venue contract; without one, the
+    ``contract_*`` instrument types are the futures.
+    """
+    refused = sorted(
+        symbol
+        for symbol, instrument in instruments.items()
+        if route_owners.get(symbol) == "shioaji"
+        and not (
+            instrument.security_type == "FUT"
+            or (
+                instrument.security_type is None
+                and instrument.instrument_type.startswith("contract_")
+            )
+        )
+    )
+    if refused:
+        raise ValueError(
+            f"Shioaji market data for {refused} cannot be polled: the runtime fetches "
+            "without a date window, which Shioaji serves for futures only"
+        )
 
 
 def _validate_market_data_calendar_preconditions(
@@ -569,6 +602,28 @@ class ReportNotAppliedError(RuntimeError):
         # mismatch, without what became of its cancel, which can carry a
         # venue's error text that differs on every attempt.
         self.content = content
+
+
+def _is_outage(error: BaseException) -> bool:
+    """Whether a failed cycle got no answer from the state store or the venue.
+
+    Either type says the call had no effect and retrying later is safe; it
+    counts here whether raised or chained as the cause.
+    """
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        if isinstance(cause, (BrokerUnavailableError, StateStoreUnavailableError)):
+            return True
+        seen.add(id(cause))
+        cause = cause.__cause__
+    return False
+
+
+def _declares_durable_ohlcv(callback: object) -> bool:
+    """Whether an OHLCV callback, or the sink it is bound to, declares durable delivery."""
+    sink = getattr(callback, "__self__", callback)
+    return getattr(sink, "durable_ohlcv_delivery", False) is True
 
 
 def _report_failure(request: OrderRequest, order_id: str, error: Exception) -> str:
@@ -668,6 +723,17 @@ class LiveTrader:
             raise ValueError("exactly one of feature_fn and batch_feature_fn is required")
         if on_ohlcv_batch is not None and on_ohlcv is None:
             raise ValueError("on_ohlcv_batch is the many-bar path of an on_ohlcv sink; pass both")
+        if (
+            on_ohlcv_batch is not None
+            and _declares_durable_ohlcv(on_ohlcv)
+            and not _declares_durable_ohlcv(on_ohlcv_batch)
+        ):
+            # Queued rows are acknowledged through either callable, so a batch
+            # path that returns after a failed write would drop them unseen.
+            raise ValueError(
+                "on_ohlcv declares durable_ohlcv_delivery, so on_ohlcv_batch acknowledges "
+                "queued rows too and must come from a sink that declares it as well"
+            )
         if feature_fn is not None and not callable(feature_fn):
             raise TypeError("feature_fn must be callable or None")
         if batch_feature_fn is not None and not callable(batch_feature_fn):
@@ -882,6 +948,8 @@ class LiveTrader:
         # as a column so strategies never see it; it feeds only the audit row.
         self._bar_observed_at: dict[str, dict[tuple[int, int], datetime]] = {}
         self._consecutive_errors: int = 0
+        # Of those, the ones not an outage met on a running account.
+        self._unclassified_cycle_errors = 0
         self._market_data_fetch_failures: dict[str, int] = {}
         # Recent fetch health is intentionally process-local. Persisting a
         # short operational window across downtime would mix unlike polling
@@ -1048,8 +1116,7 @@ class LiveTrader:
         # A sink opts into at-least-once delivery by declaring it. Anything
         # else keeps the documented best-effort contract, because the engine
         # cannot acknowledge on a caller's behalf.
-        sink_owner = getattr(on_ohlcv, "__self__", on_ohlcv)
-        self._durable_ohlcv_delivery = getattr(sink_owner, "durable_ohlcv_delivery", False) is True
+        self._durable_ohlcv_delivery = _declares_durable_ohlcv(on_ohlcv)
         self._ohlcv_audit_degraded = False
         self._on_heartbeat = on_heartbeat
         self._on_signal_outcome = on_signal_outcome
@@ -1463,7 +1530,10 @@ class LiveTrader:
             self._publish_action_results(self._unpublished_results.pop(0))
 
     # WHY: 3 consecutive errors likely means a persistent issue (API down, DB
-    # unreachable), not a transient blip — worth alerting the operator.
+    # unreachable), not a transient blip — worth alerting the operator. When
+    # they are not an outage (``_is_outage``) the account halts instead: a
+    # defect the cycle repeats every poll would otherwise retry unseen after
+    # one alert.
     CONSECUTIVE_ERROR_THRESHOLD = 3
 
     # WHY: a skipped reconciliation round only stretches the interval, so
@@ -2796,21 +2866,14 @@ class LiveTrader:
                     try:
                         self._poll_cycle()
                         self._consecutive_errors = 0
+                        self._unclassified_cycle_errors = 0
                     except Exception as exc:
                         self._consecutive_errors += 1
                         logger.exception(
                             "Error in poll cycle (%d consecutive), will retry next interval",
                             self._consecutive_errors,
                         )
-                        if self._consecutive_errors == self.CONSECUTIVE_ERROR_THRESHOLD:
-                            self._notify(
-                                "send_alert",
-                                title=f"[{strategy_name}] Poll Error",
-                                message=(
-                                    f"{self._consecutive_errors} consecutive failures, the "
-                                    f"last {type(exc).__name__}: {exc}. Check logs."
-                                ),
-                            )
+                        self._answer_poll_error(exc)
                     finally:
                         self._finish_cycle_diagnostics(cycle_started_at, cycle_started)
 
@@ -2841,6 +2904,42 @@ class LiveTrader:
                 finally:
                     self._close()
             logger.info("LiveTrader stopped (reason: %s)", shutdown_reason)
+
+    def _answer_poll_error(self, error: Exception) -> None:
+        """Alert a cycle failing again and again, halting once its error is not an outage.
+
+        The next cycle retries either way. An outage clears on its own, so it
+        only alerts. Any other error may be a defect every cycle repeats, such
+        as a decision that preflight refuses, so it halts with the error as
+        the reason. A halted account has nothing more to stop.
+        """
+        if self._halted:
+            self._unclassified_cycle_errors = 0
+        elif not _is_outage(error):
+            self._unclassified_cycle_errors += 1
+            if self._unclassified_cycle_errors >= self.CONSECUTIVE_ERROR_THRESHOLD:
+                self._unclassified_cycle_errors = 0
+                try:
+                    self._halt_live(
+                        title="Persistent Poll Error",
+                        message=(
+                            f"{self._consecutive_errors} poll cycles in a row failed, the last "
+                            f"{type(error).__name__}: {error}"
+                        ),
+                    )
+                except Exception:
+                    # Its alert named the failure, and the next cycle retries it.
+                    logger.exception("Persistent Poll Error halt not finished")
+                return
+        if self._consecutive_errors == self.CONSECUTIVE_ERROR_THRESHOLD:
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Poll Error",
+                message=(
+                    f"{self._consecutive_errors} consecutive failures, the "
+                    f"last {type(error).__name__}: {error}. Check logs."
+                ),
+            )
 
     def _close(self) -> None:
         """Refuse further operator calls and release the account; hold the cycle lock."""
@@ -3281,6 +3380,10 @@ class LiveTrader:
         if not self._executor.simulation and (
             self._active_orders or self._halted or self._resume_unverified
         ):
+            # The drawdown breaker is not held with them. A requested flatten
+            # owns the working orders and closes the book itself.
+            if not (self._halted or self._resume_unverified or self._flatten_cancels_this_cycle()):
+                self._check_drawdown_while_orders_work(frames)
             return
 
         # A required subscription with no usable observation blocks evaluation
@@ -5347,8 +5450,10 @@ class LiveTrader:
                     return
                 except Exception as exc:
                     if not self._live_order_timed_out(tracked):
-                        # The cycle fails and the next one reads again; a Poll
-                        # Error that follows names the order.
+                        # The cycle fails and the next one reads again. Either
+                        # way the poll error names the order: an unanswered
+                        # read only alerts, any other error halts once it
+                        # persists (``_answer_poll_error``).
                         raise RuntimeError(
                             f"{request.symbol} order_id={tracked.order_id or 'unassigned'} "
                             f"status unavailable ({type(exc).__name__}: {exc})"
@@ -6922,9 +7027,11 @@ class LiveTrader:
             get_cost_model=self._get_cost_model,
         )
 
-    def _record_equity(self, ts: datetime) -> None:
-        """Calculate equity + drawdown, check the max-drawdown circuit
-        breaker, call on_bar callback, and send periodic status."""
+    def _check_drawdown(self, ts: datetime) -> tuple[float, float]:
+        """Value the book, raise the peak, and flatten and halt past ``max_drawdown_rate``.
+
+        Returns the equity and drawdown left after any flatten.
+        """
         equity, _ = self._calc_account_snapshot()
         self._equity_peak = max(self._equity_peak, equity)
         drawdown = (
@@ -6945,6 +7052,44 @@ class LiveTrader:
             drawdown = (
                 (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
             )
+        return equity, drawdown
+
+    def _check_drawdown_while_orders_work(self, frames: Mapping[str, pd.DataFrame]) -> None:
+        """Mark the book on each frame's latest completed bar and check drawdown.
+
+        A working order holds every strategy decision for as long as it rests,
+        days for a day or gtc limit with no timeout, and the breaker must not
+        wait with it. A breach cancels the order before the exits go out, as
+        on a decided bar. Only the marks and the peak move: the bar stays
+        undecided for the decision that follows the order, and the equity
+        curve keeps one point per decided bar. Stamped with the wall clock,
+        since the breach is not a decision on any bar.
+
+        It waits, as a decision does, while a required feed has no usable
+        bar for a held symbol: valued at its old mark, one leg of a hedged
+        book could show a breach the other offsets, or hide one. The
+        stale-data and not-ready alerts already speak for that feed.
+        """
+        unready = set(self._positions) - set(frames) - self._optional_symbols
+        if unready:
+            logger.debug("Drawdown check waits for %s", sorted(unready))
+            return
+        moved = False
+        for symbol, frame in frames.items():
+            close = float(frame["close"].iloc[-1])
+            if not isfinite(close) or close <= 0:
+                raise ValueError(f"{symbol} has invalid latest close: {close}")
+            moved = moved or self._last_prices.get(symbol) != close
+            self._last_prices[symbol] = close
+        self._check_drawdown(self._utc_now())
+        # A restart measures drawdown from the checkpointed peak.
+        if moved and not self._halted:
+            self._persist_state()
+
+    def _record_equity(self, ts: datetime) -> None:
+        """Calculate equity + drawdown, check the max-drawdown circuit
+        breaker, call on_bar callback, and send periodic status."""
+        equity, drawdown = self._check_drawdown(ts)
 
         period_return = equity / self._prev_equity - 1.0 if self._prev_equity > 0 else 0.0
         self._prev_equity = equity

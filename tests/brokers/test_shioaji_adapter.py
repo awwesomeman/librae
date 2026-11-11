@@ -20,6 +20,7 @@ from librae.core.market_data import MarketDataSubscription, normalize_bar_times
 from librae.core.readiness import next_expected_close
 from librae.core.trading_calendar import resample_session_ohlcv
 from librae.live.executor import (
+    BrokerUnavailableError,
     LiveExecutor,
     OrderBelowVenueMinimumError,
     OrderRequest,
@@ -1690,6 +1691,124 @@ class TestGetBalance:
 
         with pytest.raises(NotImplementedError, match="read-only"):
             adapter.get_balance("TWD")
+
+
+def _sdk_errors() -> SimpleNamespace:
+    """A stand-in for the shioaji module's error types, shaped as the SDK declares them."""
+
+    class ShioajiError(Exception):
+        pass
+
+    class ShioajiConnectionError(ShioajiError, ConnectionError):
+        pass
+
+    class ShioajiTimeoutError(ShioajiError, TimeoutError):
+        pass
+
+    class SystemMaintenance(ShioajiError):
+        pass
+
+    class TokenError(ShioajiError):
+        pass
+
+    return SimpleNamespace(
+        ShioajiConnectionError=ShioajiConnectionError,
+        ShioajiTimeoutError=ShioajiTimeoutError,
+        SystemMaintenance=SystemMaintenance,
+        TokenError=TokenError,
+        Action=SimpleNamespace(Buy="Buy", Sell="Sell"),
+    )
+
+
+def _failing_read(read: str, error: Exception):
+    """An adapter whose ``read`` meets ``error`` in the SDK call it makes."""
+    adapter = _make_adapter(ca_activated=True)
+    adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(code="2330"))
+    sdk_call = {
+        "get_order": adapter._api.update_status,
+        "find_order": adapter._api.update_status,
+        "list_open_orders": adapter._api.update_status,
+        "get_position": adapter._api.list_positions,
+        "get_balance": adapter._api.margin,
+    }[read]
+    sdk_call.side_effect = error
+    call = {
+        "get_order": lambda: adapter.get_order("ord-1", "2330"),
+        "find_order": lambda: adapter.find_order("strategy-1", "2330"),
+        "list_open_orders": lambda: adapter.list_open_orders("2330"),
+        "get_position": lambda: adapter.get_position(_position_request("2330")),
+        "get_balance": lambda: adapter.get_balance("TWD"),
+    }[read]
+    return adapter, call
+
+
+_READS = ["find_order", "get_balance", "get_order", "get_position", "list_open_orders"]
+
+
+class TestUnansweredReads:
+    """A read the venue never answered is unavailable; every other SDK error keeps its type."""
+
+    @pytest.mark.parametrize("read", _READS)
+    @pytest.mark.parametrize(
+        "error_name", ["ShioajiConnectionError", "ShioajiTimeoutError", "SystemMaintenance"]
+    )
+    def test_is_classified_as_unavailable(self, monkeypatch, read, error_name):
+        sdk = _sdk_errors()
+        monkeypatch.setitem(sys.modules, "shioaji", sdk)
+        original = getattr(sdk, error_name)("no answer")
+        _, call = _failing_read(read, original)
+
+        with pytest.raises(BrokerUnavailableError) as raised:
+            call()
+
+        assert raised.value.__cause__ is original
+
+    @pytest.mark.parametrize("read", _READS)
+    def test_an_answered_refusal_keeps_its_type(self, monkeypatch, read):
+        sdk = _sdk_errors()
+        monkeypatch.setitem(sys.modules, "shioaji", sdk)
+        original = sdk.TokenError("token expired")
+        _, call = _failing_read(read, original)
+
+        with pytest.raises(sdk.TokenError) as raised:
+            call()
+
+        assert raised.value is original
+
+    def test_a_refresh_after_a_sent_cancel_keeps_its_error(self, monkeypatch):
+        """The cancel went out, so the call had an effect and must not read as unavailable."""
+        sdk = _sdk_errors()
+        monkeypatch.setitem(sys.modules, "shioaji", sdk)
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(code="2330"))
+        trade = SimpleNamespace(
+            status=SimpleNamespace(id="ord-1"),
+            order=SimpleNamespace(id="ord-1"),
+            contract=SimpleNamespace(code="2330"),
+        )
+        adapter._api.list_trades.return_value = [trade]
+        original = sdk.ShioajiTimeoutError("refresh timed out")
+
+        def update_status(**kwargs):
+            if "trade" in kwargs:
+                raise original
+
+        adapter._api.update_status.side_effect = update_status
+
+        with pytest.raises(sdk.ShioajiTimeoutError) as raised:
+            adapter.cancel_order("ord-1", "2330")
+
+        assert raised.value is original
+        adapter._api.cancel_order.assert_called_once_with(trade)
+
+    @pytest.mark.sdk_contract
+    def test_the_classified_types_are_the_sdk_s_own(self):
+        from librae.brokers.shioaji_adapter import _UNANSWERED_ERRORS
+
+        sj = _require_shioaji()
+
+        for name in _UNANSWERED_ERRORS:
+            assert issubclass(getattr(sj, name), sj.ShioajiError)
 
 
 class TestLifecycle:

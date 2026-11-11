@@ -1575,14 +1575,16 @@ def test_find_order_uses_client_id_across_order_history(authed_adapter, mock_ccx
     mock_ccxt_exchange.fetch_orders.assert_called_once_with("BTC/USDT")
 
 
-_RECONCILIATION_READS = {
+_CLASSIFIED_READS = {
     "get_position": ("fetch_balance", lambda a: a.get_position(_position_request("BTC/USDT"))),
     "list_open_orders": ("fetch_open_orders", lambda a: a.list_open_orders("BTC/USDT")),
     "get_balance": ("fetch_balance", lambda a: a.get_balance("USDT")),
+    "get_order": ("fetch_order", lambda a: a.get_order("ord_1", "BTC/USDT")),
+    "find_order": ("fetch_orders", lambda a: a.find_order("strategy-1", "BTC/USDT")),
 }
 
 
-@pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
+@pytest.mark.parametrize("read", sorted(_CLASSIFIED_READS))
 @pytest.mark.parametrize(
     "error_name",
     [
@@ -1594,10 +1596,10 @@ _RECONCILIATION_READS = {
         "RateLimitExceeded",
     ],
 )
-def test_reconciliation_reads_classify_network_errors_as_unavailable(
+def test_reconciliation_and_status_reads_classify_network_errors_as_unavailable(
     authed_adapter, mock_ccxt_exchange, read, error_name
 ):
-    method, call = _RECONCILIATION_READS[read]
+    method, call = _CLASSIFIED_READS[read]
     original = getattr(errors, error_name)("venue down")
     getattr(mock_ccxt_exchange, method).side_effect = original
 
@@ -1607,7 +1609,7 @@ def test_reconciliation_reads_classify_network_errors_as_unavailable(
     assert raised.value.__cause__ is original
 
 
-@pytest.mark.parametrize("read", sorted(_RECONCILIATION_READS))
+@pytest.mark.parametrize("read", sorted(_CLASSIFIED_READS))
 @pytest.mark.parametrize(
     "error_name",
     [
@@ -1620,10 +1622,10 @@ def test_reconciliation_reads_classify_network_errors_as_unavailable(
         "ChecksumError",
     ],
 )
-def test_reconciliation_reads_leave_non_network_errors_unclassified(
+def test_reconciliation_and_status_reads_leave_non_network_errors_unclassified(
     authed_adapter, mock_ccxt_exchange, read, error_name
 ):
-    method, call = _RECONCILIATION_READS[read]
+    method, call = _CLASSIFIED_READS[read]
     getattr(mock_ccxt_exchange, method).side_effect = getattr(errors, error_name)("refused")
 
     with pytest.raises(getattr(errors, error_name)) as raised:
@@ -1632,12 +1634,17 @@ def test_reconciliation_reads_leave_non_network_errors_unclassified(
     assert not isinstance(raised.value, BrokerUnavailableError)
 
 
-def test_order_lookup_network_errors_are_not_reclassified(authed_adapter, mock_ccxt_exchange):
-    mock_ccxt_exchange.has = {"fetchOrder": True}
-    mock_ccxt_exchange.fetch_order.side_effect = errors.RequestTimeout("slow")
+def test_a_read_after_a_sent_cancel_keeps_its_network_error(authed_adapter, mock_ccxt_exchange):
+    """The cancel went out, so the call had an effect and must not read as unavailable."""
+    mock_ccxt_exchange.has = {"cancelOrder": True, "fetchOrder": True}
+    original = errors.RequestTimeout("slow")
+    mock_ccxt_exchange.fetch_order.side_effect = original
 
-    with pytest.raises(errors.RequestTimeout):
-        authed_adapter.get_order("ord_1", "BTC/USDT")
+    with pytest.raises(errors.RequestTimeout) as raised:
+        authed_adapter.cancel_order("ord_1", "BTC/USDT")
+
+    assert raised.value is original
+    mock_ccxt_exchange.cancel_order.assert_called_once_with("ord_1", "BTC/USDT")
 
 
 _CLASSIFYING_CALLS = {

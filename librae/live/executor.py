@@ -319,6 +319,9 @@ class ExecutionReport:
 class OrderAdapter(Protocol):
     """Required live order lifecycle and position-reconciliation gateway.
 
+    A read the venue left unanswered raises ``BrokerUnavailableError``, as
+    that error describes; every other failure keeps its own type.
+
     An adapter whose venue cannot carry Librae's full client order id may
     additionally declare ``broker_client_order_id(client_order_id) -> str``.
     ``LiveExecutor`` then expects that compact form in every broker report
@@ -366,11 +369,14 @@ class BrokerUnavailableError(Exception):
     """A read reached no venue answer and had no effect; retrying later is safe.
 
     Adapters raise it, chained from the SDK error, only from the position,
-    open-order and balance reads, and only for failures they know are
-    transient (timeouts, connection loss, rate limits, venue maintenance).
-    Anything else, including authentication and permission errors, must
-    propagate unchanged: periodic reconciliation tolerates this type for a
-    bounded number of rounds and fails closed on every other exception.
+    open-order, balance and order status (``get_order``, ``find_order``)
+    reads, and only for failures they know are transient (timeouts,
+    connection loss, rate limits, venue maintenance). Anything else,
+    including authentication and permission errors, must propagate
+    unchanged: periodic reconciliation tolerates this type for a bounded
+    number of rounds, the poll loop retries an order poll that meets it, and
+    both fail closed on every other exception. ``cancel_order`` never raises
+    it, even from a read after the cancel went out, which has had an effect.
     """
 
 

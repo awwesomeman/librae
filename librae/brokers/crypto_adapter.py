@@ -227,7 +227,7 @@ def _require_ccxt() -> object:
 def _network_errors_unavailable[**P, R](
     read: Callable[Concatenate[CryptoAdapter, P], R],
 ) -> Callable[Concatenate[CryptoAdapter, P], R]:
-    """Classify ccxt's NetworkError family on a reconciliation read.
+    """Classify ccxt's NetworkError family on a reconciliation or order status read.
 
     ccxt raises that family for timeouts, connection failures, rate limits
     and unavailable-status replies (``Exchange.httpExceptions``; its fallback
@@ -1061,6 +1061,7 @@ class CryptoAdapter:
         order["fees"] = fees
         return order
 
+    @_network_errors_unavailable
     def find_order(self, client_order_id: str, symbol: str) -> dict | None:
         """Find an open or final order after an ambiguous create response."""
         self._require_auth()
@@ -1083,8 +1084,12 @@ class CryptoAdapter:
             raise ValueError(f"duplicate broker clientOrderId: {client_order_id}")
         return self._backfill_fee(matches[0], symbol) if matches else None
 
+    @_network_errors_unavailable
     def get_order(self, order_id: str, symbol: str) -> dict:
         """Return the latest cumulative CCXT order state."""
+        return self._read_order(order_id, symbol)
+
+    def _read_order(self, order_id: str, symbol: str) -> dict:
         self._require_auth()
         if not self._exchange.has.get("fetchOrder"):
             raise NotImplementedError(f"{self._exchange_id} does not support fetchOrder")
@@ -1104,7 +1109,9 @@ class CryptoAdapter:
         if not self._exchange.has.get("cancelOrder"):
             raise NotImplementedError(f"{self._exchange_id} does not support cancelOrder")
         self._exchange.cancel_order(order_id, symbol)
-        return self.get_order(order_id, symbol)
+        # Unclassified: once the cancel went out, a read that fails after it
+        # must not say the call had no effect.
+        return self._read_order(order_id, symbol)
 
     @_network_errors_unavailable
     def get_balance(self, currency: str) -> dict[str, float]:
