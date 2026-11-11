@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from librae.console import charts, common, db, queries
+from librae.console import charts, common, db, queries, ui
 
 _SNAPSHOT_COLUMNS = {
     "symbol": st.column_config.TextColumn("Symbol"),
@@ -54,23 +54,16 @@ _EVENT_COLUMNS = {
 }
 
 
-def render() -> None:
-    st.header("Positions")
-    selected = common.selection()
-    if selected is None:
-        return
-    common.status_panel(selected.run["run_id"])
+def render(selected: common.Selection) -> None:
     if selected.account_id is None:
         st.info("This run has not written an equity curve yet.")
         return
     _open_positions(selected.run["run_id"], selected.account_id, selected.run["mode"])
-    st.caption("The sections below are not auto-refreshed: reload the page to redraw.")
     _fills(selected)
 
 
 @st.fragment(run_every=common.REFRESH_SECONDS)
 def _open_positions(run_id: str, account_id: str, mode: str) -> None:
-    st.subheader("Open positions")
     latest = db.query(queries.LATEST_EQUITY, (run_id, account_id))
     marks = db.query(queries.LATEST_MARKS, (run_id,))
     snapshot = queries.position_snapshot(
@@ -78,21 +71,27 @@ def _open_positions(run_id: str, account_id: str, mode: str) -> None:
         marks,
         float(latest["equity"].iloc[0]) if not latest.empty else None,
     )
+    marked = marks.loc[marks["symbol"].isin(snapshot["symbol"]), "ts"]
+    common.refresh_toolbar(
+        marked.max() if not marked.empty else latest["ts"].max(),
+        "positions",
+        what="Latest position mark or equity point",
+    )
+    ui.section_header("Open Positions", "Marked to the latest stored bar")
     if snapshot.empty:
         st.info("Flat: no open position.")
     else:
         st.dataframe(snapshot, column_config=_SNAPSHOT_COLUMNS, hide_index=True)
         if snapshot["market_price"].isna().any():
             st.caption(f"A position without a mark has no stored bar. {common.missing_bars(mode)}")
-    marked = marks.loc[marks["symbol"].isin(snapshot["symbol"]), "ts"]
-    common.as_of(marked.max() if not marked.empty else latest["ts"].max())
 
 
+@st.fragment(run_every=common.HISTORY_REFRESH_SECONDS)
 def _fills(selected: common.Selection) -> None:
+    ui.section_header("Price And Fills")
     run_id, account_id = selected.run["run_id"], selected.account_id
     events = common.history(queries.POSITION_EVENTS, (run_id, account_id))
 
-    st.subheader("Price and fills")
     symbols = db.query(queries.BAR_SYMBOLS, (run_id,))["symbol"].tolist()
     if not symbols:
         st.info(f"This run stored no bars. {common.missing_bars(selected.run['mode'])}")
@@ -102,9 +101,11 @@ def _fills(selected: common.Selection) -> None:
         fills = events[events["symbol"] == symbol] if not events.empty else events
         markers = queries.fill_markers(fills)
         markers = markers[markers["ts"] >= bars["ts"].min()] if not bars.empty else markers
-        st.plotly_chart(charts.candles_with_markers(bars, markers))
+        st.plotly_chart(
+            charts.candles_with_markers(bars, markers), key=f"fills_{run_id}_{account_id}_{symbol}"
+        )
 
-    st.subheader("Position events")
+    ui.section_header("Position Events")
     if events.empty:
         st.info("No fills recorded for this account.")
         return

@@ -13,6 +13,8 @@ from pathlib import Path
 
 from streamlit.web import cli
 
+from librae.console.ui import THEME_DEFAULTS
+
 DEFAULT_ADDRESS = "127.0.0.1"
 
 
@@ -26,6 +28,10 @@ def streamlit_argv(args: list[str], environ: dict[str, str]) -> list[str]:
 
 
 def main() -> None:
+    # Environment defaults travel with the installed package, regardless of cwd.
+    for option, value in THEME_DEFAULTS.items():
+        os.environ.setdefault(option, value)
+    os.environ.setdefault("STREAMLIT_CLIENT_TOOLBAR_MODE", "minimal")
     sys.argv = streamlit_argv(sys.argv[1:], dict(os.environ))
     sys.exit(cli.main())
 

@@ -80,7 +80,7 @@ test = [
   "pyyaml>=6.0",
 ]
 console = [
-  "streamlit>=1.50,<2",  # read-only monitoring console (librae/console/)
+  "streamlit>=1.67,<2",  # dataframe name actions use ButtonColumn
   "plotly>=6,<8",
   "psycopg2-binary>=2.9",
 ]
@@ -98,6 +98,7 @@ include = ["librae*"]
 [tool.setuptools.package-data]
 librae = ["_scaffold/env.example"]
 "librae.db" = ["*.sql"]
+"librae.console" = ["*.css"]
 
 [tool.setuptools_scm]
 # Derives the version from git tags/commit distance instead of a hand-maintained

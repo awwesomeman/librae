@@ -65,3 +65,6 @@ def query(sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
             raise
         _discard(conn)
         return _fetch(_open_connection(), sql, params)
+
+
+clear_query_cache = query.clear

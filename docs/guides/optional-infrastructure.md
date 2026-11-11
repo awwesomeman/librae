@@ -191,22 +191,49 @@ has no login, so it listens on `127.0.0.1` unless `--server.address` (or
 such as a private-network address like a Tailscale IP, never a public one; see
 `SECURITY.md`.
 
+The launcher supplies the console's light theme and dark sidebar; explicit
+Streamlit theme environment variables or command-line options override those
+defaults. Run identity and full timestamps are available on hover or focus.
+All displayed times are UTC.
+
+Use **Overview** for the recent run directory; clicking a strategy name opens
+**Strategy** with that run and account. Strategy groups Performance, Positions
+and Runtime Events; only the financial views use the account selection.
+Choose a strategy name, mode and run from the sidebar. Lists cover the most
+recent runs, bounded by `queries.RECENT_RUNS`.
+
+**Signal** selects from runs with recorded signals, independently of the
+Strategy selection and without an account. **View Signals** in Strategy opens
+the same run in Signal. Analysis names come from the saved `strategy_name`;
+they can label a standalone analysis without a portfolio backtest.
+`save_signal_results()` needs a `run_id` to appear in the console and
+`store_bars=True` for charts and forward outcomes. Ad-hoc signals saved
+without a run ID are not selectable in the console.
+
 - `LIBRAE_CONSOLE_DSN` must name a role that can only `SELECT`: the reference
   schema's `grafana_reader` (password `POSTGRES_GRAFANA_PASSWORD`). The
   console also opens its session read-only, and it never writes.
-- Status panels (run status, halt flag, last decision bar, equity, open
-  positions, runtime events) rerun every `LIBRAE_CONSOLE_REFRESH_SECONDS`
-  (default 30) as Streamlit fragments; charts and tables of history redraw
-  only when the page reloads. Queries are cached for a few seconds, so several
-  open tabs share one database read.
+- Status panels (run status, equity, open positions, runtime events and latest
+  signals) rerun every `LIBRAE_CONSOLE_REFRESH_SECONDS` (default 30) as
+  Streamlit fragments. Performance, fills and signal analysis refresh every
+  five minutes. Each financial or signal view groups data age and a whole-page
+  Refresh button above its content; check times and cadence appear on hover.
+  Queries are cached for a few seconds so open tabs share database reads.
 - A status panel shows how old its newest row is and warns when it is older
   than two bars plus three poll cycles. Market closures are not modelled, so
   a run on a session calendar shows the warning while its market is closed.
   Alerting stays with the notifier and health checks, not the console.
 - The halt flag and last decision bar come from the run's checkpoint in
   `execution_runtime_state`; a backtest has none.
-- Every query is bounded: the most recent runs, the newest rows of a run's
-  history (a caption says when that cut it), and a 30 s statement timeout.
+- Query results are bounded: recent runs and the newest history rows (a
+  caption identifies truncation), with a 30 s statement timeout. Max Equity
+  Drawdown aggregates the selected account's full equity history in the
+  database every five minutes; the chart uses only its displayed rows.
+- Max Equity Drawdown includes open-position gains and losses. Its worst
+  percentage and amount can occur at different times; realized drawdown
+  remains separate. Margin and unrealized P&L show amounts and equity shares;
+  Margin Breakdown groups capital by unlevered, fixed or dynamic mode. A flat
+  account shows zero; missing position values leave totals unavailable.
 - Accounts are never combined: every account-level panel shows one
   account in its own currency. Combined PnL and reporting-currency conversion
   stay caller-owned, per `architecture.md`.

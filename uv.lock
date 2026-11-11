@@ -798,7 +798,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'test'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.0" },
     { name = "shioaji", marker = "extra == 'tw-live'", specifier = ">=1.7,<2" },
-    { name = "streamlit", marker = "extra == 'console'", specifier = ">=1.50,<2" },
+    { name = "streamlit", marker = "extra == 'console'", specifier = ">=1.67,<2" },
 ]
 provides-extras = ["calendars", "cli", "db", "parquet", "crypto-live", "tw-live", "us-live", "stocks-data", "telegram", "test", "console", "viz", "dev"]
 

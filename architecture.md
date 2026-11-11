@@ -115,6 +115,13 @@ table is declared next to the adapter that owns the venue knowledge. Removing
 the edge would mean the caller supplying the tables, which silently drops the
 check for anyone constructing `Backtest` or `LiveTrader` directly.
 
+The read-only console owns its presentation assets and launcher theme defaults
+within the optional package. Strategy names group runs without combining their
+results. Signal analysis has its own selection and entry point; it does not
+require account data. Runtime events belong to the run; financial panels also
+require an account. See [Optional infrastructure](docs/guides/optional-infrastructure.md)
+for navigation and data availability.
+
 Layering details in `docs/decisions/2026-03-26-platform-architecture.md`
 describe the historical decision; this document remains the current source of
 truth.
@@ -869,7 +876,7 @@ the backtest savers store backtest runs only, so no save clears the rows a sim
 or live engine recorded.
 
 `signal_events` and the run's `run_bars` are the source facts for
-signal-quality analysis, so a backtest feeds the console's Signals page only
+signal-quality analysis, so a backtest feeds the console's Signal charts only
 when saved with `store_bars=True`.
 Forward return, MFE, and MAE are derived on demand by
 `compute_signal_outcomes()`, one symbol at a time, for local callers and the

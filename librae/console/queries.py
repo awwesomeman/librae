@@ -15,8 +15,8 @@ from librae.core.metrics import SignalDirection, SignalPriceColumn, compute_sign
 from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS
 from librae.core.utils import interval_to_timedelta
 
-# Every statement is bounded, so a long run or a large table cannot make one
-# page read without limit: the runs listed, and the newest rows of a run.
+# Result sizes are bounded. Full-run drawdown scans one account's equity
+# history in the database and returns only its aggregate, every five minutes.
 RECENT_RUNS = 200
 HISTORY_ROWS = 50_000
 RECENT_EVENTS = 1_000
@@ -24,7 +24,16 @@ RECENT_EVENTS = 1_000
 RUNS = """
     SELECT run_id, strategy_name, mode, timeframe, run_at, poll_seconds, last_heartbeat_at
     FROM backtest_runs
-    ORDER BY run_at DESC
+    ORDER BY run_at DESC, run_id
+    LIMIT %s
+"""
+
+SIGNAL_RUNS = """
+    SELECT br.run_id, br.strategy_name, br.mode, br.timeframe, br.run_at,
+           br.poll_seconds, br.last_heartbeat_at
+    FROM backtest_runs br
+    WHERE EXISTS (SELECT 1 FROM signal_events s WHERE s.run_id = br.run_id)
+    ORDER BY br.run_at DESC, br.run_id
     LIMIT %s
 """
 
@@ -54,7 +63,7 @@ ACCOUNT_OVERVIEW = """
     WITH RECURSIVE recent_runs AS (
       SELECT run_id, strategy_name, mode, timeframe, poll_seconds, last_heartbeat_at
       FROM backtest_runs
-      ORDER BY run_at DESC
+      ORDER BY run_at DESC, run_id
       LIMIT %s
     ),
     run_accounts AS (
@@ -93,19 +102,19 @@ ACCOUNT_OVERVIEW = """
       ) p ON true
       GROUP BY le.run_id, le.account_id
     )
-    SELECT r.strategy_name, r.mode, r.timeframe, le.run_id, le.account_id, le.currency,
+    SELECT r.strategy_name, r.mode, r.timeframe, r.run_id, le.account_id, le.currency,
            le.ts AS last_equity_at, le.equity, le.gross_exposure, le.net_exposure,
            le.concentration, pc.open_positions, r.poll_seconds, r.last_heartbeat_at,
            rs.halted
-    FROM latest_equity le
-    JOIN recent_runs r ON r.run_id = le.run_id
-    JOIN position_counts pc ON pc.run_id = le.run_id AND pc.account_id = le.account_id
+    FROM recent_runs r
+    LEFT JOIN latest_equity le ON le.run_id = r.run_id
+    LEFT JOIN position_counts pc ON pc.run_id = le.run_id AND pc.account_id = le.account_id
     LEFT JOIN LATERAL (
       SELECT bool_or((state->>'halted')::boolean) AS halted
       FROM execution_runtime_state
       WHERE run_id = r.run_id
     ) rs ON true
-    ORDER BY le.ts DESC, r.strategy_name, le.run_id
+    ORDER BY le.ts DESC NULLS LAST, r.strategy_name, r.run_id
 """
 
 RUN_ACCOUNTS = """
@@ -136,6 +145,17 @@ LATEST_EQUITY = """
     WHERE run_id = %s AND account_id = %s
     ORDER BY ts DESC
     LIMIT 1
+"""
+
+EQUITY_DRAWDOWN = """
+    WITH curve AS (
+      SELECT equity, MAX(equity) OVER (ORDER BY ts) AS peak
+      FROM equity_curve
+      WHERE run_id = %s AND account_id = %s
+    )
+    SELECT MIN(equity - peak) AS max_drawdown_amount,
+           MIN(equity / NULLIF(peak, 0) - 1) AS max_drawdown
+    FROM curve
 """
 
 OPEN_POSITIONS = """
@@ -198,6 +218,27 @@ SIGNALS = """
     WHERE run_id = %s AND signal_type = %s AND symbol = %s
     ORDER BY ts DESC
     LIMIT %s
+"""
+
+SIGNAL_SUMMARY = """
+    WITH recent AS (
+      SELECT ts, signal_value
+      FROM signal_events
+      WHERE run_id = %s AND signal_type = %s AND symbol = %s
+      ORDER BY ts DESC
+      LIMIT %s
+    )
+    SELECT COUNT(*) AS signal_count, MAX(ts) AS last_ts,
+           (ARRAY_AGG(signal_value ORDER BY ts DESC))[1] AS last_value
+    FROM recent
+"""
+
+SIGNAL_REFERENCE = """
+    SELECT ts, open, high, low, close
+    FROM run_bars
+    WHERE run_id = %s AND symbol = %s AND ts > %s
+    ORDER BY ts ASC, observed_at DESC NULLS LAST, available_at DESC
+    LIMIT 1
 """
 
 RUNTIME_EVENTS = """
@@ -357,6 +398,24 @@ def position_snapshot(
     return out[columns].reset_index(drop=True)
 
 
+def complete_total(values: pd.Series) -> float:
+    """Zero for a flat account; unknown if any open position is missing a value."""
+    return float("nan") if values.isna().any() else float(values.sum())
+
+
+def margin_breakdown(snapshot: pd.DataFrame, equity: float | None) -> pd.DataFrame:
+    """Margin by engine regime, preserving unknown amounts and unlabelled modes."""
+    grouped = (
+        snapshot.assign(margin_mode=snapshot["margin_mode"].fillna("Unknown"))
+        .groupby("margin_mode")["margin_locked"]
+        .agg(complete_total)
+        .rename("amount")
+        .reset_index()
+    )
+    grouped["share"] = grouped["amount"] / equity if equity and equity > 0 else np.nan
+    return grouped
+
+
 def fill_markers(events: pd.DataFrame) -> pd.DataFrame:
     """Fills as chart markers at their execution time and price, labelled by direction."""
     return pd.DataFrame(
@@ -449,8 +508,14 @@ def latest_signal_return(
     after = bars[bars["ts"] > signal_ts.max()]
     if after.empty:
         return None
-    reference = float(after.iloc[0][price_col])
-    if reference == 0:
+    return signal_return(after.iloc[0][price_col], bars.iloc[-1]["close"], direction)
+
+
+def signal_return(
+    reference: float | None, latest_close: float | None, direction: SignalDirection
+) -> float | None:
+    """Return from a known reference; unavailable prices stay unknown."""
+    if pd.isna(reference) or pd.isna(latest_close) or reference == 0:
         return None
     sign = 1.0 if direction == "long" else -1.0
-    return sign * (float(bars.iloc[-1]["close"]) - reference) / reference
+    return sign * (float(latest_close) - float(reference)) / float(reference)

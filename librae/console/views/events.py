@@ -4,15 +4,10 @@ from __future__ import annotations
 
 import streamlit as st
 
-from librae.console import common, db, queries
+from librae.console import common, db, queries, ui
 
 
-def render() -> None:
-    st.header("Runtime events")
-    selected = common.selection()
-    if selected is None:
-        return
-    common.status_panel(selected.run["run_id"])
+def render(selected: common.Selection) -> None:
     _events(selected.run["run_id"])
 
 
@@ -22,9 +17,9 @@ def _events(run_id: str) -> None:
     if events.empty:
         st.info("No runtime events: the run has not restarted, skipped a decision or halted.")
         return
-    common.as_of(events["ts"].max())
+    ui.section_header("Event Log", f"Run-wide · Latest {len(events):,} events")
     kinds = sorted(events["event_type"].unique())
-    chosen = st.multiselect("Event types", kinds, default=kinds)
+    chosen = st.multiselect("Event Types", kinds, default=kinds)
     shown = events[events["event_type"].isin(chosen)]
     st.dataframe(
         shown,
@@ -38,3 +33,4 @@ def _events(run_id: str) -> None:
         column_order=["ts", "event_type", "symbol", "reason", "detail"],
         hide_index=True,
     )
+    common.as_of(events["ts"].max())

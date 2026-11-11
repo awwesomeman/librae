@@ -169,6 +169,34 @@ def test_trade_returns_count_hedge_legs_as_one_trade() -> None:
     assert sorted(queries.trade_returns(events)) == pytest.approx([0.02, 0.05])
 
 
+def test_margin_totals_preserve_unknown_values_and_regimes() -> None:
+    snapshot = pd.DataFrame(
+        {
+            "margin_mode": ["unlevered", "fixed", "fixed", "dynamic", None],
+            "margin_locked": [100.0, 20.0, None, 40.0, 10.0],
+        }
+    )
+    totals = queries.margin_breakdown(snapshot, 1000).set_index("margin_mode")
+    assert totals.loc["unlevered", "share"] == pytest.approx(0.1)
+    assert totals.loc["dynamic", "amount"] == 40
+    assert totals.loc["Unknown", "amount"] == 10
+    assert pd.isna(totals.loc["fixed", "amount"])
+    assert pd.isna(queries.complete_total(snapshot["margin_locked"]))
+    assert queries.complete_total(pd.Series(dtype=float)) == 0
+    assert queries.margin_breakdown(snapshot, 0)["share"].isna().all()
+
+
+@pytest.mark.parametrize("reference", [None, float("nan"), 0])
+def test_latest_signal_return_needs_a_reference_price(reference) -> None:
+    assert queries.signal_return(reference, 101, "long") is None
+
+
+def test_latest_signal_return_keeps_direction_and_missing_close() -> None:
+    assert queries.signal_return(100, 110, "long") == pytest.approx(0.1)
+    assert queries.signal_return(100, 110, "short") == pytest.approx(-0.1)
+    assert queries.signal_return(100, None, "long") is None
+
+
 def test_oldest_first_restores_time_order() -> None:
     newest_first = pd.DataFrame({"ts": [3, 2, 1]})
 
