@@ -1127,10 +1127,11 @@ adapter at submission.
   state store gave no answer), only alerts **Poll Error** once
   `LiveTrader.CONSECUTIVE_ERROR_THRESHOLD` cycles in a row have failed. A
   state store outage that fails the order poll's writes fails the cycle only
-  after its risk checks: the poll still reads and books each order's answer,
-  and the post-fill risk check and the drawdown breaker run on that book; no
-  decision runs. A halt either makes then waits for its checkpoint, as under
-  halt durability below, so nothing reaches the venue unrecorded. Any
+  after its risk checks: the poll still reads and books each order's answer
+  but places no queued order, and the post-fill risk check and the drawdown
+  breaker run on that book; no decision runs. An audit-queue checkpoint
+  that fails so is held the same way. What a halt does then is under halt
+  durability below. Any
   other error may be a defect every cycle repeats, such as a decision that
   preflight refuses or a strategy that raises, so that many of them with no
   clean cycle between halt the account with **Persistent Poll Error**,
@@ -1181,7 +1182,15 @@ adapter at submission.
   working. `reset_halt()` refuses with `halt_not_persisted` until then. A
   process that exits first restarts from the last written checkpoint,
   unhalted, and its drawdown breaker measures from the peak that checkpoint
-  holds.
+  holds. A drawdown breach or operator flatten does not wait for a store
+  outage, since that would leave the book open for as long as the store is
+  down: its cancels and exits go out with their rows held in memory for the
+  next checkpoint that lands, its alert says `not recorded yet`, and each
+  later cycle retries the checkpoint, then goes on with the cancels and
+  exits still owed. A restart before a checkpoint lands halts on any
+  position or untracked open order the flatten left at the venue, and sends
+  nothing. An
+  order whose placement write fails was not sent, and is not taken as sent.
 - Audit trail: every halt alert records one `halted` runtime event, so one
   stop can record several: a flatten whose exit fails records the exit's halt
   and its own, and a halt repeated on an already-halted account records again.

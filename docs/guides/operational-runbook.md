@@ -80,7 +80,7 @@ Poll cycle alerts (rules in
 
 | Alert title | Meaning | Action |
 |---|---|---|
-| Poll Error | Three cycles in a row failed, the message naming the last error: an outage (the venue or the state store gave no answer, such as an order status read that timed out), or any failure on a halted account. Each poll retries; not halted by this. While an order status read fails, the drawdown check waits with it, until Order Status Unavailable halts; a state store outage does not hold it, and a breach then alerts with `halt not persisted` ([Halt not persisted](#halt-not-persisted)) | Restore the store or check the venue, and watch the book if it lasts; nothing to do once it recovers |
+| Poll Error | Three cycles in a row failed, the message naming the last error: an outage (the venue or the state store gave no answer, such as an order status read that timed out), or any failure on a halted account. Each poll retries; not halted by this. While an order status read fails, the drawdown check waits with it, until Order Status Unavailable halts; a state store outage does not hold it, and a breach still cancels and closes, its alert saying `not recorded yet` ([Halt not persisted](#halt-not-persisted)) | Restore the store or check the venue, and watch the book if it lasts; nothing to do once it recovers |
 | Persistent Poll Error | Three cycles failed with an error that is not an outage, with no clean cycle between, such as a decision preflight refuses, a strategy or feature that raises, or an order status read the venue refused. Halted, tracked orders cancelled; the message names the last error | Fix what the error names, then `reset_halt()` |
 | Order Status Unavailable | A tracked order's status reads kept failing, with no answer between, for as long as Periodic Reconciliation Unavailable (below) lets reconciliation go unanswered; the message names the order and the last error. The book had no drawdown check all that time. Halted; the order's cancel goes by its order id, and one the venue does not confirm is sent again each cycle and alerts Order Stuck | Check the venue and the API key: a revoked key or a lost IP whitelist can read as an outage. Once Halt Cancellation Completed arrives, check the order and positions at the broker, then `reset_halt()` without delay: the drawdown check stays off until then |
 
@@ -335,7 +335,8 @@ A halt whose checkpoint write fails is still applied in memory
 
 | Alert | Meaning | Action |
 |---|---|---|
-| Any halt alert that says `halt not persisted (<error>)`; a flatten's alert may also say `exit submission failed` | Halted in memory; the state store refused the checkpoint. The halt has cancelled nothing yet, and a flatten that says `exit submission failed` or `exits wait on the working orders' cancellation` submitted nothing. Every later cycle retries the checkpoint and does nothing else until it succeeds, so a Poll Error alert follows if the outage lasts; `halt()` raises the same error until then | Keep the process running and restore the state store. Orders resting at the venue keep working meanwhile: cancel at the venue anything that must not fill. Do not close a flatten's or breach's positions at the venue while the process runs: its exits go out once the halt is recorded, sized from the ledger, and would send a second close |
+| Any halt alert that says `halt not persisted (<error>)`; a flatten's alert may also say `exit submission failed` | Halted in memory; the state store refused the checkpoint. The halt has cancelled nothing yet, and a flatten that says `exit submission failed` submitted nothing. Every later cycle retries the checkpoint and does nothing else until it succeeds, so a Poll Error alert follows if the outage lasts; `halt()` raises the same error until then | Keep the process running and restore the state store. Orders resting at the venue keep working meanwhile: cancel at the venue anything that must not fill |
+| **Max Drawdown Breach** or **Operator Flatten** that says `not recorded yet (<error>)` | The state store is down, but the flatten went ahead: its cancels and exits went out, their rows held in memory. Halted in memory. Each later cycle retries the checkpoint, then goes on with the cancels and exits still owed, so a Poll Error alert follows while the store is down | Keep the process running and restore the state store; **Halt Persisted** follows. Do not also close those positions at the venue while it runs: its exits are sized from the ledger and would send a second close. If the store stays down, see [Long store outage](#long-store-outage) |
 | Halt Persisted | The retry succeeded; a restart now resumes halted. A plain halt's cancellations go out now, and the alert names one that fails (below); a flatten's exits, including ones it could not record before, go out and keep working | Continue the normal halt review; `reset_halt()` stops refusing with `halt_not_persisted` |
 
 A halt alert that says `awaiting cancel confirmation for <orders>` lists the
@@ -395,6 +396,34 @@ checkpoint, unhalted: nothing in the engine can recover a halt the store never
 saw. Halt it again as soon as `trade.sh inspect` reports `phase=running`; a
 cycle can run before that halt lands, so if the book must not trade at all,
 close its risk at the broker before restarting.
+
+### Long store outage
+
+A process cannot start while the state store is down, and while it runs it
+decides nothing, though its drawdown breaker still acts. To close the book
+yourself instead, or to stop the process before the store returns:
+
+1. `./deploy/trade.sh stop <deployment_id>`. The container runs with
+   `--restart unless-stopped`, so a manual stop stays stopped. Stopping
+   cancels nothing, and nothing watches the book from here on.
+2. At the venue, cancel the account's open orders and close its positions
+   on the configured symbols.
+3. Start again only once the store answers. The process resumes from the
+   last checkpoint written before the outage, finds the venue differing
+   from it (an order it tracked and you cancelled reads **Order Cancelled**,
+   and **Position Reconciliation Mismatch** or **Orphan Broker Orders**
+   follows), halts
+   and sends nothing. So does a restart after a flatten that went ahead
+   unrecorded.
+4. `reset_halt()` cannot repair that book: the next reconciliation
+   mismatches again. Stop flat and start a new checkpoint, keeping the old
+   one for audit
+   ([Development checkpoint compatibility](optional-infrastructure.md#development-checkpoint-compatibility)).
+
+The stopped process's lease, a PostgreSQL advisory lock, may stay held until
+the server's own keepalive drops its connection, so the start in step 3 can
+be refused as owned by another process for a while (inferred from how the
+lease is held, not observed).
 
 ## Operator flatten
 

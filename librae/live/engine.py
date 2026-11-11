@@ -11,8 +11,9 @@ import logging
 import signal
 import types
 from collections import deque
-from collections.abc import Callable, Container, Mapping, Sequence
+from collections.abc import Callable, Container, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -1056,6 +1057,11 @@ class LiveTrader:
         # sink usually writes to the same database.
         self._checkpoint_failing = False
         self._held_runtime_events: list[RuntimeEvent] = []
+        # Inside ``_acting_through_store_outage``, the store outages its writes
+        # met; None outside it.
+        self._unrecorded: list[Exception] | None = None
+        # A store outage this poll cycle met and held until its risk checks ran.
+        self._held_store_outage: Exception | None = None
         self._pending_decision: StrategyDecision = []
         # Bar timestamp each pending intent first rested on, keyed by symbol.
         # A resting "day" limit expires against the session it first rested in.
@@ -1447,6 +1453,9 @@ class LiveTrader:
         later checkpoint, including a halt's, and its cancellation with it.
         A ``StateStoreUnavailableError`` skips that check: a timed-out row
         write, e.g. behind a lock on the row, was not refused.
+
+        Inside ``_acting_through_store_outage`` a store outage returns instead,
+        its rows still carried, with ``_checkpoint_failing`` left set.
         """
         if self._state_store is None:
             return
@@ -1455,18 +1464,51 @@ class LiveTrader:
         snapshot = self._snapshot_state()
         self._checkpoint_failing = True
         try:
-            self._state_store.save(snapshot, tuple(self._unpersisted_orders.values()))
+            try:
+                self._state_store.save(snapshot, tuple(self._unpersisted_orders.values()))
+            except Exception as exc:
+                if (
+                    isinstance(exc, StateStoreUnavailableError)
+                    or not self._unpersisted_orders
+                    or not self._store_accepts(snapshot)
+                ):
+                    self._log_checkpoint_failure(exc)
+                    raise
+                self._write_rows_one_by_one(snapshot)
         except Exception as exc:
-            if (
-                isinstance(exc, StateStoreUnavailableError)
-                or not self._unpersisted_orders
-                or not self._store_accepts(snapshot)
-            ):
-                self._log_checkpoint_failure(exc)
+            if self._unrecorded is None or not _is_outage(exc, (StateStoreUnavailableError,)):
                 raise
-            self._write_rows_one_by_one(snapshot)
+            self._unrecorded.append(exc)
+            return
         self._unpersisted_orders.clear()
         self._checkpoint_failing = False
+
+    @contextmanager
+    def _acting_through_store_outage(self) -> Iterator[None]:
+        """Let a flatten's cancels and exits reach the venue while the store is down.
+
+        Every order and cancel is otherwise recorded before it is sent, so a
+        restart can find it, and a store outage holds it back. For a flatten
+        that would leave the book open for as long as the store is down. In
+        here a write that meets an outage keeps its rows carried for the next
+        checkpoint that lands and the work goes on; the outermost scope then
+        raises the outage, as any failed write does. A restart before a
+        checkpoint lands starts from one that does not know this work:
+        startup reconciliation halts on the positions or untracked open orders
+        it left at the venue and sends nothing, and an order it cancelled reads
+        as one the venue ended.
+        """
+        if self._unrecorded is not None:
+            yield
+            return
+        self._unrecorded = []
+        try:
+            yield
+            unrecorded = self._unrecorded
+        finally:
+            self._unrecorded = None
+        if unrecorded:
+            raise unrecorded[0]
 
     def _store_accepts(self, snapshot: LiveRuntimeState) -> bool:
         """Write the snapshot with no rows; False means the store itself is failing."""
@@ -1561,8 +1603,12 @@ class LiveTrader:
 
         Called only where order work owns the outcome, never from inside a
         checkpoint: a sink error raised there would read as the checkpoint
-        failing, and a halt would report itself unpersisted.
+        failing, and a halt would report itself unpersisted. Nothing goes out
+        while the last checkpoint failed, as one acting through a store outage
+        does without raising.
         """
+        if self._checkpoint_failing:
+            return
         while self._unpublished_results:
             self._publish_action_results(self._unpublished_results.pop(0))
 
@@ -1725,8 +1771,20 @@ class LiveTrader:
             on_ohlcv=self._on_ohlcv,
             on_ohlcv_batch=self._on_ohlcv_batch,
             degraded=self._ohlcv_audit_degraded,
-            persist=self._persist_state,
+            persist=self._persist_audit_queue,
         )
+
+    def _persist_audit_queue(self) -> None:
+        """Checkpoint the audit rows a sink took off the queue; hold a store outage.
+
+        The sink may answer while the state store does not. Those rows are
+        off the queue in memory, so the next checkpoint that lands records
+        them, and the outage must not stop the cycle before its risk checks.
+        """
+        try:
+            self._persist_state()
+        except Exception as exc:
+            self._hold_store_outage(exc)
 
     def _staleness_grace(self, subscription: MarketDataSubscription) -> timedelta:
         return data_readiness.staleness_grace(
@@ -2327,7 +2385,8 @@ class LiveTrader:
 
         The halt is checkpointed before cancelling, and each cancel records
         itself. A failure of either still alerts, naming it, before it
-        propagates.
+        propagates. Within a flatten, a store outage holds back neither
+        (``_acting_through_store_outage``).
 
         On an account a flatten has halted or is halting, whose only orders
         are its exits, the exits keep working, as for a manual halt:
@@ -2433,6 +2492,10 @@ class LiveTrader:
 
         ``cancel_on_retry`` is whether the halt still owes a cancellation: a
         plain halt does, a flatten leaves its recovery exits working.
+
+        Acting through a store outage (``_acting_through_store_outage``), a
+        halt whose write fails returns no failure: its work goes on, and the
+        note says what a restart would find.
         """
         try:
             self._persist_state(*orders)
@@ -2444,6 +2507,15 @@ class LiveTrader:
             return exc, (
                 f"; halt not persisted ({type(exc).__name__}: {exc}), "
                 "so a restart now would resume unhalted"
+            )
+        if self._checkpoint_failing and self._unrecorded:
+            error = self._unrecorded[-1]
+            self._halt_unpersisted = True
+            logger.error("Halt checkpoint not written: %s", error)
+            return None, (
+                f"; not recorded yet ({type(error).__name__}: {error}), so a restart now "
+                "would start unhalted from the last checkpoint and halt only if the venue's "
+                "positions or open orders differ from it"
             )
         return None, ""
 
@@ -2508,9 +2580,31 @@ class LiveTrader:
         flatten that waited on it sends its exits. Returns whether it sent the
         cancellation pass, which already polled and cancelled every tracked
         order, or those exits, which already advanced the queue.
+
+        A flatten's halt is the exception: its cancels and exits go on through
+        a store outage (``_acting_through_store_outage``). While the halt itself
+        is unrecorded the outage then stops the cycle, so its exits are also
+        advanced here.
         """
+        if not self._flatten_owns_halt():
+            return self._retry_halt_work()
+        with self._acting_through_store_outage():
+            sent = self._retry_halt_work()
+            if self._halt_unpersisted and not sent:
+                self._advance_live_orders()
+                sent = True
+        return sent
+
+    def _flatten_owns_halt(self) -> bool:
+        """Whether a halted account's order work is a flatten's: its exits, sent or waiting."""
+        return self._halted and (
+            self._pending_flatten is not None or self._has_active_recovery_orders()
+        )
+
+    def _retry_halt_work(self) -> bool:
         if self._halt_unpersisted:
             self._persist_state()
+        if self._halt_unpersisted and not self._checkpoint_failing:
             self._halt_unpersisted = False
             logger.warning("Halt checkpoint persisted")
             failure, note = None, ""
@@ -2798,7 +2892,7 @@ class LiveTrader:
                             "owed; no order is tracked.",
                         )
                 else:
-                    self._advance_live_orders(submit_planned=False)
+                    self._advance_live_orders(submit_planned=False, restoring=True)
             except Exception as exc:
                 self._halt_order_reconciliation(exc, halted=restored_halted)
             halted = self._halted
@@ -3305,6 +3399,26 @@ class LiveTrader:
             signal.signal(signal.SIGUSR2, _halt_reset_handler)
 
     def _poll_cycle(self) -> None:
+        """Run one poll cycle, then raise a state store outage it held.
+
+        A store outage fails the writes of order work and of the audit queue,
+        not the risk checks on what that work read and booked: an order can
+        rest through the whole outage. So the cycle holds the outage until
+        those checks have run and then fails, before any decision.
+        """
+        self._held_store_outage = None
+        self._run_poll_cycle()
+        if self._held_store_outage is not None:
+            raise self._held_store_outage
+
+    def _hold_store_outage(self, error: Exception) -> None:
+        """Hold a state store outage for ``_poll_cycle`` to raise; raise anything else."""
+        if not _is_outage(error, (StateStoreUnavailableError,)):
+            raise error
+        if self._held_store_outage is None:
+            self._held_store_outage = error
+
+    def _run_poll_cycle(self) -> None:
         """Process completed market-data events without live catch-up orders."""
         self._order_pass += 1
         # An order that ended once its answers applied again resolves; one
@@ -3343,37 +3457,36 @@ class LiveTrader:
             if self._run_requested_halt_reset():
                 # A halt requested while the reset applied still wins this cycle.
                 cancelled = self._run_requested_halt() or cancelled
-        # A store outage fails the order work's writes, not the risk checks on
-        # what it read and booked: an order can rest through the whole outage.
-        # The outage fails the cycle once they have run. Nothing reaches the
-        # venue before its write, so a halt they make waits for its checkpoint.
-        store_outage: Exception | None = None
         # Order work that hit a store outage may have left ledger rows and
         # fills behind, with no later order work to carry them.
         if self._unpersisted_orders:
             try:
                 self._persist_state()
             except Exception as exc:
-                if not _is_outage(exc, (StateStoreUnavailableError,)):
-                    raise
-                store_outage = exc
-        if store_outage is None:
-            self._publish_checkpointed_results()
+                self._hold_store_outage(exc)
+        self._publish_checkpointed_results()
         # After the halt retry, which may land the checkpoint they wait on,
         # and never ahead of a requested halt.
         self._offer_held_runtime_events()
         self._flush_pending_position_events(count_attempt=True)
         if not self._executor.simulation and self._active_orders and not cancelled:
             try:
-                self._advance_live_orders()
+                if self._flatten_owns_halt():
+                    with self._acting_through_store_outage():
+                        self._advance_live_orders()
+                else:
+                    # In an outage, read and book but place nothing: its write would fail.
+                    self._advance_live_orders(submit_planned=self._held_store_outage is None)
             except Exception as exc:
-                if not _is_outage(exc, (StateStoreUnavailableError,)):
-                    raise
-                store_outage = exc
-        if store_outage is not None:
+                self._hold_store_outage(exc)
+        if self._held_store_outage is not None:
             # A fill booked before its write failed skipped this check.
             self._post_fill_risk_halted()
-        self._run_requested_flatten()
+        try:
+            with self._acting_through_store_outage():
+                self._run_requested_flatten()
+        except Exception as exc:
+            self._hold_store_outage(exc)
         # Retry unacknowledged audit rows every cycle, not only when a new bar
         # arrives: a stalled feed would otherwise leave them queued
         # indefinitely while the database recovers.
@@ -3383,15 +3496,11 @@ class LiveTrader:
         if any(result.outcome != "success" for result in fetch_results.values()):
             if not self.warmup_ready:
                 self._report_incomplete_warmup()
-            if store_outage is not None:
-                raise store_outage
             return
         if self._on_heartbeat:
             self._on_heartbeat(self._run_id)
         if not self.warmup_ready:
             self._report_incomplete_warmup()
-            if store_outage is not None:
-                raise store_outage
             return
         if self._reported_warmup_reasons:
             logger.info(
@@ -3441,7 +3550,7 @@ class LiveTrader:
         # active order so a later bar cannot create a conflicting order queue,
         # after a reset behind a periodic round that answered and matched, and
         # behind a store outage the order work met, whose rows are unwritten.
-        if store_outage is not None or (
+        if self._held_store_outage is not None or (
             not self._executor.simulation
             and (self._active_orders or self._halted or self._resume_unverified)
         ):
@@ -3449,8 +3558,6 @@ class LiveTrader:
             # owns the working orders and closes the book itself.
             if not (self._halted or self._resume_unverified or self._flatten_cancels_this_cycle()):
                 self._check_drawdown_while_orders_work(frames)
-            if store_outage is not None:
-                raise store_outage
             return
 
         # A required subscription with no usable observation blocks evaluation
@@ -5416,7 +5523,7 @@ class LiveTrader:
         finally:
             self._cycle_order_seconds += perf_counter() - started
 
-    def _advance_live_orders(self, *, submit_planned: bool = True) -> None:
+    def _advance_live_orders(self, *, submit_planned: bool = True, restoring: bool = False) -> None:
         """Poll or submit the head order; dependent orders stay serialized.
 
         A requested flatten does this work itself, reading, booking and
@@ -5424,6 +5531,9 @@ class LiveTrader:
         cancel or a fill past a risk limit would halt the account, which then
         refuses the flatten and leaves its positions open, and a queued order
         would go out ahead of it.
+
+        ``submit_planned`` False places no queued order. ``restoring`` is the
+        startup restore, where an answer that does not apply fails closed.
         """
         while self._active_orders and (
             not self._halted
@@ -5431,7 +5541,7 @@ class LiveTrader:
             or self._active_orders[0].cancel_requested
             or self._active_orders[0].status == "cancel_pending"
         ):
-            if submit_planned and self._flatten_cancels_this_cycle():
+            if not restoring and self._flatten_cancels_this_cycle():
                 return
             tracked = self._active_orders[0]
             request = tracked.request
@@ -5480,6 +5590,7 @@ class LiveTrader:
                 attempted_at = self._clock()
                 if attempted_at.tzinfo is None:
                     raise ValueError("clock must return a timezone-aware datetime")
+                unsent = (set(self._unstarted_groups), self._leg_ahead_of_bar)
                 tracked.placement_attempted = True
                 tracked.placement_attempted_at = attempted_at.astimezone(UTC)
                 # Its first leg starts a group, recorded in the same write.
@@ -5487,7 +5598,15 @@ class LiveTrader:
                     self._unstarted_groups.discard(request.group_id)
                 if self._live_rebalance is not None and self._rebalance_bar is None:
                     self._leg_ahead_of_bar = True
-                self._persist_state(tracked)
+                try:
+                    self._persist_state(tracked)
+                except Exception:
+                    # Nothing was sent, so nothing may read it as sent: a later
+                    # poll would look it up, find nothing and halt as ambiguous.
+                    tracked.placement_attempted = False
+                    tracked.placement_attempted_at = None
+                    self._unstarted_groups, self._leg_ahead_of_bar = unsent
+                    raise
                 try:
                     report = self._timed_order_call(
                         lambda request=request: self._executor.submit_order(request)
@@ -5541,7 +5660,7 @@ class LiveTrader:
                 except ValueError as exc:
                     self._status_unread_since = None
                     self._poll_answer_not_applied(
-                        tracked, tracked.order_id, exc, submit_planned=submit_planned
+                        tracked, tracked.order_id, exc, restoring=restoring
                     )
                     return
                 except Exception as exc:
@@ -5589,7 +5708,7 @@ class LiveTrader:
                     tracked,
                     tracked.order_id or report.order_id,
                     exc,
-                    submit_planned=submit_planned,
+                    restoring=restoring,
                 )
                 return
             except Exception:
@@ -5714,7 +5833,7 @@ class LiveTrader:
         )
 
     def _poll_answer_not_applied(
-        self, tracked: TrackedOrder, order_id: str, error: ValueError, *, submit_planned: bool
+        self, tracked: TrackedOrder, order_id: str, error: ValueError, *, restoring: bool
     ) -> None:
         """Alert a polled answer that does not apply to its order, whether read or applied.
 
@@ -5726,7 +5845,7 @@ class LiveTrader:
         self._note_unappliable(tracked)
         failure = _report_failure(tracked.request, order_id, error)
         timed_out = self._live_order_timed_out(tracked)
-        if not submit_planned and not timed_out:
+        if restoring and not timed_out:
             raise ValueError(failure) from error
         self._alert_report_not_applied(
             tracked,
@@ -7176,12 +7295,13 @@ class LiveTrader:
             and not self._halted
             and drawdown <= -self._risk_policy.max_drawdown_rate
         ):
-            self._flatten_account_and_halt(
-                ts,
-                reason=REASON_DRAWDOWN_BREACH,
-                title="Max Drawdown Breach",
-                detail=f"drawdown={drawdown:.2%} <= -{self._risk_policy.max_drawdown_rate:.2%}",
-            )
+            with self._acting_through_store_outage():
+                self._flatten_account_and_halt(
+                    ts,
+                    reason=REASON_DRAWDOWN_BREACH,
+                    title="Max Drawdown Breach",
+                    detail=f"drawdown={drawdown:.2%} <= -{self._risk_policy.max_drawdown_rate:.2%}",
+                )
             equity, _ = self._calc_account_snapshot()
             drawdown = (
                 (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
@@ -7302,6 +7422,10 @@ class LiveTrader:
         Sending them alerts the outcome under the same title, which the
         breach's own alert could not know, but records no second ``halted``
         event: the breach halted the account once.
+
+        Callers run it in ``_acting_through_store_outage``, so a store outage
+        holds back neither the cancels nor the exits; the alert then says the
+        halt is not recorded yet.
         """
         halted = self._halted
         exit_queued = False
@@ -7358,8 +7482,9 @@ class LiveTrader:
                 if self._halted and not halted:
                     # A halt during submission has alerted already.
                     raise
-                # Queueing the exits checkpoints them first, so a store
-                # outage fails here, before the account is halted.
+                # Queueing the exits checkpoints them first, so a failed
+                # write other than a store outage fails here, before the
+                # account is halted.
                 submit_failure = exc
                 flattened = False
             finally:
