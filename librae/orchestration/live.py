@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -206,7 +207,11 @@ def _build_state_store() -> object:
 
 
 class _TimescaleCallbacks:
-    """Reference DB sink; run identity is required, analytics are best-effort."""
+    """Reference DB sink; run identity is required, analytics are best-effort.
+
+    ``_write`` runs on the trading loop, so it bounds each write's
+    statements (``_bounded_statements``).
+    """
 
     def __init__(
         self,
@@ -237,9 +242,13 @@ class _TimescaleCallbacks:
         *args: object,
         critical: bool = False,
         propagate: bool = False,
+        bounded: bool = True,
         **kwargs: object,
     ) -> None:
         """Run one best-effort DB write.
+
+        ``bounded=False`` leaves the statement timeout to the callback, for
+        reporting whose reads legitimately grow with the run.
 
         ``propagate=True`` re-raises after recording, for a caller that owns
         retry. Swallowing there would be read as acknowledgement and the work
@@ -251,9 +260,12 @@ class _TimescaleCallbacks:
         recoverable next-bar snapshot such as equity_curve. Run registration
         uses a separate fail-closed path because it is a foreign-key parent.
         """
+        from librae.db import _bounded_statements
+
         name = callback.__name__
         try:
-            callback(*args, **kwargs)
+            with _bounded_statements() if bounded else nullcontext():
+                callback(*args, **kwargs)
             self._failures[name] = 0
         except BarTimestampError:
             # Refused input, not a failing database: the caller handles it.
@@ -577,7 +589,7 @@ class _TimescaleCallbacks:
     def on_performance(self, run_id: str, account_id: str) -> None:
         from librae.db.timescale_writer import refresh_performance
 
-        self._write(refresh_performance, run_id, account_id, config=self._config)
+        self._write(refresh_performance, run_id, account_id, config=self._config, bounded=False)
 
 
 def build_live_trader(

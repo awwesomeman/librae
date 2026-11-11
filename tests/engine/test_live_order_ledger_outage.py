@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 from librae.core.strategy import OrderIntent
+from librae.live.state import StateStoreUnavailableError
 
 from tests.engine.live_factories import TEST_CLOCK_NOW
 from tests.engine.test_live_flatten import _bars, _titled, _trader
@@ -467,6 +468,41 @@ class TestRejectedOrderRow:
         assert trader.order_ledger_degraded is False
         assert _titled(alerts, "Order Row Rejected") == []
         outage["down"] = False
+        trader._poll_cycle()
+        assert _ledger(trader, aaa).status == "filled"
+
+    def test_a_row_write_that_times_out_behind_a_lock_is_kept_not_dropped(self):
+        """A lock held on its row times the upsert out while the snapshot alone
+        still lands; the store raises that as unavailable, never a refusal."""
+        adapter = _resting_adapter()
+        trader, events, alerts = _trader(adapter)
+        _buy_two(trader)
+        aaa, _ = trader._active_orders
+        aaa_id = aaa.request.client_order_id
+        store = trader._state_store
+        save = store.save
+        lock = {"held": True}
+        calls: list[tuple[str, ...]] = []
+
+        def save_behind_a_row_lock(state, orders=()):
+            calls.append(tuple(order.request.client_order_id for order in orders))
+            if lock["held"] and aaa_id in calls[-1]:
+                raise StateStoreUnavailableError(
+                    "QueryCanceled: canceling statement due to statement timeout"
+                )
+            save(state, orders)
+
+        store.save = save_behind_a_row_lock
+
+        with pytest.raises(StateStoreUnavailableError):
+            _fill_first(trader, adapter)
+
+        assert calls == [(aaa_id,)]
+        assert list(trader._unpersisted_orders) == [aaa_id]
+        assert _rejected(events) == []
+        assert trader.order_ledger_degraded is False
+        assert _titled(alerts, "Order Row Rejected") == []
+        lock["held"] = False
         trader._poll_cycle()
         assert _ledger(trader, aaa).status == "filled"
 
