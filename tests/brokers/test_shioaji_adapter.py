@@ -519,10 +519,103 @@ class TestTaifexSessionBars:
             1140,
         )
 
-    def test_a_print_after_the_close_is_dropped_not_a_stub_bar(self, caplog):
-        """A print stamped one minute past the last day minute starts at the
-        13:45 close, which is outside the session."""
-        late = {"ts": "2026-11-02 13:46", "Open": 20000, "High": 20000}
+    @pytest.mark.parametrize(
+        ("closing_stamp", "last_minute", "hour", "four_hours", "four_hour_volume", "day_close"),
+        [
+            # Day close: kbars() stamps the 13:45:00 trades 13:46.
+            (
+                "2026-11-02 13:46",
+                "2026-11-02 13:44",
+                "2026-11-02 12:45",
+                "2026-11-02 12:45",
+                63,
+                20000,
+            ),
+            # Night close, past midnight into a Saturday: 05:00:00 trades stamped 05:01.
+            (
+                "2026-10-31 05:01",
+                "2026-10-31 04:59",
+                "2026-10-31 04:00",
+                "2026-10-31 03:00",
+                123,
+                11140,
+            ),
+        ],
+    )
+    def test_trades_at_a_segment_close_join_its_last_bar(
+        self, closing_stamp, last_minute, hour, four_hours, four_hour_volume, day_close, caplog
+    ):
+        """Some contracts' kbars() put the trades matched at a segment close
+        in a minute stamped one past it, which starts at the close."""
+        closing = {"ts": closing_stamp, "Open": 20000, "High": 20000}
+        closing |= {"Low": 20000, "Close": 20000, "Volume": 3}
+        kbars = _txfr1_kbars(extra=closing)
+
+        with caplog.at_level("WARNING"):
+            minutes = _fetch_txfr1("1m", kbars)
+            hours = _fetch_txfr1("1h", kbars)
+            four = _fetch_txfr1("4h", kbars)
+            days = _fetch_txfr1("1d", kbars)
+
+        assert "dropped" not in caplog.text
+        assert len(minutes) == 1140, "no minute of its own"
+        last = minutes.loc[_taipei(last_minute)]
+        assert (last["high"], last["close"], last["volume"]) == (20000, 20000, 4)
+        assert (hours.loc[_taipei(hour), "close"], hours.loc[_taipei(hour), "volume"]) == (
+            20000,
+            63,
+        )
+        assert four.loc[_taipei(four_hours), "volume"] == four_hour_volume
+        assert (days.iloc[0]["close"], days.iloc[0]["volume"]) == (day_close, 1143)
+
+    def test_a_closing_minute_with_no_minute_before_it_becomes_the_last(self):
+        """A thin contract may trade only at the close in the last minute."""
+        closing = {"ts": "2026-11-02 13:46", "Open": 20000, "High": 20000}
+        closing |= {"Low": 20000, "Close": 20000, "Volume": 3}
+
+        minutes = _fetch_txfr1("1m", _txfr1_kbars(through="2026-11-02 13:40", extra=closing))
+
+        assert minutes.index[-2:].tolist() == [
+            _taipei("2026-11-02 13:39"),
+            _taipei("2026-11-02 13:44"),
+        ]
+        assert minutes.iloc[-1]["volume"] == 3
+
+    def test_index_minutes_past_the_xtai_close_are_not_folded(self):
+        """Index kbars run minutes past 13:30; none of them is known to hold
+        closing trades, so the frame keeps them as they come."""
+        from librae.brokers.shioaji_adapter import _kbar_frame
+
+        raw = _raw_kbars(pd.date_range("2026-11-05 13:29", "2026-11-05 13:34", freq="min"))
+
+        frame = _kbar_frame([raw], "XTAI")
+
+        assert frame["ts"].tolist() == [
+            _taipei(f"2026-11-05 13:{minute}") for minute in range(28, 34)
+        ]
+        assert frame["volume"].tolist() == [1] * 6
+
+    def test_a_fold_merges_only_the_closing_minute(self):
+        """A repeated minute elsewhere in the answer is left for the caller,
+        not summed by the fold."""
+        from librae.brokers.shioaji_adapter import _kbar_frame
+
+        repeated = {"ts": "2026-11-02 10:00", "Open": 1, "High": 1, "Low": 1, "Close": 1}
+        raw = _txfr1_kbars(extra=repeated | {"Volume": 1})
+        closing = {"ts": "2026-11-02 13:46", "Open": 20000, "High": 20000}
+        closing |= {"Low": 20000, "Close": 20000, "Volume": 3}
+        for column, value in _raw_kbars(pd.DatetimeIndex([]), extra=closing).items():
+            raw[column] = raw[column] + value
+
+        frame = _kbar_frame([raw], "XTAIFEX")
+
+        assert (frame["ts"] == _taipei("2026-11-02 09:59")).sum() == 2
+        assert frame.loc[frame["ts"] == _taipei("2026-11-02 13:44"), "volume"].tolist() == [4]
+
+    def test_a_print_past_the_closing_minute_is_still_dropped(self, caplog):
+        """Only the minute starting at the close holds closing trades; one
+        starting later is an off-hours print, dropped as before."""
+        late = {"ts": "2026-11-02 13:47", "Open": 20000, "High": 20000}
         late |= {"Low": 20000, "Close": 20000, "Volume": 1}
         kbars = _txfr1_kbars(extra=late)
 

@@ -472,7 +472,11 @@ Taiwan-futures night session with its following regular-session date.
 Shioaji's clock correction remains adapter-specific and is not a calendar:
 `librae.brokers.shioaji_time.shioaji_kbar_starts` turns its raw kbar stamp, a
 Taipei wall clock posing as UTC that marks the minute's end, into the UTC
-minute start.
+minute start. Some TAIFEX futures' kbars give the trades matched at a
+segment's closing instant a minute of their own, stamped one past the close;
+on the TAIFEX calendars the adapter merges that minute into the segment's last
+one, so those trades count toward the session they closed. Stock and index
+kbars are not covered: whether theirs do the same is unverified.
 
 Session bars follow the venue's attribution rule. Intraday buckets count from
 each segment's open (`XTAIFEX`: 15:00 night, 08:45 day), so a bucket the
@@ -488,9 +492,10 @@ session, and Q11 publishes each session's prices separately. TradingView's
 45000/45265/44700/45057).
 
 Segments are half-open: `XTAIFEX`'s are `[15:00, 05:00)` and `[08:45, 13:45)`,
-so the last day minute starts at 13:44. A print stamped at a close or later
-came after it and belongs to no bar of that session: resampling drops it with
-a warning rather than opening a one-minute stub bar. An execution is an
+so the last day minute starts at 13:44. A minute starting at a close or later
+belongs to no bar of that session: resampling drops it with a warning rather
+than opening a one-minute stub bar. An adapter whose vendor puts the closing
+trades in such a minute folds them into the last one first. An execution is an
 instant, not a bar: a fill stamped at a close, or between segments, counts
 toward the session that last traded (`execution_session_label`), and that is
 the session its ADV budget books; one stamped after a close is logged.
