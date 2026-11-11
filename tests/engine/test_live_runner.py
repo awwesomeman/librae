@@ -7030,7 +7030,6 @@ class TestLiveExecutionLifecycle:
         adapter.place_order.return_value = accepted
         adapter.get_order.side_effect = [
             accepted,
-            accepted,
             {
                 "id": "open-1",
                 "status": "cancelled",
@@ -7062,15 +7061,16 @@ class TestLiveExecutionLifecycle:
         now[0] += timedelta(seconds=30)
         runner._poll_cycle()
 
-        assert runner._halted is True
-        # The halt's status read, just after the cancel, still says accepted.
-        assert runner._active_orders[0].status == "accepted"
+        # Acknowledged, not ended: the next poll reads how it ended.
+        assert runner._halted is False
+        assert runner._active_orders[0].status == "cancel_pending"
         assert runner._active_orders[0].cancel_requested is True
         adapter.cancel_order.assert_called_once()
 
         runner._poll_cycle()
 
         assert runner._active_orders == []
+        assert runner._halted is True, "an ungrouped order's timeout halts"
         adapter.cancel_order.assert_called_once()
 
     def test_timeout_cancels_when_status_lookup_raises(self):

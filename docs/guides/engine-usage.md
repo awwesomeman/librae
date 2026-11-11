@@ -340,11 +340,15 @@ currently exposes a venue-native combo order, so live execution submits each
 leg of a group serially. If any leg in a group is rejected, cancelled, or
 times out, the engine cancels that group's remaining legs and alerts —
 unrelated groups and independent intents keep executing; it does not attempt
-to unwind legs that already filled. A `PortfolioWeights` rebalance whose
+to unwind legs that already filled. Its unsent legs leave the queue in the
+write that records the failed leg, so a restart never finds them queued
+without it. A `PortfolioWeights` rebalance whose
 grouped leg fails that way stops whole without halting, because replanning
 it would send the same leg again. The strategy's decision on the next bar
 replans from the current book: on the bar the failed leg was planned on the
-strategy is not evaluated, so a leg goes out at most once per bar. The stop
+strategy is not evaluated, so a leg goes out at most once per bar. A leg the
+order poll sent ahead of any bar, such as one a failed write left queued,
+went out on the next bar processed, which is held instead. The stop
 holds in the process before it is written: its alert goes out, saying
 `not recorded yet (<error>)` if the state store fails the write, and the
 error then fails the cycle; the poll's retry of the bar neither replans nor
@@ -659,7 +663,10 @@ for example when a withdrawal left the account holding less than the ledger.
 While an order remains active, polling still refreshes the OHLCV cache,
 heartbeat, and staleness state, but it does not run a new strategy decision.
 An optional local wall-clock timeout cancels an over-age order, preserves any
-confirmed partial fill, and halts dependent work for review. A cancel the
+confirmed partial fill, and halts dependent work for review. A timeout's
+cancel the venue takes without ending the order, such as one answered
+`cancel_pending`, keeps the order tracked, and a later cycle fails it as the
+timeout would once the venue confirms it ended. A cancel the
 engine sent goes out at most once per cycle, and not again while the venue
 reports it `cancel_pending`; one the venue turns down, leaving the order
 working, is sent again, and so is one whose status a later cycle cannot read
@@ -668,8 +675,14 @@ that fails, other than with an answer the executor refuses, fails the cycle
 before the order's timeout, naming the order, so a **Poll Error** that
 follows says which order it is. An order the venue reports `cancel_pending`
 on its own is polled until it ends, and is under its timeout again if it
-reverts to working. A status report that cannot be read or applied to its
-order (a status the executor does not know, another order id, a cumulative
+reverts to working. An order still tracked with nothing ending it alerts
+**Order Stuck**, naming it and repeating while it lasts, and the engine keeps
+waiting rather than cancelling or halting: an engine cancel the venue has not
+confirmed a cycle after the one that first found it so, a cancel the venue
+started on its own that outlasts the order's timeout, and an order still
+working one bar after placement with no timeout, by when the strategy has
+skipped a decision behind it. A status report that cannot be read or applied
+to its order (a status the executor does not know, another order id, a cumulative
 fill that went backwards) leaves the order tracked and under its timeout,
 alerts naming it, repeating while it lasts (see the runbook's
 [lasting problems](operational-runbook.md#lasting-problems)), and lets the
@@ -931,13 +944,16 @@ exceeded `RunConfig.runtime.poll_seconds`.
 - `live_order_timeout_seconds`: optional live-only local safety timeout measured
   from the persisted wall-clock placement attempt. On expiry the engine first
   refreshes the broker report, requests cancellation only if the order remains
-  non-terminal, applies any additional cumulative fill, then halts. `None`
-  leaves lifetime to the broker. This is a client-side wall-clock watchdog,
-  not broker-native time-in-force, and composes with `OrderIntent.time_in_force`
-  rather than replacing it: time-in-force governs what the *exchange* does
-  when an order can't immediately match; this timeout is the engine's own
-  backstop for cancelling a still-resting `day`/`gtc` order after N seconds
-  regardless of its time-in-force.
+  non-terminal, applies any additional cumulative fill, then fails the order
+  as **Order Timeout** once the venue confirms it ended. `None` leaves
+  lifetime to the broker, and an order still working a bar after placement
+  then alerts **Order Stuck** instead: a default timeout would cancel a `day`
+  or `gtc` limit left resting by design. This is a client-side wall-clock
+  watchdog, not broker-native time-in-force, and composes with
+  `OrderIntent.time_in_force` rather than replacing it: time-in-force governs
+  what the *exchange* does when an order can't immediately match; this
+  timeout is the engine's own backstop for cancelling a still-resting
+  `day`/`gtc` order after N seconds regardless of its time-in-force.
 
 `OrderIntent.time_in_force` (`"day"` / `"gtc"` / `"ioc"` / `"fok"`) sets the
 order's lifetime. Leaving it unset (`None`) keeps the default one-event

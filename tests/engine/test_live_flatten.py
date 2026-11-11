@@ -1143,11 +1143,12 @@ class TestAnExitAHaltEnds:
 
     The other exits keep working, as for a manual halt, and the order poll
     finishes that one cancel without halting again. An exit a halt ends
-    leaves its position open, so it is recorded as any failed exit.
+    leaves its position open, so it is recorded as any failed exit. One whose
+    timeout's cancel the venue only acknowledged ends the same way, with no
+    halt at all.
     """
 
-    @pytest.mark.parametrize("cancel", ["pending", "unanswered"])
-    def test_a_halt_for_one_exit_keeps_the_others_working(self, cancel):
+    def test_a_halt_for_one_exit_keeps_the_others_working(self):
         adapter = _adapter(below_minimum="")
         now = [TEST_CLOCK_NOW]
         trader, events, alerts = _working_exits(adapter, now)
@@ -1155,16 +1156,14 @@ class TestAnExitAHaltEnds:
         trader._poll_cycle()
         aaa, bbb, dust = trader._active_orders
 
-        def cancel_order(order_id, _symbol):
-            if cancel == "unanswered":
-                raise RuntimeError("venue did not answer the cancel")
-            return {**_accepted(order_id), "status": "pending_cancel"}
+        def cancel_order(_order_id, _symbol):
+            raise RuntimeError("venue did not answer the cancel")
 
         adapter.cancel_order.side_effect = cancel_order
         now[0] += timedelta(seconds=30)
         trader._poll_cycle()
 
-        title = "Order Timeout Cancellation " + ("Unresolved" if cancel == "pending" else "Failed")
+        title = "Order Timeout Cancellation Failed"
         [halt] = _titled(alerts, title)
         assert (
             "cancelling that order only; other recovery exits: 0 working, 2 queued unsent"
@@ -1185,6 +1184,39 @@ class TestAnExitAHaltEnds:
         assert [event.detail["reason"] for event in events if event.event_type == "halted"] == [
             "Operator Flatten",
             title,
+        ]
+        assert trader._active_orders == [bbb, dust]
+        assert _submitted(adapter) == ["AAA", "BBB"]
+        [skip] = _skips(events, "close_cancelled")
+        assert skip.symbol == "AAA"
+        assert skip.detail["message"] == "ended cancelled after a cancel the engine requested"
+
+    def test_an_exit_whose_timeout_cancel_is_only_acknowledged_ends_without_a_halt(self):
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        trader, events, alerts = _working_exits(adapter, now)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        aaa, bbb, dust = trader._active_orders
+        adapter.cancel_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": "pending_cancel",
+        }
+        now[0] += timedelta(seconds=30)
+        trader._poll_cycle()
+
+        assert (aaa.status, aaa.cancel_requested) == ("cancel_pending", True)
+        assert trader._active_orders == [aaa, bbb, dust]
+        adapter.get_order.side_effect = lambda order_id, _symbol: (
+            {**_accepted(order_id), "status": "canceled"}
+            if order_id == aaa.order_id
+            else _accepted(order_id)
+        )
+        trader._poll_cycle()
+
+        assert _titled(alerts, "Order Timeout") == []
+        assert [event.detail["reason"] for event in events if event.event_type == "halted"] == [
+            "Operator Flatten"
         ]
         assert trader._active_orders == [bbb, dust]
         assert _submitted(adapter) == ["AAA", "BBB"]

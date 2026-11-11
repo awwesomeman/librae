@@ -90,17 +90,19 @@ Order placement alerts (rules in
 
 | Alert title | Meaning | Action |
 |---|---|---|
-| Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled, and a target rebalance stopped until the next bar's decision. A target rebalance leg that fails unfilled when its symbol's leg also did on the previous target rebalance, with no fill since, halts instead, and the alert says so; so does one ending as Order Cancelled or Order Timeout. An alert that says `not recorded yet (<error>)` met a state store outage: the stop holds in the process and a Poll Error follows while the store is down. A failed flatten or drawdown exit alerts as Close Rejected or Close Cancelled instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted; after a repeated rebalance leg failure the next decision sends the leg again, so fix its cause first. For a store outage, restore the store; a restart before it recovers may send the leg once more |
+| Order Rejected | The venue refused the order, with its reason after `venue:`, or reported it rejected. Nothing rests at the venue for it. Halted for an ungrouped order or an account-level refusal (credentials, permissions, clock); otherwise only its group was cancelled, and a target rebalance stopped until the next bar's decision. A target rebalance leg that fails unfilled when its symbol's leg also did on the previous target rebalance, with no fill since, halts instead, and the alert says so; so does one ending as Order Cancelled or Order Timeout. An alert that says `not recorded yet (<error>)` met a state store outage: the stop, and the group's unsent legs it dropped, hold in the process and a Poll Error follows while the store is down. A failed flatten or drawdown exit alerts as Close Rejected or Close Cancelled instead (see [Unclosable remainders](#unclosable-remainders)) | Fix what the reason names, then `reset_halt()` if halted; after a repeated rebalance leg failure the next decision sends the leg again, so fix its cause first. For a store outage, restore the store; a restart before it recovers may send the leg once more |
 | Ambiguous Order Placement | Placement failed with an error the adapter could not classify and the client-id lookup found nothing: the order may still exist at the venue; halted. The error is in the order's `broker_orders.error` | Check the broker's order history for the client order id. `reset_halt()` refuses (`unresolved_broker_orders`) until the engine resolves the order |
-| Post-fill Risk Breach | A confirmed entry fill, from a status read or a cancel's answer, took the account past `max_position_weight` or the gross or net exposure limit (the message names the limit and the order); halted, every tracked order cancelled. It takes precedence over Order Rejected, Order Cancelled, Order Timeout or Order Timeout Cancellation Unresolved for that order | Find why the fill exceeded what was sized, such as a fill on a cancel that arrived late, then `reset_halt()` |
+| Post-fill Risk Breach | A confirmed entry fill, from a status read or a cancel's answer, took the account past `max_position_weight` or the gross or net exposure limit (the message names the limit and the order); halted, every tracked order cancelled. It takes precedence over Order Rejected, Order Cancelled or Order Timeout for that order | Find why the fill exceeded what was sized, such as a fill on a cancel that arrived late, then `reset_halt()` |
 | Order Report Not Applied | The venue's status answer for the named order does not match what the engine tracks, or the executor could not read it (the message says how). The order stays tracked and under its timeout, if one is set, which cancels it; without one the strategy stays blocked behind it. Not halted. Repeats as a [lasting problem](#lasting-problems); the cases met while cancelling are under [Halt not persisted](#halt-not-persisted) | Compare that order and its position at the broker with the ledger, and fix the adapter or venue cause |
+| Order Stuck | The named order is still tracked with nothing ending it, and no strategy decision runs while it is. One of: the venue has not confirmed a cancel the engine sent, a cycle after the one that first found it so, and the message says what the venue last answered or which status read and cancel failed; the venue has not finished a cancel it started itself, past the order's timeout or, with none, a bar after placement; or the order is still working a bar after placement with no `live_order_timeout_seconds`. Not halted: the engine keeps waiting, and resends its own cancel each cycle unless the venue reports it pending. Repeats as a [lasting problem](#lasting-problems) | Check the order at the venue: whether it is still working, and whether the venue answers for it at all. Cancel it there if it must not fill, or `halt()` to stop the account. An order without a timeout may rest by design, such as a `gtc` limit; set `live_order_timeout_seconds` if the strategy should not wait on one |
 | Insufficient Free Balance, Free Balance Unavailable, Unpriced Entry | An entry, or a whole group with an entry leg, was not submitted: the broker's free balance was below its requirement, could not be read, or the requirement could not be priced (the alert names the amounts or the error). The other queued orders still went out, and a target rebalance stopped until the next bar's decision; not halted. The alert repeats for a cause and symbol only after a check for that symbol passes or `reset_halt()`; every refusal is still a `decision_skipped` event | Restore the balance, or stop flat and start from the broker balance (see the `reset_halt()` step of [Kill-switch rehearsal](#kill-switch-rehearsal)); for an unreadable balance or price, fix what the error names. A rotation refused for want of cash its own exit would free must list that exit first |
 
 ### Lasting problems
 
-**Order Report Not Applied**, **Operator Flatten Waiting** and **OHLCV Bar
-Rejected** report a problem met again every cycle or bar. Each alerts when
-the problem appears or changes, a return to an earlier state included; then
+**Order Report Not Applied**, **Order Stuck**, **Operator Flatten Waiting**
+and **OHLCV Bar Rejected** report a problem met again every cycle or bar.
+Each alerts when the problem appears or changes, a return to an earlier
+state included; then
 once per `REPEAT_INTERVAL` (`librae/live/persistent_alerts.py`) while it
 lasts, adding how long and how many times it was seen; then once as
 **Resolved**, its message starting with the problem's title, when it ends. A
@@ -117,6 +119,9 @@ so one that comes and goes alerts no faster than one that stays:
   missing. A single unreadable answer, such as a fill whose fee the venue
   has not reported yet, alerts at once and resolves once the order ends, or
   an hour after its answers apply again.
+- Order Stuck: the same while its cause is, one of the three in its table
+  row; what the venue answers or which error it met changes only the
+  message. It ends when the order ends.
 - Operator Flatten Waiting: the same while the orders and statuses it lists
   are. It ends when the flatten goes ahead; a refused flatten says so
   instead.
@@ -324,10 +329,11 @@ work, sending a cancel again unless the venue, in an answer the engine can
 read and apply that cycle, reports one the engine sent as pending; a failure
 stops the cycle there, so a Poll Error alert follows if it
 persists, except an answer the engine cannot apply, which alerts **Order
-Report Not Applied** instead. **Halt Cancellation Completed** follows only once
-no order is tracked; until then cancel at the venue anything that must not
-fill. A repeat halt retries the cancellation: once a retry runs through with
-orders still tracked, it answers with a **Manual Halt** alert that says
+Report Not Applied** instead, and an order whose cancel the venue leaves
+unconfirmed a cycle later alerts **Order Stuck**. **Halt Cancellation
+Completed** follows only once no order is tracked; until then cancel at the
+venue anything that must not fill. A repeat halt retries the cancellation:
+once a retry runs through with orders still tracked, it answers with a **Manual Halt** alert that says
 `cancellation owed, <N> tracked: <orders>`; while the retry fails, `halt()`
 raises that error and a signalled halt shows as a poll-cycle error, or, for an
 answer the engine cannot apply, as a **Manual Halt** alert that says
@@ -349,8 +355,9 @@ An error that says `broker report not applied` names an order the venue
 answered about with something the engine could not match to it. Its cancel
 went out anyway if the error ends `cancel sent`, `cancel already sent`,
 `cancel sent, its answer not applied (<error>)` or `cancel sent, its answer
-not recorded (<error>)`; `cancel not confirmed (<error>)` or `no order id to
-cancel` mean it may not have. Fills that answer carried may be missing from
+not recorded (<error>)`; `cancel not confirmed (<error>)`, the error of that
+cancel call or of one earlier in the same cycle, or `no order id to cancel`
+mean it may not have. Fills that answer carried may be missing from
 the ledger: compare that order and its position at the broker with the
 ledger. Met while a running account finishes a cancel, such as a timeout's
 after a restart, the same answer halts it, as **Order Reconciliation
@@ -386,10 +393,11 @@ Waiting**, a [lasting problem](#lasting-problems), listing them with the
 status the venue last gave; if that persists, check the venue and cancel them
 there. Exits still resting keep being polled while halted. A halt about one
 exit, such as **Ambiguous Order Placement** or **Order Timeout Cancellation
-Unresolved**, cancels only that exit: its alert ends `cancelling that order
+Failed**, cancels only that exit: its alert ends `cancelling that order
 only; other recovery exits: <N> working, <M> queued unsent`. Exits go out one
 at a time, so the queued ones stay unsent until the venue confirms that exit
-ended; its cancel is retried each cycle without another alert. One whose
+ended; its cancel is retried each cycle, and **Order Stuck** names it while
+the venue leaves it unconfirmed. One whose
 placement the venue never shows blocks them for good: check the broker's
 order history for its client order id, as for any **Ambiguous Order
 Placement**. Once

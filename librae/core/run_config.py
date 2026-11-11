@@ -125,7 +125,8 @@ class ExecutionPolicy:
     After the first placement attempt, a non-terminal broker order older than
     this wall-clock duration is canceled and the deployment halts for operator
     review. It is not a broker time-in-force instruction. ``None`` leaves order
-    lifetime to the broker.
+    lifetime to the broker; an order still working a bar after placement then
+    alerts instead.
 
     ``warmup_periods`` is the retained batch feature-history window in both
     backtest and live/sim, as well as the polling runtime's startup readiness
