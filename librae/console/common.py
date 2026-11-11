@@ -46,7 +46,7 @@ class Selection:
     currency: str | None
 
 
-def _keep_valid(key: str, options: list[str]) -> None:
+def keep_valid(key: str, options: list[str]) -> None:
     """Fall back to the first option when the remembered value is no longer offered."""
     if st.session_state.get(key) not in options:
         st.session_state[key] = options[0] if options else None
@@ -104,7 +104,7 @@ def _run_selectors(*, signal: bool = False) -> None:
         )
         # Most recently recorded strategy first, consistent with the initial run.
         strategies = runs["strategy_name"].drop_duplicates().tolist()
-        _keep_valid(name_key, strategies)
+        keep_valid(name_key, strategies)
         strategy = st.selectbox(
             "Analysis" if signal else "Strategy",
             strategies,
@@ -120,7 +120,7 @@ def _run_selectors(*, signal: bool = False) -> None:
         )
         strategy_runs = runs[runs["strategy_name"] == strategy]
         modes = [ALL_MODES, *sorted(strategy_runs["mode"].dropna().unique())]
-        _keep_valid(mode_key, modes)
+        keep_valid(mode_key, modes)
         mode = st.selectbox("Mode", modes, key=mode_key, format_func=str.title) or ALL_MODES
         shown = strategy_runs if mode == ALL_MODES else strategy_runs[strategy_runs["mode"] == mode]
         run_ids = shown["run_id"].tolist()
@@ -131,7 +131,7 @@ def _run_selectors(*, signal: bool = False) -> None:
         duplicate_labels = pd.Series(labels, dtype=str).duplicated(keep=False)
         for run_id in duplicate_labels[duplicate_labels].index:
             labels[run_id] += f" · {run_id}"
-        _keep_valid(run_key, run_ids)
+        keep_valid(run_key, run_ids)
         st.selectbox(
             "Run", run_ids, key=run_key, format_func=labels.get, placeholder="No runs recorded"
         )
@@ -186,7 +186,7 @@ def selection() -> Selection | None:
         st.info("No run is recorded in this database yet. Runs appear once a strategy saves one.")
         return None
     accounts = selected_accounts()
-    _keep_valid(ACCOUNT_KEY, accounts["account_id"].tolist())
+    keep_valid(ACCOUNT_KEY, accounts["account_id"].tolist())
     account_id = st.session_state.get(ACCOUNT_KEY)
     currency = accounts.loc[accounts["account_id"] == account_id, "currency"]
     return Selection(

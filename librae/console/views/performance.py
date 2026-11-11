@@ -7,9 +7,15 @@ import streamlit as st
 
 from librae.console import charts, common, db, queries, ui
 
-_REALIZED = (
-    "Realized results for this run and account. Updated after a position is reduced "
-    "or closed, or funding is applied; excludes open-position gains and losses."
+_RECOMPUTED = (
+    "From the run's stored performance summary, as of its last recompute (a sim or live "
+    "run recomputes on a reduce, close or funding event; a backtest once, when saved). "
+    "Computed from the equity curve up to then, so open positions count as marked at "
+    "that time."
+)
+_CLOSED_TRADES = (
+    "From closed trades only, as of the summary's last recompute; legs sharing a "
+    "group_id and entry time count as one trade."
 )
 
 
@@ -105,58 +111,58 @@ def _history(selected: common.Selection) -> None:
     equity = common.history(queries.EQUITY, (run_id, account_id))
     events = common.history(queries.POSITION_EVENTS, (run_id, account_id))
     performance = db.query(queries.PERFORMANCE, (run_id, account_id))
-    drawdown = db.query(queries.EQUITY_DRAWDOWN, (run_id, account_id))
+    curve = queries.with_drawdown(equity)
 
-    _account_charts(equity, events, run_id, account_id)
+    _account_charts(curve, events, run_id, account_id)
     ui.section_header("Performance Details", "Full Run")
     if performance.empty:
-        st.info("Realized results are not available for this account yet.")
+        st.info("No stored performance summary for this account yet.")
     kpi = performance.iloc[0] if not performance.empty else pd.Series(dtype=object)
-    dd = drawdown.iloc[0] if not drawdown.empty else pd.Series(dtype=float)
+    worst = curve["drawdown"].min() if not curve.empty else None
+    worst_amount = curve["drawdown_amount"].min() if not curve.empty else None
     unit = f" {selected.currency}" if selected.currency else ""
     ui.result_table(
         [
             (
-                "Realized Return",
+                "Total Return",
                 _fmt(kpi.get("total_return"), ".2%"),
                 f"{_fmt(kpi.get('net_pnl'), ',.2f')}{unit}" if pd.notna(kpi.get("net_pnl")) else "",
-                _REALIZED + " The amount is net P&L.",
+                _RECOMPUTED + " The amount is net P&L: final equity minus initial cash.",
             ),
             (
                 "Max Equity Drawdown",
-                _fmt(dd.get("max_drawdown"), ".2%"),
-                f"{_fmt(dd.get('max_drawdown_amount'), ',.2f')}{unit}"
-                if pd.notna(dd.get("max_drawdown_amount"))
-                else "",
-                "Largest fall from a previous equity peak across this account's full run, "
-                "including open-position gains and losses. The worst percentage and amount "
-                "can occur at different times.",
+                _fmt(worst, ".2%"),
+                f"{_fmt(worst_amount, ',.2f')}{unit}" if pd.notna(worst_amount) else "",
+                "Largest fall from a previous equity peak over the equity rows loaded "
+                f"(the latest {queries.HISTORY_ROWS:,} at most), with open positions as "
+                "marked. The worst percentage and amount can occur at different times.",
             ),
-            ("Realized Max Drawdown", _fmt(kpi.get("max_drawdown"), ".2%"), "", _REALIZED),
             (
-                "Trades",
-                _fmt(kpi.get("trades"), "d"),
+                "Max Drawdown at Last Recompute",
+                _fmt(kpi.get("max_drawdown"), ".2%"),
                 "",
-                "Trade count from the saved performance summary.",
+                _RECOMPUTED,
             ),
+            ("Trades", _fmt(kpi.get("trades"), "d"), "", _CLOSED_TRADES),
             (
                 "Period Sharpe",
                 _fmt(kpi.get("period_sharpe"), ".2f"),
                 "",
-                "Sharpe of the stored realized period returns; not annualized.",
+                "Sharpe of the equity curve's period returns; not annualized. " + _RECOMPUTED,
             ),
             (
                 "Period Sortino",
                 _fmt(kpi.get("period_sortino"), ".2f"),
                 "",
-                "Sortino of the stored realized period returns; measures downside variability. Not annualized.",
+                "Sortino of the equity curve's period returns; measures downside variability. "
+                "Not annualized. " + _RECOMPUTED,
             ),
-            ("Win Rate", _fmt(kpi.get("win_rate"), ".1%"), "", _REALIZED),
+            ("Win Rate", _fmt(kpi.get("win_rate"), ".1%"), "", _CLOSED_TRADES),
             (
                 "Profit Factor",
                 _fmt(kpi.get("profit_factor"), ".2f"),
                 "",
-                "Gross realized profits divided by gross realized losses in the saved summary.",
+                "Gross profits over gross losses of closed trades. " + _CLOSED_TRADES,
             ),
         ]
     )
@@ -165,18 +171,19 @@ def _history(selected: common.Selection) -> None:
 def _account_charts(
     equity: pd.DataFrame, events: pd.DataFrame, run_id: str, account_id: str | None
 ) -> None:
+    """``equity`` carries the drawdown columns ``queries.with_drawdown`` adds."""
     if equity.empty:
         st.info("No equity points for this account.")
         return
     ui.section_header("Account Equity")
     st.plotly_chart(
-        charts.equity_and_drawdown(queries.with_drawdown(equity)),
+        charts.equity_and_drawdown(equity),
         key=f"equity_{run_id}_{account_id}",
     )
     if len(equity) == queries.HISTORY_ROWS:
         st.caption(
-            "Chart drawdown uses the displayed rows' peak; "
-            "Max Equity Drawdown in Performance Details covers the full run."
+            "Drawdown, here and as Max Equity Drawdown below, is measured only within "
+            "the rows shown, from their own peak."
         )
 
     left, right = st.columns(2)

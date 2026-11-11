@@ -44,13 +44,14 @@ def test_account_snapshot_distinguishes_flat_from_incomplete(case, monkeypatch) 
         assert metrics["Unrealized P&L"].value != "–"
 
 
-def test_drawdown_uses_full_run_aggregate_and_keeps_realized_basis(monkeypatch) -> None:
+def test_drawdown_comes_from_the_loaded_equity_and_the_summary_is_labelled_as_stored(
+    monkeypatch,
+) -> None:
     calls = []
 
     def read(sql, params=()):
-        if sql == queries.EQUITY_DRAWDOWN:
-            calls.append(params)
-            return pd.DataFrame({"max_drawdown": [-0.20], "max_drawdown_amount": [-24000.0]})
+        if sql == queries.EQUITY:
+            calls.append(params[:2])
         return query(sql, params)
 
     monkeypatch.setattr(db, "query", read)
@@ -63,9 +64,15 @@ def test_drawdown_uses_full_run_aggregate_and_keeps_realized_basis(monkeypatch) 
         row.find("./th//button").text: " ".join(row.find("./td").itertext())
         for row in fromstring(table).findall(".//tbody/tr")
     }
-    assert rows["Max Equity Drawdown"] == "-20.00% -24,000.00 USD"
-    assert rows["Realized Max Drawdown"] == "-3.40%"
-    assert rows["Realized Return"] == "11.25% 11,250.00 USD"
+    equity = queries.oldest_first(
+        query(queries.EQUITY, ("run-trend", "USD-main", queries.HISTORY_ROWS))
+    )
+    curve = queries.with_drawdown(equity)
+    assert rows["Max Equity Drawdown"] == (
+        f"{curve['drawdown'].min():.2%} {curve['drawdown_amount'].min():,.2f} USD"
+    )
+    assert rows["Max Drawdown at Last Recompute"] == "-3.40%"
+    assert rows["Total Return"] == "11.25% 11,250.00 USD"
     assert rows["Trades"] == "128"
     assert rows["Period Sharpe"] == "1.84"
     assert rows["Period Sortino"] == "2.31"
@@ -129,6 +136,6 @@ def test_manual_history_refresh_keeps_selection_and_clears_query_cache(monkeypat
     assert cleared == [True]
     assert queries.LATEST_EQUITY in calls
     assert queries.PERFORMANCE in calls
-    assert queries.EQUITY_DRAWDOWN in calls
+    assert queries.EQUITY in calls
     assert app.selectbox(key="librae_account_id").value == "USD-secondary"
     assert app.metric[0].value == "25,000.00"

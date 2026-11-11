@@ -226,12 +226,16 @@ without a run ID are not selectable in the console.
 - The halt flag and last decision bar come from the run's checkpoint in
   `execution_runtime_state`; a backtest has none.
 - Query results are bounded: recent runs and the newest history rows (a
-  caption identifies truncation), with a 30 s statement timeout. Max Equity
-  Drawdown aggregates the selected account's full equity history in the
-  database every five minutes; the chart uses only its displayed rows.
+  caption identifies truncation), with a 30 s statement timeout. Drawdown,
+  in the chart and as Max Equity Drawdown, is computed over the equity rows
+  loaded with the same definition as the stored summary
+  (`compute_performance_series`).
 - Max Equity Drawdown includes open-position gains and losses. Its worst
-  percentage and amount can occur at different times; realized drawdown
-  remains separate. Margin and unrealized P&L show amounts and equity shares;
+  percentage and amount can occur at different times. Total return, net P&L,
+  drawdown, Sharpe and Sortino in the stored summary are as of its last
+  recompute (a reduce, close or funding event in sim or live) and include
+  open positions as marked then; trades, win rate and profit factor count
+  closed trades only. Margin and unrealized P&L show amounts and equity shares;
   Margin Breakdown groups capital by unlevered, fixed or dynamic mode. A flat
   account shows zero; missing position values leave totals unavailable.
 - Accounts are never combined: every account-level panel shows one

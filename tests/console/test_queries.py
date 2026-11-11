@@ -97,11 +97,38 @@ def test_format_age(seconds, text) -> None:
 
 
 def test_drawdown_is_measured_from_the_running_peak() -> None:
-    equity = pd.DataFrame({"equity": [100.0, 120.0, 90.0, 130.0]})
-
-    assert queries.with_drawdown(equity)["drawdown"].tolist() == pytest.approx(
-        [0.0, 0.0, -0.25, 0.0]
+    equity = pd.DataFrame(
+        {
+            "ts": pd.date_range("2026-03-01", periods=5, freq="1h", tz="UTC"),
+            "equity": [100.0, 90.0, 120.0, 90.0, 130.0],
+        }
     )
+
+    curve = queries.with_drawdown(equity)
+
+    # The first row is the starting peak, so a first-period loss is a drawdown.
+    assert curve["drawdown"].tolist() == pytest.approx([0.0, -0.10, 0.0, -0.25, 0.0])
+    assert curve["drawdown_amount"].tolist() == pytest.approx([0.0, -10.0, 0.0, -30.0, 0.0])
+
+
+def test_drawdown_matches_the_stored_summary_definition() -> None:
+    from librae.core.metrics import compute_all
+
+    ts = pd.date_range("2026-03-01", periods=6, freq="1h", tz="UTC")
+    values = [100.0, 104.0, 97.0, 99.0, 110.0, 101.0]
+
+    curve = queries.with_drawdown(pd.DataFrame({"ts": ts, "equity": values}))
+
+    stored = compute_all(values, list(ts), trade_pnls=[], total_periods=len(values))
+    assert curve["drawdown"].min() == pytest.approx(stored.max_drawdown)
+
+
+def test_drawdown_is_left_empty_for_unusable_equity() -> None:
+    ts = pd.date_range("2026-03-01", periods=2, freq="1h", tz="UTC")
+
+    curve = queries.with_drawdown(pd.DataFrame({"ts": ts, "equity": [100.0, None]}))
+
+    assert curve["drawdown"].isna().all()
 
 
 def test_position_snapshot_marks_to_the_latest_bar_with_the_multiplier() -> None:
@@ -187,11 +214,11 @@ def test_margin_totals_preserve_unknown_values_and_regimes() -> None:
 
 
 @pytest.mark.parametrize("reference", [None, float("nan"), 0])
-def test_latest_signal_return_needs_a_reference_price(reference) -> None:
+def test_signal_return_needs_a_reference_price(reference) -> None:
     assert queries.signal_return(reference, 101, "long") is None
 
 
-def test_latest_signal_return_keeps_direction_and_missing_close() -> None:
+def test_signal_return_keeps_direction_and_missing_close() -> None:
     assert queries.signal_return(100, 110, "long") == pytest.approx(0.1)
     assert queries.signal_return(100, 110, "short") == pytest.approx(-0.1)
     assert queries.signal_return(100, None, "long") is None
@@ -268,15 +295,3 @@ def test_rolling_stats_and_edge_ratio() -> None:
     assert stats["rolling_mean_return"].tolist()[1:] == pytest.approx([-0.005, 0.005])
     assert stats["rolling_edge_ratio"].tolist()[1:] == pytest.approx([0.75, 4 / 3])
     assert queries.edge_ratio(outcomes) == pytest.approx(0.06 / 0.04)
-
-
-def test_latest_signal_return_is_direction_adjusted() -> None:
-    bars = _contract_bars()  # next bar opens at 100, last close is 100
-    bars.loc[bars.index[-1], "close"] = 110.0
-    signal = pd.Series([bars["ts"][0]])
-
-    assert queries.latest_signal_return(signal, bars, "long", "open") == pytest.approx(0.10)
-    assert queries.latest_signal_return(signal, bars, "short", "open") == pytest.approx(-0.10)
-    assert (
-        queries.latest_signal_return(pd.Series([bars["ts"].iloc[-1]]), bars, "long", "open") is None
-    )

@@ -36,7 +36,7 @@ def render() -> None:
             on_click=common.request_signal,
             args=(run["run_id"],),
         )
-    common._keep_valid(common.SECTION_KEY, list(_SECTIONS))
+    common.keep_valid(common.SECTION_KEY, list(_SECTIONS))
     section = st.radio(
         "Strategy Sections",
         list(_SECTIONS),

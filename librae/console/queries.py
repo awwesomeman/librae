@@ -11,12 +11,16 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from librae.core.metrics import SignalDirection, SignalPriceColumn, compute_signal_outcomes
+from librae.core.metrics import (
+    SignalDirection,
+    SignalPriceColumn,
+    compute_performance_series,
+    compute_signal_outcomes,
+)
 from librae.core.run_config import HEARTBEAT_STALE_AFTER_POLLS
 from librae.core.utils import interval_to_timedelta
 
-# Result sizes are bounded. Full-run drawdown scans one account's equity
-# history in the database and returns only its aggregate, every five minutes.
+# Result sizes are bounded: the runs listed, and the newest rows of a run.
 RECENT_RUNS = 200
 HISTORY_ROWS = 50_000
 RECENT_EVENTS = 1_000
@@ -145,17 +149,6 @@ LATEST_EQUITY = """
     WHERE run_id = %s AND account_id = %s
     ORDER BY ts DESC
     LIMIT 1
-"""
-
-EQUITY_DRAWDOWN = """
-    WITH curve AS (
-      SELECT equity, MAX(equity) OVER (ORDER BY ts) AS peak
-      FROM equity_curve
-      WHERE run_id = %s AND account_id = %s
-    )
-    SELECT MIN(equity - peak) AS max_drawdown_amount,
-           MIN(equity / NULLIF(peak, 0) - 1) AS max_drawdown
-    FROM curve
 """
 
 OPEN_POSITIONS = """
@@ -345,10 +338,30 @@ def with_status(frame: pd.DataFrame, now: datetime) -> pd.DataFrame:
 
 
 def with_drawdown(equity: pd.DataFrame) -> pd.DataFrame:
-    """Add ``drawdown``: equity relative to its running peak, 0 at a new high."""
+    """Add ``drawdown`` (a fraction) and ``drawdown_amount`` (in the account's currency).
+
+    The fraction comes from ``compute_performance_series``, the definition
+    the stored performance summary uses: equity against its running peak, the
+    first row counting as the starting peak. ``equity`` is in time order; the
+    result covers only the rows given. Missing or non-positive equity leaves
+    both columns empty rather than guessing.
+    """
     out = equity.copy()
-    values = out["equity"].astype(float)
-    out["drawdown"] = values / values.cummax() - 1.0
+    out["drawdown"] = np.nan
+    out["drawdown_amount"] = np.nan
+    values = out["equity"].astype(float).to_numpy()
+    if len(values) == 0 or not np.isfinite(values).all() or (values <= 0).any():
+        return out
+    drawdown = np.zeros(len(values))
+    if len(values) > 1:
+        returns = pd.DataFrame(
+            {"equity": values[1:] / values[:-1] - 1.0},
+            index=pd.DatetimeIndex(out["ts"].iloc[1:]),
+        )
+        series = compute_performance_series(returns, metrics=("drawdown",))
+        drawdown[1:] = series["drawdown"]["equity"].to_numpy()
+    out["drawdown"] = drawdown
+    out["drawdown_amount"] = values - values / (1.0 + drawdown)
     return out
 
 
@@ -489,26 +502,6 @@ def edge_ratio(outcomes: pd.DataFrame) -> float:
     """Mean MFE over mean MAE; NaN when there is no adverse excursion to divide by."""
     mean_mae = outcomes["mae"].mean()
     return float(outcomes["mfe"].mean() / mean_mae) if mean_mae else float("nan")
-
-
-def latest_signal_return(
-    signal_ts: pd.Series,
-    bars: pd.DataFrame,
-    direction: SignalDirection,
-    price_col: SignalPriceColumn,
-) -> float | None:
-    """Direction-adjusted return from the latest signal's reference price to the last close.
-
-    The reference price is ``price_col`` of the first bar after the signal,
-    the same convention ``signal_outcomes_at`` uses. None when no bar
-    follows the signal yet.
-    """
-    if signal_ts.empty or bars.empty:
-        return None
-    after = bars[bars["ts"] > signal_ts.max()]
-    if after.empty:
-        return None
-    return signal_return(after.iloc[0][price_col], bars.iloc[-1]["close"], direction)
 
 
 def signal_return(

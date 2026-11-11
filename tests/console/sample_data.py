@@ -134,15 +134,6 @@ def query(sql: str, params: tuple = ()) -> pd.DataFrame:
         return pd.DataFrame({"ts": [times[-1]], "equity": [value]})
     if sql == queries.EQUITY:
         return equity.iloc[::-1].reset_index(drop=True)
-    if sql == queries.EQUITY_DRAWDOWN:
-        values = equity["equity"]
-        peak = values.cummax()
-        return pd.DataFrame(
-            {
-                "max_drawdown_amount": [(values - peak).min()],
-                "max_drawdown": [(values / peak - 1).min()],
-            }
-        )
     if sql == queries.PERFORMANCE:
         return pd.DataFrame(
             [
