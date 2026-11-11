@@ -64,6 +64,22 @@ currency conversion, cash yield, or settlement lag. Adjusted/continuous
 series can be research inputs, but using them as fill prices makes the
 cash-and-position simulation economically incomplete.
 
+**A TAIFEX continuous alias cannot be held through a contract switch.** An
+alias such as `TXFR1` or `MXFR2` (`continuous_alias=True` on the `XTAIFEX`
+calendar) moves to the next contract partway through the final settlement
+session, at a time its bars do not show, so a position held across the switch
+would book the price gap between the two contracts as PnL. A backtest raises
+when such a position is still held at the close of any bar in that session,
+when a fill in that session is not at a bar's open (a stop, take-profit or
+limit reached inside the bar may be priced on the next contract), or when a
+position is carried over the session and the session has no bar. Only the
+session's first open still belongs to the old contract: exit by then and
+re-enter after the session if the strategy wants to stay exposed. When to roll
+stays a strategy decision.
+`librae.core.taifex.taifex_final_settlement_day` gives the settlement day of a
+contract month. Exact contracts (`contract_month`) and other venues'
+continuous aliases are not checked.
+
 The backtest boundary fails fast on malformed input. Index levels must be
 exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps
 are timezone-aware and increasing within each symbol; and `config.symbols`, when

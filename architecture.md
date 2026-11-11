@@ -308,7 +308,10 @@ base+quote so `query="MU"` cannot silently select `MUU`.
 in that catalog snapshot. Selecting such a dated result pins its
 `contract_month`; it does not roll later. A venue-native R1/R2 result has
 `continuous_alias=True` and may change its target. This distinction prevents a
-discovery convenience from silently changing live exposure.
+discovery convenience from silently changing live exposure. Backtests have no
+roll ledger, so they refuse a TAIFEX alias position held through its final
+settlement session rather than booking the gap between contracts (see the
+[backtest data contract](docs/guides/engine-usage.md#local-artifact-boundary)).
 
 Discovery can feed an adapter directly without YAML:
 
