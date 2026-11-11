@@ -332,8 +332,14 @@ orders still tracked, it answers with a **Manual Halt** alert that says
 raises that error and a signalled halt shows as a poll-cycle error, or, for an
 answer the engine cannot apply, as a **Manual Halt** alert that says
 `cancellation owed: <error>`. A restart into the halt cancels tracked orders
-again unless every one is a recovery exit, and those keep working; if the
-venue has not confirmed every cancelled order ended, it alerts **Halt
+again unless every one is a recovery exit, and those keep working, even
+when the start then fails, such as on a status read, which alerts
+**Order Reconciliation Failed** ending `recovery exits: <N> working, <M>
+queued unsent`. The start still checks the venue's positions and open orders
+after such a failure: **Position Reconciliation Mismatch** or **Orphan Broker
+Orders** cancels the exits too, since they were sized from the ledger the
+venue disagrees with. If
+the venue has not confirmed every cancelled order ended, it alerts **Halt
 Cancellation Owed** naming them, and **Halt Cancellation Completed** follows
 as above; if it has, **Halt Cancellation Completed** comes at once. A
 failure while the run starts stops it instead. Find the cause
@@ -378,13 +384,37 @@ sent it. A venue that confirms a cancel one cycle later makes one
 cycle's wait normal, so from the second cycle it sends **Operator Flatten
 Waiting**, a [lasting problem](#lasting-problems), listing them with the
 status the venue last gave; if that persists, check the venue and cancel them
-there. Exits still resting keep being polled while halted. Once
+there. Exits still resting keep being polled while halted. A halt about one
+exit, such as **Ambiguous Order Placement** or **Order Timeout Cancellation
+Unresolved**, cancels only that exit: its alert ends `cancelling that order
+only; other recovery exits: <N> working, <M> queued unsent`. Exits go out one
+at a time, so the queued ones stay unsent until the venue confirms that exit
+ended; its cancel is retried each cycle without another alert. One whose
+placement the venue never shows blocks them for good: check the broker's
+order history for its client order id, as for any **Ambiguous Order
+Placement**. Once
 `trader.halt_reset_readiness()` is ready, `trader.reset_halt()` resumes. A
 request on a halted account is refused with an **Operator Flatten Refused**
 alert; right after `reset_halt()` it waits until reconciliation has verified
 the book. A request pending at a restart is dropped, so request it again. Engine
 behavior is in
 [engine-usage.md](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics).
+
+A **Max Drawdown Breach** alert that says `exits wait on the working orders'
+cancellation` met strategy orders still working: it cancelled them and
+halted, naming each the venue has not confirmed ended. The exits go out once
+it has, after **Halt Cancellation Completed**, with a second **Max Drawdown
+Breach** alert naming what the exits closed and what remains open, which the
+first could not know. The wait survives a restart: the restarted run sends
+the exits once its startup reconciliation has read the venue's positions and
+open orders and found them matching the ledger, and alerts **Max Drawdown
+Breach** with `restarted halted with <positions> open; its exits go out ...`.
+The exits are sized only when sent, so if that reconciliation halts instead,
+because a read failed or the venue's book differs (an operator close at the
+venue during the downtime, say), the halt's alert ends `the Max Drawdown
+Breach exits not yet sent are dropped`, the restart alert says `its exits are
+dropped, not sent`, and nothing goes out: after review, reset and request the
+flatten.
 
 ## Pausing entries
 
@@ -464,11 +494,12 @@ produces a bar and the account is reset, request the flatten again.
 A **Close Rejected** or **Close Cancelled** alert during a flatten or
 drawdown breach means the broker rejected or cancelled that exit, or it was
 cancelled after its timeout; the alert carries the cause, and the other exits
-kept working (reason `close_rejected` or `close_cancelled`). A cause that ends
-`while a halt cancelled the account's orders` means another halt cancelled
-the exits, and the alert says the others went too; one that ends `after a
-cancel the engine requested` ended in a later cycle, and the alert lists the
-orders still tracked. A cause naming an
+kept working (reason `close_rejected` or `close_cancelled`). A cause that
+ends `after a cancel the engine requested` ended in a later cycle, after its
+timeout's cancel or that of a halt about that exit, and the alert lists the
+orders still tracked; one that ends `while a halt cancelled the account's
+orders` went with every other exit, in a halt that found the venue's
+positions or open orders differ from the ledger. A cause naming an
 account-level refusal (credentials, permissions, clock) was recorded the same
 way, not halted on, because the flatten halts the account anyway. The
 position stays open in the ledger. Compare it with the venue: a reduce-only

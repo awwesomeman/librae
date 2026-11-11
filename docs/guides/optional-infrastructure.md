@@ -595,7 +595,8 @@ The relevant identities are intentionally not interchangeable:
 | `run_id` | Engine run restored from the checkpoint |
 
 The live runtime requires a non-empty `runtime_revision` and execution
-identity. It accepts only the current checkpoint schema and exact revision and
+identity. It accepts only the current checkpoint schema (or the previous one
+`state.py` names as additive, below) and exact revision and
 execution-identity matches; it does not convert,
 discard, adopt, or overwrite incompatible state. The compatibility check runs
 before broker reconciliation, order lookup, or submission. A
@@ -619,9 +620,12 @@ document version** (`_STATE_SCHEMA_VERSION` in `librae/live/state.py`) is
 stored as `schema_version` inside the JSON in `execution_runtime_state.state`,
 is compared for exact equality on load, and **nothing migrates it
 automatically** — neither database initialization nor a schema upgrade
-transforms stored checkpoint JSON.
+transforms stored checkpoint JSON. The one exception is a previous version
+whose only difference is a field none of its writers could hold, named beside
+`_STATE_SCHEMA_VERSION`: it loads with that field empty, so that bump alone
+does not force a flat stop. A changed runtime revision still does, as above.
 
-Any version other than the one this build writes is rejected outright rather
+Any other version is rejected outright rather
 than silently defaulted, and the refusal names the versions involved and the
 procedure. That is deliberate, not a missing feature: the document holds
 positions, cash, in-flight orders and the halted flag, so a defaulted field

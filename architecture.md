@@ -25,7 +25,9 @@ the code simpler and easier to maintain.
   than maintaining a historical version list.
 - Persisted development data and runtime checkpoints may require explicit
   external migration or removal. Never silently default a missing field from
-  an older shape.
+  an older shape. The one exception is a field no writer of the previous
+  checkpoint version could hold, which that version loads empty; `state.py`
+  names it beside `_STATE_SCHEMA_VERSION`.
 
 Breaking is allowed; leaving it unannounced is not. A change that makes
 previously accepted input fail — a config that ran, a public call, a persisted
