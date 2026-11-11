@@ -625,8 +625,11 @@ class ReportNotAppliedError(RuntimeError):
         self.content = content
 
 
-def _is_outage(error: BaseException) -> bool:
-    """Whether a failed cycle got no answer from the state store or the venue.
+def _is_outage(
+    error: BaseException,
+    kinds: tuple[type[Exception], ...] = (BrokerUnavailableError, StateStoreUnavailableError),
+) -> bool:
+    """Whether a failed call got no answer from ``kinds``, by default the state store or the venue.
 
     Either type says the call had no effect and retrying later is safe; it
     counts here whether raised or chained as the cause.
@@ -634,7 +637,7 @@ def _is_outage(error: BaseException) -> bool:
     seen: set[int] = set()
     cause: BaseException | None = error
     while cause is not None and id(cause) not in seen:
-        if isinstance(cause, (BrokerUnavailableError, StateStoreUnavailableError)):
+        if isinstance(cause, kinds):
             return True
         seen.add(id(cause))
         cause = cause.__cause__
@@ -3340,17 +3343,36 @@ class LiveTrader:
             if self._run_requested_halt_reset():
                 # A halt requested while the reset applied still wins this cycle.
                 cancelled = self._run_requested_halt() or cancelled
+        # A store outage fails the order work's writes, not the risk checks on
+        # what it read and booked: an order can rest through the whole outage.
+        # The outage fails the cycle once they have run. Nothing reaches the
+        # venue before its write, so a halt they make waits for its checkpoint.
+        store_outage: Exception | None = None
         # Order work that hit a store outage may have left ledger rows and
         # fills behind, with no later order work to carry them.
         if self._unpersisted_orders:
-            self._persist_state()
-        self._publish_checkpointed_results()
+            try:
+                self._persist_state()
+            except Exception as exc:
+                if not _is_outage(exc, (StateStoreUnavailableError,)):
+                    raise
+                store_outage = exc
+        if store_outage is None:
+            self._publish_checkpointed_results()
         # After the halt retry, which may land the checkpoint they wait on,
         # and never ahead of a requested halt.
         self._offer_held_runtime_events()
         self._flush_pending_position_events(count_attempt=True)
         if not self._executor.simulation and self._active_orders and not cancelled:
-            self._advance_live_orders()
+            try:
+                self._advance_live_orders()
+            except Exception as exc:
+                if not _is_outage(exc, (StateStoreUnavailableError,)):
+                    raise
+                store_outage = exc
+        if store_outage is not None:
+            # A fill booked before its write failed skipped this check.
+            self._post_fill_risk_halted()
         self._run_requested_flatten()
         # Retry unacknowledged audit rows every cycle, not only when a new bar
         # arrives: a stalled feed would otherwise leave them queued
@@ -3361,11 +3383,15 @@ class LiveTrader:
         if any(result.outcome != "success" for result in fetch_results.values()):
             if not self.warmup_ready:
                 self._report_incomplete_warmup()
+            if store_outage is not None:
+                raise store_outage
             return
         if self._on_heartbeat:
             self._on_heartbeat(self._run_id)
         if not self.warmup_ready:
             self._report_incomplete_warmup()
+            if store_outage is not None:
+                raise store_outage
             return
         if self._reported_warmup_reasons:
             logger.info(
@@ -3413,14 +3439,18 @@ class LiveTrader:
         # Keep heartbeat, cache, and staleness monitoring alive while a broker
         # order is resting. Strategy evaluation remains serialized behind the
         # active order so a later bar cannot create a conflicting order queue,
-        # and after a reset behind a periodic round that answered and matched.
-        if not self._executor.simulation and (
-            self._active_orders or self._halted or self._resume_unverified
+        # after a reset behind a periodic round that answered and matched, and
+        # behind a store outage the order work met, whose rows are unwritten.
+        if store_outage is not None or (
+            not self._executor.simulation
+            and (self._active_orders or self._halted or self._resume_unverified)
         ):
             # The drawdown breaker is not held with them. A requested flatten
             # owns the working orders and closes the book itself.
             if not (self._halted or self._resume_unverified or self._flatten_cancels_this_cycle()):
                 self._check_drawdown_while_orders_work(frames)
+            if store_outage is not None:
+                raise store_outage
             return
 
         # A required subscription with no usable observation blocks evaluation
@@ -7162,9 +7192,10 @@ class LiveTrader:
         """Mark the book on each frame's latest completed bar and check drawdown.
 
         A working order holds every strategy decision for as long as it rests,
-        days for a day or gtc limit with no timeout, and the breaker must not
-        wait with it. A breach cancels the order before the exits go out, as
-        on a decided bar. Only the marks and the peak move: the bar stays
+        days for a day or gtc limit with no timeout, and so does a state store
+        outage the order work meets, for as long as it lasts; the breaker must
+        wait with neither. A breach cancels the order before the exits go out,
+        as on a decided bar. Only the marks and the peak move: the bar stays
         undecided for the decision that follows the order, and the equity
         curve keeps one point per decided bar. Stamped with the wall clock,
         since the breach is not a decision on any bar.
