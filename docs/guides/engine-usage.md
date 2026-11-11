@@ -1074,7 +1074,8 @@ adapter at submission.
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
   confirmed broker fills; a close below the venue minimum is skipped as above.
-  Live also checks on every poll while a strategy order works, on each
+  Live also checks on every poll while a strategy order works, through a
+  state store outage too (see persistent poll errors below), on each
   symbol's newest completed bar, unless an operator flatten is already
   waiting on that order. Like a decision, that check waits while a required
   feed of a held symbol has no usable bar, rather than value one leg of a
@@ -1124,15 +1125,21 @@ adapter at submission.
   poll, in sim and live. An outage, an error that is or is chained from
   `BrokerUnavailableError` or `StateStoreUnavailableError` (the venue or the
   state store gave no answer), only alerts **Poll Error** once
-  `LiveTrader.CONSECUTIVE_ERROR_THRESHOLD` cycles in a row have failed. Any
+  `LiveTrader.CONSECUTIVE_ERROR_THRESHOLD` cycles in a row have failed. A
+  state store outage that fails the order poll's writes fails the cycle only
+  after its risk checks: the poll still reads and books each order's answer
+  but places no queued order, and the post-fill risk check and the drawdown
+  breaker run on that book; no decision runs. An audit-queue checkpoint
+  that fails so is held the same way. What a halt does then is under halt
+  durability below. Any
   other error may be a defect every cycle repeats, such as a decision that
   preflight refuses or a strategy that raises, so that many of them with no
   clean cycle between halt the account with **Persistent Poll Error**,
   carrying the last error as the reason, and cancel its tracked orders. An
   order status read the venue left unanswered is an outage when the adapter
   classifies it ([Broker Adapter Design](../../architecture.md#broker-adapter-design-libraebrokers));
-  one it does not classify counts as any other error. While the order poll
-  fails, the cycle stops before the drawdown check, so a tracked order whose
+  one it does not classify counts as any other error. While an order status
+  read fails, the cycle stops before the drawdown check, so a tracked order whose
   status reads keep failing, outage or not, with no answer between, halts the
   account with **Order Status Unavailable** once they have failed for
   `LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS` reconciliation
@@ -1174,7 +1181,16 @@ adapter at submission.
   cancellations go out, and a flatten's exits, sent or still queued, keep
   working. `reset_halt()` refuses with `halt_not_persisted` until then. A
   process that exits first restarts from the last written checkpoint,
-  unhalted.
+  unhalted, and its drawdown breaker measures from the peak that checkpoint
+  holds. A drawdown breach or operator flatten does not wait for a store
+  outage, since that would leave the book open for as long as the store is
+  down: its cancels and exits go out with their rows held in memory for the
+  next checkpoint that lands, its alert says `not recorded yet`, and each
+  later cycle retries the checkpoint, then goes on with the cancels and
+  exits still owed. A restart before a checkpoint lands halts on any
+  position or untracked open order the flatten left at the venue, and sends
+  nothing. An
+  order whose placement write fails was not sent, and is not taken as sent.
 - Audit trail: every halt alert records one `halted` runtime event, so one
   stop can record several: a flatten whose exit fails records the exit's halt
   and its own, and a halt repeated on an already-halted account records again.
