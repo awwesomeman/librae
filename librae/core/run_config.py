@@ -380,7 +380,10 @@ class RunConfig:
     # Cost-model overrides. cost_overrides applies to every symbol in this
     # run (falls back to the built-in symbol/market registries for anything not listed);
     # symbol_cost_overrides applies to one symbol only and wins over
-    # cost_overrides for that symbol — see CostModel.from_config(). This is
+    # cost_overrides for that symbol — see CostModel.from_config(). In a
+    # multi-symbol run, a run-wide multiplier or tick_size may not differ
+    # from a registered symbol's own value unless that symbol sets its own
+    # in symbol_cost_overrides. symbol_cost_overrides is
     # the escape hatch for a symbol that isn't in the built-in registry
     # (no file to edit, no path to point at — just pass
     # {"MYSYM": {"multiplier": 1.0}}) and for multi-asset runs mixing
@@ -480,6 +483,8 @@ class RunConfig:
                 "per-contract fee, but the fee differs by product; set it per symbol in "
                 "symbol_cost_overrides"
             )
+        if len(self.symbols) > 1:
+            self._refuse_run_wide_contract_economics_over_registered()
         object.__setattr__(self, "optional_symbols", tuple(self.optional_symbols))
         optional = set(self.optional_symbols)
         if len(optional) != len(self.optional_symbols):
@@ -581,6 +586,32 @@ class RunConfig:
             raise ValueError(
                 f"risk settings no longer belong in params; move {invalid_keys} to RunConfig.risk"
             )
+
+    def _refuse_run_wide_contract_economics_over_registered(self) -> None:
+        """A run-wide multiplier or tick_size fills in for unregistered
+        symbols; across products it would silently replace a registered
+        contract's own value, so a value that differs is refused instead."""
+        from librae.config.symbols import load_symbol_registry
+
+        registry = load_symbol_registry()
+        run_wide = self.cost_overrides or {}
+        for field_name in ("multiplier", "tick_size"):
+            if field_name not in run_wide:
+                continue
+            for symbol in self.symbols:
+                registered = registry.get(symbol)
+                own = getattr(registered, field_name, None)
+                if (
+                    own is None
+                    or own == run_wide[field_name]
+                    or field_name in (self.symbol_cost_overrides or {}).get(symbol, {})
+                ):
+                    continue
+                raise ValueError(
+                    f"cost_overrides[{field_name!r}]={run_wide[field_name]!r} would replace "
+                    f"the registered {field_name}={own!r} of {symbol!r}; set it per symbol "
+                    "in symbol_cost_overrides"
+                )
 
     @property
     def symbol(self) -> str:

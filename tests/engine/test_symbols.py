@@ -305,13 +305,47 @@ class TestFuturesSelectorAtRegistration:
         with pytest.raises(ValueError, match="requires exactly one"):
             self._future(continuous_alias=True, contract_month="202612")
 
-    def test_fut_security_type_needs_a_selector_whatever_instrument_type_claims(self):
-        # security_type='FUT' is what routes the fetch to the venue's futures
-        # path, so instrument_type='spot' does not exempt the entry.
-        with pytest.raises(ValueError, match="requires exactly one"):
-            self._future(instrument_type="spot", multiplier=1.0)
+    @pytest.mark.parametrize(
+        ("security_type", "instrument_type"),
+        [
+            ("FUT", "spot"),
+            ("FUT", "contract_perpetual"),
+            ("STK", "contract_quarterly"),
+            ("STK", "contract_perpetual"),
+        ],
+    )
+    def test_security_type_that_contradicts_instrument_type_is_refused(
+        self, security_type, instrument_type
+    ):
+        # security_type picks the venue contract orders go to, instrument_type
+        # drives accounting, shorting and margin; they must name one product.
+        with pytest.raises(
+            ValueError,
+            match=rf"security_type={security_type!r} contradicts "
+            rf"instrument_type={instrument_type!r}",
+        ):
+            self._future(
+                security_type=security_type,
+                instrument_type=instrument_type,
+                continuous_alias=True,
+            )
 
-        assert self._future(instrument_type="spot", multiplier=1.0, continuous_alias=True)
+    def test_registered_stock_overridden_to_a_future_is_refused(self):
+        config = RunConfig(
+            strategy_name="x",
+            symbols=["MU"],
+            timeframe="1d",
+            market="us_equity",
+            data_source="ibkr",
+            mode="backtest",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "MU": {"security_type": "FUT", "exchange": "CME", "continuous_alias": True}
+            },
+        )
+
+        with pytest.raises(ValueError, match="security_type='FUT' contradicts"):
+            resolve_symbol(config, "MU")
 
     def test_run_configuration_refuses_the_route_before_any_fetch(self):
         config = RunConfig(
@@ -327,7 +361,7 @@ class TestFuturesSelectorAtRegistration:
                     "data_adapter": "ibkr",
                     "venue_symbol": "ES",
                     "currency": "USD",
-                    "instrument_type": "spot",
+                    "instrument_type": "contract_quarterly",
                     "security_type": "FUT",
                     "exchange": "CME",
                 }
@@ -788,6 +822,33 @@ class TestDataSourceRoute:
     def test_partial_route_change_is_refused_naming_what_it_inherits(self, route, inherited):
         with pytest.raises(ValueError, match=rf"inherits its registered [^;]*{inherited}"):
             self._cfg(data_source="multi", overrides={"BTCUSDT": route})
+
+    def test_adapter_change_alone_is_refused_naming_the_inherited_source(self):
+        # The adapter fetches the bars and data_source labels them, so moving
+        # the fetch to another adapter under the registered label is refused.
+        with pytest.raises(
+            ValueError,
+            match=r"data_adapter='ibkr' but inherits its registered data_source='binance_spot'",
+        ):
+            self._cfg(
+                data_source="binance_spot",
+                overrides={"BTCUSDT": {"data_adapter": "ibkr", "security_type": "STK"}},
+            )
+
+    def test_adapter_change_with_the_full_route_stated_is_accepted(self):
+        config = self._cfg(
+            data_source="binance_spot",
+            overrides={
+                "BTCUSDT": {
+                    "data_adapter": "replay",
+                    "data_source": "binance_spot",
+                    "instrument_type": "spot",
+                    "venue_symbol": "BTC/USDT",
+                }
+            },
+        )
+
+        assert resolve_symbol(config, "BTCUSDT").data_adapter == "replay"
 
     def test_symbol_cannot_take_multi_as_its_own_source(self):
         with pytest.raises(ValueError, match=r"\['data_source'\]='multi' names no source"):

@@ -411,6 +411,79 @@ class TestFromConfig:
         assert CostModel.from_config(cfg, symbol="TXFR1").multiplier == 111.0
 
 
+class TestRunWideContractEconomics:
+    """A run-wide multiplier or tick_size in a multi-symbol run must not
+    replace a registered symbol's own value: TXFR1 (200) and MXFR1 (50)
+    cannot both be worth 10 per point."""
+
+    @staticmethod
+    def _cfg(symbols, **kwargs):
+        from librae.core.run_config import AccountConfig, RunConfig
+
+        return RunConfig(
+            strategy_name="x",
+            symbols=list(symbols),
+            timeframe="5m",
+            market="tw_futures",
+            data_source="shioaji",
+            account=AccountConfig(currency="TWD", initial_cash=1_000_000.0),
+            mode="backtest",
+            **kwargs,
+        )
+
+    @pytest.mark.parametrize(
+        ("field", "value", "registered"),
+        [("multiplier", 10.0, "200.0"), ("tick_size", 0.5, "1.0")],
+    )
+    def test_value_that_differs_from_a_registered_one_is_refused(
+        self, field: str, value: float, registered: str
+    ) -> None:
+        with pytest.raises(
+            ValueError,
+            match=rf"cost_overrides\['{field}'\].*{registered} of 'TXFR1'.*symbol_cost_overrides",
+        ):
+            self._cfg(["TXFR1", "MXFR1"], cost_overrides={field: value})
+
+    def test_symbol_that_sets_its_own_value_is_exempt(self) -> None:
+        cfg = self._cfg(
+            ["TXFR1", "MXFR1"],
+            cost_overrides={"multiplier": 10.0},
+            symbol_cost_overrides={
+                "TXFR1": {"multiplier": 200.0},
+                "MXFR1": {"multiplier": 50.0},
+            },
+        )
+
+        assert CostModel.from_config(cfg, symbol="MXFR1").multiplier == 50.0
+
+    def test_value_equal_to_every_registered_one_is_accepted(self) -> None:
+        cfg = self._cfg(["TXFR1", "MXFR1"], cost_overrides={"tick_size": 1.0})
+
+        assert CostModel.from_config(cfg, symbol="MXFR1").tick_size == 1.0
+
+    def test_registered_symbol_without_its_own_tick_size_takes_the_run_wide_one(self) -> None:
+        from librae.core.run_config import AccountConfig, RunConfig
+
+        cfg = RunConfig(
+            strategy_name="x",
+            symbols=["BTCUSDT", "ETHUSDT"],
+            timeframe="1h",
+            market="crypto",
+            data_source="binance_spot",
+            account=AccountConfig(currency="USDT", initial_cash=10_000.0),
+            mode="backtest",
+            cost_overrides={"tick_size": 0.1, "multiplier": 1.0},
+            instrument_overrides={"ETHUSDT": {"instrument_type": "spot", "currency": "USDT"}},
+        )
+
+        assert CostModel.from_config(cfg, symbol="BTCUSDT").tick_size == 0.1
+
+    def test_unregistered_homogeneous_universe_keeps_the_run_wide_value(self) -> None:
+        cfg = self._cfg(["TXF202612", "TXF202703"], cost_overrides={"multiplier": 200.0})
+
+        assert CostModel.from_config(cfg, symbol="TXF202703").multiplier == 200.0
+
+
 class TestPerContractCommission:
     """commission_per_contract scales with contracts; min_commission floors
     the per-trade total; the fee comes from each symbol's registry entry."""
