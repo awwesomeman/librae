@@ -37,7 +37,8 @@ Rotation procedure (any credential class):
    directly on each host over SSH; on the build machine, `librae doctor`
    confirms the connection strings still agree with the new password.
 3. Restart the affected deployment (`deploy/trade.sh restart <deployment_id>`,
-   or the `timescaledb`/`grafana` Compose services for DB passwords).
+   or the `timescaledb` Compose service for DB passwords, and any running
+   console when `POSTGRES_GRAFANA_PASSWORD` changed).
 4. Revoke the old credential at the provider once the new one is confirmed
    working — do not revoke first, or a mid-rotation restart fails closed
    with no way back in.
@@ -208,8 +209,8 @@ until it has taken its leases, and after it stops. It reports one of
 `missing_valuation_mark` or `stale_valuation_mark`, the symbols responsible,
 and what to do next. A refused reset is also recorded as a `decision_skipped`
 runtime event with reason `halt_reset_blocked`; every halt alert and applied
-reset is recorded too, as `halted` and `halt_reset`. The strategy dashboard's
-Runtime Events panel lists them per run. One recorded during a database outage
+reset is recorded too, as `halted` and `halt_reset`. The console's
+Runtime events page lists them per run. One recorded during a database outage
 is written once the store recovers; if the process stops first, its shutdown
 log names it as dropped, and after a crash only the container log and alert
 record it, even when the run restores halted.

@@ -1,9 +1,8 @@
 """Static check that hand-written SQL only names columns the schema declares.
 
-Neither the Grafana dashboards nor librae/db/'s queries run against a real
-database in this suite, so a column renamed in timescale_init.sql leaves them
-silently broken — a red panel that reads as "no data", or a query that raises
-only in production. Both sides check themselves against the reference schema
+Neither the console's nor librae/db/'s queries run against a real database in
+this suite, so a column renamed in timescale_init.sql leaves them silently
+broken — a page that errors, or a query that raises only in production. Both sides check themselves against the reference schema
 through these helpers.
 
 Only unambiguous single-table statements can be checked honestly; every other
@@ -37,7 +36,6 @@ _STRING = re.compile(r"'[^']*'")
 _PARAM = re.compile(r"%\(\w+\)s|%s")
 _LABELLED_OUTPUT = re.compile(r"\bAS\s+\"[^\"]*\"", re.IGNORECASE)
 _QUOTED = re.compile(r"\"[^\"]*\"")
-_GRAFANA = re.compile(r"\$\{[^}]*\}|\$\w+")
 _CAST = re.compile(r"::\s*\w+")
 _CALL = re.compile(r"\b[A-Za-z_]\w*\s*\(")
 _NAMED_ARG = re.compile(r"\b\w+\s*=>")
@@ -65,11 +63,10 @@ def columns_by_table() -> dict[str, set[str]]:
 
 def strip_non_columns(sql: str) -> str:
     """Drop everything that is not a column or table reference."""
-    sql = _STRING.sub(" ", sql)  # literals, including '${run_id}'
+    sql = _STRING.sub(" ", sql)  # literals
     sql = _PARAM.sub(" ", sql)  # psycopg placeholders: %s, %(name)s
     sql = _LABELLED_OUTPUT.sub(" ", sql)  # AS "P&L" — an output label, not a column
     sql = _QUOTED.sub(" ", sql)
-    sql = _GRAFANA.sub(" ", sql)  # ${account_id:sqlstring}, $__timeFilter, $n
     sql = _CAST.sub(" ", sql)  # ::numeric
     sql = _CALL.sub("(", sql)  # an identifier before "(" is a function
     sql = _NAMED_ARG.sub(" ", sql)  # make_interval(secs => ...)

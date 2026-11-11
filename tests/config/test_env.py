@@ -148,7 +148,7 @@ _CLEAN_SECRETS = "\n".join(
 
 class TestDoctor:
     def test_clean_project_has_no_findings(self, tmp_path: Path):
-        project = _project(tmp_path, "GF_BIND=127.0.0.1\nTELEGRAM_CHAT_ID=1\n", _CLEAN_SECRETS)
+        project = _project(tmp_path, "TSDB_BIND=127.0.0.1\nTELEGRAM_CHAT_ID=1\n", _CLEAN_SECRETS)
 
         assert doctor(project) == []
 

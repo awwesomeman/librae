@@ -5,31 +5,6 @@
 # the DB's growth (set via /etc/docker/daemon.json's "data-root") *before*
 # running this compose file — see cloud_deploy.sh's host requirements.
 services:
-  grafana:
-    image: grafana/grafana:13.1.1
-    container_name: quant_grafana
-    ports:
-      - "${GF_BIND:-127.0.0.1}:${GF_PORT:-3000}:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ../librae/app/grafana/provisioning:/etc/grafana/provisioning
-    environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?GF_SECURITY_ADMIN_PASSWORD must be set}
-      POSTGRES_GRAFANA_PASSWORD: ${POSTGRES_GRAFANA_PASSWORD:?POSTGRES_GRAFANA_PASSWORD must be set}
-      VPS_DB_HOST: ${VPS_DB_HOST:-quant_timescaledb}
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-    networks:
-      - quant_network
-
   timescaledb:
     image: timescale/timescaledb:2.28.3-pg16
     container_name: quant_timescaledb
@@ -62,5 +37,4 @@ networks:
     driver: bridge
 
 volumes:
-  grafana_data:
   timescaledb_data:

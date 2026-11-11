@@ -49,5 +49,5 @@ pattern.
 
 Use these functions to study the signal itself. Use `Backtest` when you need
 portfolio state, fills, costs, risk controls, or performance metrics. The
-database schema and optional Grafana signal monitor are described in
+database schema and the console's Signal page are described in
 [Optional infrastructure](optional-infrastructure.md).

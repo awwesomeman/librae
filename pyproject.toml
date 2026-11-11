@@ -79,6 +79,11 @@ test = [
   "httpx>=0.24",
   "pyyaml>=6.0",
 ]
+console = [
+  "streamlit>=1.67,<2",  # dataframe name actions use ButtonColumn
+  "plotly>=6,<8",
+  "psycopg2-binary>=2.9",
+]
 viz = [
   "lightweight-charts>=2.0",  # local trade-chart exploration only (librae/backtest/charts.py)
 ]
@@ -93,11 +98,7 @@ include = ["librae*"]
 [tool.setuptools.package-data]
 librae = ["_scaffold/env.example"]
 "librae.db" = ["*.sql"]
-"librae.app" = [
-  "grafana/provisioning/dashboards/*.yaml",
-  "grafana/provisioning/dashboards/json/*.json",
-  "grafana/provisioning/datasources/*.yaml",
-]
+"librae.console" = ["*.css"]
 
 [tool.setuptools_scm]
 # Derives the version from git tags/commit distance instead of a hand-maintained

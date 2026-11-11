@@ -5,14 +5,14 @@
 Use **Security → Advisories → Report a vulnerability**. Do not disclose
 vulnerability details in a public issue.
 
-## Secure deployment guide (VM deployment of UI/DB)
+## Secure deployment guide (VM deployment of the DB)
 
-`deploy/` and `app/` are reference infrastructure. Review this checklist before
-using them on a VM or any host with a public IP.
+`deploy/` is reference infrastructure. Review this checklist before using it
+on a VM or any host with a public IP.
 
 ### 1. Bind management ports to a private interface
 
-`TSDB_BIND` and `GF_BIND` default to `127.0.0.1`. Set them only to a private
+`TSDB_BIND` defaults to `127.0.0.1`. Set it only to a private
 interface such as a Tailscale address. Check `docker ps`; a `0.0.0.0` mapping
 publishes the port on every host interface.
 
@@ -26,26 +26,28 @@ belongs in, and what `doctor` checks, is documented once in
 On an existing deployment, changing `.env.secrets` does not rotate database
 roles. Rotate `quant` from a trusted admin session, then rerun
 `timescale_init.sql` inside the database container for the two managed
-roles. Reset an existing Grafana admin password with
-`grafana cli admin reset-admin-password`.
+roles.
 
 ### 3. Keep container versions explicit
 
-Both reference Compose files use explicit Grafana and TimescaleDB versions.
-Review release notes and CVEs before updating them.
+The reference Compose file pins an explicit TimescaleDB version. Review
+release notes and CVEs before updating it.
 
 ### 4. Keep database roles separate
 
 Use `quant` only for migrations, `quant_app` for application reads and writes,
-and `grafana_reader` for dashboard queries. Grafana receives only its reader
-password; it does not receive either application or admin credentials.
+and `grafana_reader` for the console (`LIBRAE_CONSOLE_DSN`). The console
+receives only that reader's password, never the application or admin
+credentials.
 
-This prevents Grafana queries from changing trading records or using
-server-side `COPY PROGRAM`. It does not replace network isolation.
+This prevents the console from changing trading records or using server-side
+`COPY PROGRAM`. It does not replace network isolation. The console has no
+login of its own and listens on `127.0.0.1` by default; pass
+`--server.address` only with a private interface.
 
 ### 5. Block containers from reaching the cloud metadata server
 
-Database and Grafana containers do not need cloud instance credentials. Block
+Database containers do not need cloud instance credentials. Block
 their access to the metadata endpoint:
 
 ```bash
@@ -64,7 +66,7 @@ Also check the cloud firewall. For GCP:
 gcloud compute firewall-rules list --format="table(name,sourceRanges.list(),allowed[].map().firewall_rule().list())"
 ```
 
-Do not expose Grafana (3000) or PostgreSQL (5432) to `0.0.0.0/0`.
+Do not expose the console (8501 by default) or PostgreSQL (5432) to `0.0.0.0/0`.
 
 ## Trading credentials (a separate risk tier)
 

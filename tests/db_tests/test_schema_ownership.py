@@ -156,7 +156,7 @@ def test_the_walk_sees_the_engine_tables() -> None:
         _engine_tables()
     )
     assert {"position_events", "run_bars"} <= _engine_tables()  # via timescale_writer helpers
-    assert "positions" not in _engine_tables()  # a dashboard CTE, not a table
+    assert "position_counts" not in _engine_tables()  # a console CTE, not a table
 
 
 def test_collected_market_data_is_the_callers() -> None:

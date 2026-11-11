@@ -230,7 +230,6 @@ jobs:
             'POSTGRES_PASSWORD=quant_secret' \
             'POSTGRES_APP_PASSWORD=quant_app_secret' \
             'POSTGRES_GRAFANA_PASSWORD=grafana_reader_secret' \
-            'GF_SECURITY_ADMIN_PASSWORD=admin' \
             'TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@localhost:5432/quant' \
             'TRADE_TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@quant_timescaledb:5432/quant' \
             > .env.secrets
@@ -1038,8 +1037,6 @@ jobs:
             > .credentials/ci.env
           printf '%s\n' 'caller-strategy-must-not-transfer' \
             > ../strategy-fixture/private-source-marker
-          python3 -m venv .venv
-          .venv/bin/python3 -m pip install --quiet httpx
           ./deploy/cloud_deploy.sh deployment-target
 
       - name: Verify remote boundary, services, and schema
@@ -1061,7 +1058,6 @@ jobs:
                 --format "{{.State.Health.Status}}" \
                 quant_timescaledb
             )" = "healthy"
-            wget -qO- http://127.0.0.1:3000/api/health >/dev/null
             test "$(
               docker exec quant_timescaledb \
                 psql -U quant -d quant -tAc \

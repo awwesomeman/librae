@@ -1110,7 +1110,7 @@ class TestTheAuditRowSaysWhenTheBarWasReceived:
 
     def test_a_halted_simulation_still_records_the_bars_it_marks(self) -> None:
         """Equity keeps being marked while halted; the price behind it must
-        be in the table too, or a dashboard marks positions at a stale bar."""
+        be in the table too, or the console marks positions at a stale bar."""
         sink = _RecordingDurableSink()
         clock = {"now": self.RECEIVED}
         frame = {"bars": _frame(6)}

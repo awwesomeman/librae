@@ -2,8 +2,8 @@
 
 The suite mocks the connection everywhere, so these statements are never
 executed against a real database: a renamed column raises only in production.
-position_events.pnl -> realized_pnl broke the Grafana panels (guarded since)
-and load_position_events, which failed every refresh_performance call silently.
+position_events.pnl -> realized_pnl broke load_position_events, which failed
+every refresh_performance call silently.
 """
 
 from __future__ import annotations
