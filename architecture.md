@@ -253,7 +253,7 @@ Grafana dashboards consume the same multiplier.
   optional balance reads, for cash reconciliation and the free-balance check
   before an entry, are a separate `BalanceReader` capability.
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
-- Futures have one broker-neutral selection rule, defined once in `validate_futures_selector` and applied both where an instrument is registered and where an adapter resolves a contract: an instrument fetched as a future — a dated monthly/quarterly `instrument_type`, or any entry carrying `security_type="FUT"` — must set exactly one of `contract_month="YYYYMM"` (an exact expiry) or `continuous_alias=True` (a deliberately dynamic contract, whose meaning is the venue's own). `symbol` is the opaque, unique engine/position key and is never parsed; use a readable key such as `ES_202609` when holding multiple expiries. `venue_symbol` is the broker-facing root or native contract code. Adapters translate those common facts into their native representation instead of forcing one broker's symbol grammar on every broker.
+- Futures have one broker-neutral selection rule, defined once in `validate_futures_selector` and applied both where an instrument is registered and where an adapter resolves a contract: an instrument fetched as a future — a dated monthly/quarterly `instrument_type` — must set exactly one of `contract_month="YYYYMM"` (an exact expiry) or `continuous_alias=True` (a deliberately dynamic contract, whose meaning is the venue's own). `security_type` must name the same product as `instrument_type` (`STK` is `spot`, `FUT` a dated contract), because it picks the venue contract bars and orders use while `instrument_type` drives accounting, shorting and margin; a contradiction is refused when the instrument is resolved rather than reconciled. `symbol` is the opaque, unique engine/position key and is never parsed; use a readable key such as `ES_202609` when holding multiple expiries. `venue_symbol` is the broker-facing root or native contract code. Adapters translate those common facts into their native representation instead of forcing one broker's symbol grammar on every broker.
 - IBKR consumes a product root in `venue_symbol` plus the separate `contract_month`. Shioaji and CCXT may instead require an exact broker-native contract code in `venue_symbol`; they still receive the common month/alias identity, but the adapter does not parse or reconstruct proprietary symbol syntax. This is one semantic interface with broker-specific resolution, not one universal ticker format.
 - `IBKRAdapter` covers US stocks and futures. Stocks are SMART-routed by
   symbol; futures require `security_type="FUT"` and an exchange. Exact
@@ -554,6 +554,8 @@ cost_model = CostModel.from_config(config, markets=my_markets)
 
 `CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_cost_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`multiplier`: `spot` auto-1.0, `contract_*` required-explicit; optional `tick_size`) and the per-product `commission_per_contract` > market-level defaults. `commission_per_contract` has no market-level value: a `tw_futures` symbol, registered or not, pays its product's fee (TXF/MXF/TMF, by code root), and an unrecognized one raises until an override sets the fee; other markets default to 0. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
 
+In a multi-symbol run, a run-wide `cost_overrides` `multiplier` or `tick_size` only fills in for symbols without their own value: one that differs from a registered symbol's value is refused at `RunConfig` construction unless `symbol_cost_overrides` sets that symbol's, since contracts in one run rarely share economics (TXFR1=200, MXFR1=50). A single-symbol run keeps the priority above.
+
 `Backtest.__init__` calls this once per symbol in the run (not just `config.symbol`) whenever `config=` is used and no explicit `cost_model=` override is given — a multi-asset run mixing symbols with different multipliers (e.g. `tw_futures`: TXFR1=200 + MXFR1=50 in the same run) gets each symbol's own multiplier automatically, not just the first symbol's applied to everyone.
 
 ```python
@@ -627,7 +629,9 @@ symbol's `data_source` labels its bars, and for a crypto symbol its
 `instrument_type` and `venue_symbol` pick the market orders go to, so an
 override that changes any of the three must state all three: the inherited
 ones would describe a different instrument than the overridden ones, and
-the bars, their label and the order market would disagree.
+the bars, their label and the order market would disagree. Its
+`data_adapter` fetches the bars `data_source` labels, so changing the
+adapter must state all three as well.
 
 `quantity_step`, `min_quantity`, `min_notional`, and a fixed `price_increment`
 are stable, cross-mode execution facts. The core rounds quantities down before
