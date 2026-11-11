@@ -5,7 +5,7 @@ cash, in-flight orders and the halted flag, so a silently defaulted field
 means the local book disagrees with the broker. Classifying the recent
 version bumps showed the provably-additive case is a minority, and
 misclassifying one produces exactly that divergence — so the rule is exact
-equality.
+equality, except for a previous version ``state.py`` names as additive.
 
 The refusal therefore has to explain itself: which version is which, why
 nothing migrates automatically, and what the operator does next.
@@ -30,13 +30,13 @@ def _document(version: object) -> dict:
 
 
 class TestOlderCheckpointsAreStillRejected:
-    """Anything but an exact version match is refused."""
+    """Anything but the current version, or the previous one named additive, is refused."""
 
     @pytest.mark.parametrize(
         "version",
-        [_STATE_SCHEMA_VERSION - 1, _STATE_SCHEMA_VERSION + 1, None, "26"],
+        [_STATE_SCHEMA_VERSION - 2, _STATE_SCHEMA_VERSION + 1, None, "26"],
     )
-    def test_anything_but_an_exact_match_is_refused(self, version: object) -> None:
+    def test_anything_but_a_loadable_version_is_refused(self, version: object) -> None:
         with pytest.raises(ValueError):
             LiveRuntimeState.from_dict(_document(version))
 
@@ -45,12 +45,12 @@ class TestTheRefusalIsActionable:
     @pytest.fixture
     def message(self) -> str:
         with pytest.raises(ValueError) as excinfo:
-            LiveRuntimeState.from_dict(_document(_STATE_SCHEMA_VERSION - 1))
+            LiveRuntimeState.from_dict(_document(_STATE_SCHEMA_VERSION - 2))
         return str(excinfo.value)
 
     def test_it_still_reports_both_versions(self, message: str) -> None:
         assert str(_STATE_SCHEMA_VERSION) in message
-        assert str(_STATE_SCHEMA_VERSION - 1) in message
+        assert str(_STATE_SCHEMA_VERSION - 2) in message
 
     def test_it_says_why_no_automatic_migration_happens(self, message: str) -> None:
         """Otherwise this reads as a missing feature rather than a decision."""
@@ -72,5 +72,5 @@ class TestTheRefusalIsActionable:
         """A per-version changelog in an error string is drift-prone: it would
         need editing on every bump and would silently go stale when it was
         not. The procedure is the same whatever the stored version is."""
-        for version in range(_STATE_SCHEMA_VERSION - 6, _STATE_SCHEMA_VERSION - 1):
+        for version in range(_STATE_SCHEMA_VERSION - 7, _STATE_SCHEMA_VERSION - 2):
             assert str(version) not in message

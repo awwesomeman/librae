@@ -592,7 +592,7 @@ class TestFlattenCheckpointFailure:
         assert len(_titled(alerts, "Halt Persisted")) == 1
 
     @pytest.mark.parametrize("store_down", [False, True])
-    def test_a_halt_inside_the_flatten_cancels_as_with_the_store_up(self, store_down):
+    def test_a_halt_inside_the_flatten_cancels_its_exit_as_with_the_store_up(self, store_down):
         adapter = _resting_adapter()
         # Placement fails and the client-id lookup finds nothing.
         adapter.place_order.side_effect = lambda _signal: None
@@ -611,10 +611,10 @@ class TestFlattenCheckpointFailure:
         trader._poll_cycle()
 
         assert len(_titled(alerts, "Ambiguous Order Placement")) == 1
-        # Queued exits left for the next cycle would reach the unresolved one again.
+        # Its cancel is owed, so the next cycle's order poll does not halt on it again.
         assert _titled(alerts, "Ambiguous Restored Order") == []
-        assert [order.request.symbol for order in trader._active_orders] == [SYMBOLS[0]]
-        assert trader._active_orders[0].cancel_requested is True
+        assert [order.request.symbol for order in trader._active_orders] == SYMBOLS
+        assert [order.cancel_requested for order in trader._active_orders] == [True, False, False]
         assert trader.halt_reset_readiness().reason != "halt_not_persisted"
 
 

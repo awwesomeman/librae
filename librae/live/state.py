@@ -49,7 +49,11 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 29
+_STATE_SCHEMA_VERSION = 30
+# The one exception: it lacks only ``pending_flatten``, which no build writing
+# it could hold, so it loads with none. A later bump decides afresh whether
+# its previous version is additive in the same way; most are not.
+_ADDITIVE_PREVIOUS_SCHEMA_VERSION = 29
 
 
 def normalize_runtime_revision(
@@ -262,6 +266,22 @@ class LiveRebalance:
         )
 
 
+@dataclass(frozen=True)
+class PendingFlatten:
+    """A flatten whose exits wait until the venue confirms its halt's cancels ended."""
+
+    reason: str
+    title: str
+    detail: str
+
+    def to_dict(self) -> dict:
+        return {"reason": self.reason, "title": self.title, "detail": self.detail}
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> PendingFlatten:
+        return cls(reason=str(raw["reason"]), title=str(raw["title"]), detail=str(raw["detail"]))
+
+
 @dataclass
 class LiveRuntimeState:
     """One restartable strategy deployment checkpoint."""
@@ -304,6 +324,7 @@ class LiveRuntimeState:
     period_index: int = 0
     status_period_count: int = 0
     halted: bool = False
+    pending_flatten: PendingFlatten | None = None
     entries_paused: bool = False
     # Queued groups that have sent no leg yet, so the entry checks still judge them.
     unstarted_groups: list[str] = field(default_factory=list)
@@ -386,6 +407,7 @@ class LiveRuntimeState:
             "period_index": self.period_index,
             "status_period_count": self.status_period_count,
             "halted": self.halted,
+            "pending_flatten": self.pending_flatten.to_dict() if self.pending_flatten else None,
             "entries_paused": self.entries_paused,
             "unstarted_groups": list(self.unstarted_groups),
             "adv_session_labels": self.adv_session_labels,
@@ -395,12 +417,12 @@ class LiveRuntimeState:
     @classmethod
     def from_dict(cls, raw: dict) -> LiveRuntimeState:
         schema_version = raw.get("schema_version")
-        if schema_version != _STATE_SCHEMA_VERSION:
+        if schema_version not in (_STATE_SCHEMA_VERSION, _ADDITIVE_PREVIOUS_SCHEMA_VERSION):
             raise ValueError(
                 "unsupported live runtime-state checkpoint: this build writes "
                 f"version {_STATE_SCHEMA_VERSION}, the stored document is "
-                f"{schema_version!r}. Checkpoint documents are not migrated "
-                "automatically: this one holds positions, cash, in-flight orders "
+                f"{schema_version!r}. This document is not migrated "
+                "automatically: it holds positions, cash, in-flight orders "
                 "and the halted flag, so a defaulted field would let the local "
                 "book disagree with the broker. Stop flat and start a new "
                 "checkpoint, or migrate the stored document externally after "
@@ -463,6 +485,11 @@ class LiveRuntimeState:
             period_index=int(raw["period_index"]),
             status_period_count=int(raw["status_period_count"]),
             halted=bool(raw["halted"]),
+            pending_flatten=(
+                PendingFlatten.from_dict(raw["pending_flatten"])
+                if schema_version == _STATE_SCHEMA_VERSION and raw["pending_flatten"] is not None
+                else None
+            ),
             entries_paused=bool(raw["entries_paused"]),
             unstarted_groups=[str(group_id) for group_id in raw["unstarted_groups"]],
             adv_session_labels={
