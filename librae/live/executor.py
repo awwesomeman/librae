@@ -875,10 +875,22 @@ class LiveExecutor:
     @staticmethod
     def _normalize_status(raw_status: object) -> OrderStatus:
         status = str(raw_status or "").lower().replace("-", "_").replace(" ", "_")
+        # States the venue has not finished are matched before the final-state
+        # substrings below, which would otherwise read them as final:
+        # - "pendingcancel": IB's PendingCancel, a cancel not yet confirmed
+        #   (TWS API, "Possible Order States").
+        # - "canceling": ccxt's non-unified status for a cancel the venue has
+        #   not finished, from parse_order_status in several exchange modules
+        #   (e.g. htx contract status 11, binance PENDING_CANCEL).
+        # - "validationerror": the status ib_async sets when IB sends a warning
+        #   about an order, which ib_async counts as still working; a warning
+        #   can come before IB accepts the order, hence submitted.
+        if status in ("pending_cancel", "pendingcancel", "canceling"):
+            return "cancel_pending"
+        if status == "validationerror":
+            return "submitted"
         if any(token in status for token in ("reject", "fail", "error", "inactive")):
             return "rejected"
-        if status in ("pending_cancel", "pendingcancel"):
-            return "cancel_pending"
         if "cancel" in status or "expired" in status:
             return "cancelled"
         if status in ("filled", "closed", "complete", "completed"):

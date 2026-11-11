@@ -103,6 +103,17 @@ _BAR_SIZE_MAP = {
 _NATIVE_CALENDAR_TIMEFRAMES = frozenset({"1d", "1w", "1M"})
 _MARKET_RULE_CACHE_MAXSIZE = 128
 _MarketRuleLadder = tuple[tuple[float, float], ...]
+# ib_async's OrderStatus.ValidationError, spelled out so that normalizing a
+# trade does not import the SDK.
+_IB_ASYNC_WARNING_STATUS = "ValidationError"
+# Codes ib_async treats as warnings whose TWS API message-code text says the
+# request itself was refused: 321 "Server error when validating an API
+# client request", 434 "The order size cannot be zero", and 2168 and 2169,
+# whose descriptions say to remove an order attribute "to place order". The
+# rest concern an order modify, which Librae never sends, market data and
+# the connection, or a live order, such as 404 for one IB holds while shares
+# are located; codes IB's page does not describe stay non-final too.
+_IB_REFUSED_ORDER_CODES = frozenset({321, 434, 2168, 2169})
 
 
 def _utc_today() -> date:
@@ -1019,7 +1030,7 @@ class IBKRAdapter:
                 commissions.append(commission)
         result = {
             "id": str(trade.order.orderId),
-            "status": trade.orderStatus.status,
+            "status": IBKRAdapter._order_status(trade),
         }
         client_order_id = trade.order.orderRef
         symbol = trade.contract.symbol
@@ -1043,6 +1054,51 @@ class IBKRAdapter:
             if fills:
                 result["executed_at"] = max(fill.time for fill in fills)
         return result
+
+    @staticmethod
+    def _order_status(trade) -> str:
+        """The order's status, read past the marker ib_async sets for an IB warning.
+
+        For every code ib_async treats as a warning it overwrites the status
+        with its own ``ValidationError``; IB has no such state. Most of those
+        codes leave the order live, such as 404 for a short sale IB holds
+        while shares are located, so the status the marker overwrote, kept in
+        the trade log, says where the order stands. A refusal code on an order
+        IB has not answered otherwise means IB did not take it: rejected.
+        With nothing earlier logged, the marker is reported, which
+        ``LiveExecutor`` reads as not yet final.
+        """
+        status = trade.orderStatus.status
+        if status != _IB_ASYNC_WARNING_STATUS:
+            return status
+        log = list(trade.log)
+        refused = any(
+            entry.status == _IB_ASYNC_WARNING_STATUS and entry.errorCode in _IB_REFUSED_ORDER_CODES
+            for entry in log
+        )
+        if refused and not IBKRAdapter._ib_answered(trade):
+            return "rejected"
+        for entry in reversed(log):
+            if entry.status and entry.status != _IB_ASYNC_WARNING_STATUS:
+                return entry.status
+        return status
+
+    @staticmethod
+    def _ib_answered(trade) -> bool:
+        """Whether IB may have taken the order, so a refusal code cannot end it.
+
+        ib_async logs its own PendingSubmit when it places an order, and only
+        IB assigns a permId. A log holding just that placement entry and
+        warnings, with no permId, is an order IB has not answered. Any other
+        entry counts as answered, as does a trade ib_async built from IB's own
+        report, which has no placement entry.
+        """
+        if getattr(trade.order, "permId", 0):
+            return True
+        log = list(trade.log)
+        if not log or log[0].status != "PendingSubmit" or log[0].errorCode:
+            return True
+        return any(entry.status != _IB_ASYNC_WARNING_STATUS for entry in log[1:])
 
     @staticmethod
     def _optional_float(value: object) -> float | None:
