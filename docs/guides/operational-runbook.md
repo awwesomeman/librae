@@ -336,7 +336,7 @@ A halt whose checkpoint write fails is still applied in memory
 | Alert | Meaning | Action |
 |---|---|---|
 | Any halt alert that says `halt not persisted (<error>)`; a flatten's alert may also say `exit submission failed` | Halted in memory; the state store refused the checkpoint. The halt has cancelled nothing yet, and a flatten that says `exit submission failed` submitted nothing. Every later cycle retries the checkpoint and does nothing else until it succeeds, so a Poll Error alert follows if the outage lasts; `halt()` raises the same error until then | Keep the process running and restore the state store. Orders resting at the venue keep working meanwhile: cancel at the venue anything that must not fill |
-| **Max Drawdown Breach** or **Operator Flatten** that says `not recorded yet (<error>)` | The state store is down, but the flatten went ahead: its cancels and exits went out, their rows held in memory. Halted in memory. Each later cycle retries the checkpoint, then goes on with the cancels and exits still owed, so a Poll Error alert follows while the store is down | Keep the process running and restore the state store; **Halt Persisted** follows. Do not also close those positions at the venue while it runs: its exits are sized from the ledger and would send a second close. If the store stays down, see [Long store outage](#long-store-outage) |
+| **Max Drawdown Breach** or **Operator Flatten** that says `not recorded yet (<error>)` | The state store is down, but the flatten went ahead: its cancels and exits went out, their rows held in memory. Halted in memory. Each later cycle retries the checkpoint, then goes on with the cancels and exits still owed, so a Poll Error alert follows while the store is down | Keep the process running and restore the state store; **Halt Persisted** follows. Do not also close those positions at the venue while it runs: its exits are sized from the ledger and would send a second close, which on a venue without reduce-only orders opens a reverse position (in this codebase the IBKR and Shioaji adapters send no reduce-only flag; the crypto adapter sets it on contract markets). If the store stays down, see [Long store outage](#long-store-outage) |
 | Halt Persisted | The retry succeeded; a restart now resumes halted. A plain halt's cancellations go out now, and the alert names one that fails (below); a flatten's exits, including ones it could not record before, go out and keep working | Continue the normal halt review; `reset_halt()` stops refusing with `halt_not_persisted` |
 
 A halt alert that says `awaiting cancel confirmation for <orders>` lists the
@@ -406,8 +406,10 @@ yourself instead, or to stop the process before the store returns:
 1. `./deploy/trade.sh stop <deployment_id>`. The container runs with
    `--restart unless-stopped`, so a manual stop stays stopped. Stopping
    cancels nothing, and nothing watches the book from here on.
-2. At the venue, cancel the account's open orders and close its positions
-   on the configured symbols.
+2. At the venue, first cancel every open order on the configured symbols,
+   exits the flatten already sent included, and confirm each has ended.
+   Then close each position by the size the venue shows, not the ledger's:
+   exits that filled have already closed part of it.
 3. Start again only once the store answers. The process resumes from the
    last checkpoint written before the outage, finds the venue differing
    from it (an order it tracked and you cancelled reads **Order Cancelled**,
@@ -419,6 +421,11 @@ yourself instead, or to stop the process before the store returns:
    mismatches again. Stop flat and start a new checkpoint, keeping the old
    one for audit
    ([Development checkpoint compatibility](optional-infrastructure.md#development-checkpoint-compatibility)).
+
+A process that crashed and restarted on its own after a flatten went ahead
+unrecorded halts on **Orphan Broker Orders** but does not cancel that exit,
+since it does not track it. Cancel it at the venue before closing by hand,
+or a later fill on it reverses the position.
 
 The stopped process's lease, a PostgreSQL advisory lock, may stay held until
 the server's own keepalive drops its connection, so the start in step 3 can
