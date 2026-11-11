@@ -230,10 +230,14 @@ def _network_errors_unavailable[**P, R](
     """Classify ccxt's NetworkError family on a reconciliation or order status read.
 
     ccxt raises that family for timeouts, connection failures, rate limits
-    and unavailable-status replies (``Exchange.httpExceptions``; its fallback
-    also files an unrecognized 400/403/404 there, which the engine's bound on
-    skipped rounds still caps). Authentication and permission errors sit
-    under ExchangeError instead and keep their type, so they fail closed.
+    and unavailable-status replies (``Exchange.httpExceptions``).
+    Authentication and permission errors sit under ExchangeError instead and
+    keep their type, so they fail closed. Some refusals no wait clears land
+    in the family all the same: the ``httpExceptions`` fallback files an
+    unrecognized 400/403/404/451 reply there, and binance raises -2015
+    (invalid key, IP or permissions) as DDoSProtection once a session has
+    authenticated (ccxt 4.5.66 ``binance.handle_errors``). The engine's time
+    bound on unanswered reads caps those.
     InvalidNonce (and its ChecksumError subclass) is in the family but is a
     client-side fault the venue answered (ccxt's binance table maps -1021,
     a request timestamp outside recvWindow, to it), so waiting cannot clear it.

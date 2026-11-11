@@ -950,6 +950,11 @@ class LiveTrader:
         self._consecutive_errors: int = 0
         # Of those, the ones not an outage met on a running account.
         self._unclassified_cycle_errors = 0
+        # The order whose status reads have failed, unbroken by an answer, and
+        # since when. Not checkpointed, as reconciliation's skips are not: a
+        # restart reads the head of the order queue and the venue's open
+        # orders, and halts if either read fails.
+        self._status_unread_since: tuple[str, datetime] | None = None
         self._market_data_fetch_failures: dict[str, int] = {}
         # Recent fetch health is intentionally process-local. Persisting a
         # short operational window across downtime would mix unlike polling
@@ -1540,7 +1545,9 @@ class LiveTrader:
     # bounding consecutive skips bounds how long broker/local drift can go
     # undetected. Only consecutive skips halt: every answered round runs a full
     # reconcile, so intermittent skips thin coverage without removing it, and
-    # the FETCH_HEALTH_* window below alerts on them instead.
+    # the FETCH_HEALTH_* window below alerts on them instead. The order poll
+    # halts after the same span of failed status reads
+    # (``_halt_status_unread_too_long``).
     RECONCILIATION_UNAVAILABLE_HALT_ROUNDS = 6
 
     # A six-poll window catches a sustained two-out-of-three failure pattern
@@ -5444,6 +5451,7 @@ class LiveTrader:
                             lambda request=request: self._executor.find_order(request)
                         )
                 except ValueError as exc:
+                    self._status_unread_since = None
                     self._poll_answer_not_applied(
                         tracked, tracked.order_id, exc, submit_planned=submit_planned
                     )
@@ -5453,17 +5461,22 @@ class LiveTrader:
                         # The cycle fails and the next one reads again. Either
                         # way the poll error names the order: an unanswered
                         # read only alerts, any other error halts once it
-                        # persists (``_answer_poll_error``).
-                        raise RuntimeError(
+                        # persists (``_answer_poll_error``), and both halt
+                        # once they have lasted too long.
+                        failure = (
                             f"{request.symbol} order_id={tracked.order_id or 'unassigned'} "
                             f"status unavailable ({type(exc).__name__}: {exc})"
-                        ) from exc
+                        )
+                        if self._halt_status_unread_too_long(tracked, failure):
+                            return
+                        raise RuntimeError(failure) from exc
                     logger.exception(
                         "Order status unavailable after local timeout: %s",
                         request.client_order_id,
                     )
                     self._cancel_timed_out_order(tracked, None, status_error=exc)
                     return
+                self._status_unread_since = None
                 if report is None:
                     # Same reasoning as "Ambiguous Order Placement" above:
                     # unknown broker state always halts, group or not.
@@ -5931,6 +5944,39 @@ class LiveTrader:
         if now.tzinfo is None:
             raise ValueError("clock must return a timezone-aware datetime")
         return (now.astimezone(UTC) - attempted_at).total_seconds() >= timeout_seconds
+
+    def _halt_status_unread_too_long(self, tracked: TrackedOrder, failure: str) -> bool:
+        """Halt once ``tracked``'s status reads have failed for the span reconciliation allows.
+
+        After ``RECONCILIATION_UNAVAILABLE_HALT_ROUNDS`` unanswered intervals
+        an account with no working order halts, and a working order, which
+        holds reconciliation and the drawdown check while its reads fail,
+        must not stretch that. Halting rather than alerting on also ends
+        refusals no retry clears that adapters classify as outages, such as
+        Binance's -2015 (see ``CryptoAdapter``); nothing in the error tells
+        them from a passing outage, so every failure counts alike. A halted
+        account is left alone: it has nothing more to stop, and cancelling a
+        recovery exit would leave its position open. Returns whether it halted.
+        """
+        now = self._utc_now()
+        key = tracked.request.client_order_id
+        if self._status_unread_since is None or self._status_unread_since[0] != key:
+            self._status_unread_since = (key, now)
+        unread_for = now - self._status_unread_since[1]
+        bound = timedelta(
+            seconds=self._reconciliation_interval_seconds
+            * self.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS
+        )
+        if self._halted or unread_for < bound:
+            return False
+        self._halt_live(
+            title="Order Status Unavailable",
+            message=(
+                f"{failure} for {unread_for.total_seconds() / 60:.0f} minutes, with no "
+                "drawdown check meanwhile"
+            ),
+        )
+        return True
 
     def _cancel_timed_out_order(
         self,
