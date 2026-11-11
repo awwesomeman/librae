@@ -48,10 +48,17 @@ from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
     next_session_open,
     session_bounds,
+    session_label,
     session_lookback_days,
     validate_calendar_id,
 )
-from librae.core.utils import floor_to_step, validate_contract_month, validate_futures_selector
+from librae.core.utils import (
+    floor_to_step,
+    interval_to_timedelta,
+    to_canonical,
+    validate_contract_month,
+    validate_futures_selector,
+)
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import (
     BrokerUnavailableError,
@@ -64,8 +71,10 @@ from .base import (
     drop_incomplete_ohlcv,
     find_position,
     passive_price,
+    settled_available_at,
     validate_order_signal,
     validate_time_in_force,
+    with_settled_available_at,
 )
 
 # IBKR carries the lifetime on the order itself rather than as a venue
@@ -172,17 +181,24 @@ def _normalize_daily_bars(
     frame = frame.copy()
     frame["session_date"] = session_dates
     frame["ts"] = pd.DatetimeIndex([opened_at for opened_at, _ in bounds])
-    if session_mode == "regular":
-        available_at = [closed_at for _, closed_at in bounds]
-    else:
-        # The generic exchange calendar owns regular-session geometry, not
-        # vendor-specific pre/post-market hours. Waiting until the following
-        # session opens is conservative and prevents a partial extended-hours
-        # daily value from entering a feature early. This is an eligibility
-        # policy, not an assertion about IBKR's actual publication timestamp.
-        available_at = [next_session_open(label, calendar_id) for label in session_dates]
-    frame["available_at"] = pd.DatetimeIndex(available_at)
+    frame["available_at"] = pd.DatetimeIndex(
+        [_daily_available_at(label, calendar_id, session_mode) for label in session_dates]
+    )
     return frame
+
+
+def _daily_available_at(
+    label: date, calendar_id: str, session_mode: MarketDataSessionMode
+) -> pd.Timestamp:
+    """When a daily bar of session ``label`` may be used."""
+    if session_mode == "regular":
+        return session_bounds(label, calendar_id)[1]
+    # The generic exchange calendar owns regular-session geometry, not
+    # vendor-specific pre/post-market hours. Waiting until the following
+    # session opens is conservative and prevents a partial extended-hours
+    # daily value from entering a feature early. This is an eligibility
+    # policy, not an assertion about IBKR's actual publication timestamp.
+    return next_session_open(label, calendar_id)
 
 
 def _contract_expiry_date(contract: object) -> date:
@@ -291,6 +307,23 @@ class IBKRAdapter:
     """
 
     market_data_route = "ibkr"
+
+    def market_data_available_at(
+        self,
+        ts: pd.Timestamp,
+        timeframe: str,
+        *,
+        calendar_id: str,
+        session_mode: MarketDataSessionMode,
+    ) -> pd.Timestamp:
+        """When the bar at ``ts`` is safe to observe: the ``available_at`` a
+        fetch stamps on it, or the nominal close of an extended intraday bar."""
+        canonical = to_canonical(timeframe)
+        if canonical == "D1":
+            return _daily_available_at(session_label(ts, calendar_id), calendar_id, session_mode)
+        if session_mode == "regular":
+            return settled_available_at(ts, canonical, calendar_id)
+        return pd.Timestamp(ts) + interval_to_timedelta(canonical)
 
     def __init__(
         self,
@@ -615,6 +648,8 @@ class IBKRAdapter:
             columns = ["ts", "open", "high", "low", "close", "volume"]
             if timeframe == "1d":
                 columns.extend(["session_date", "available_at"])
+            elif resolved_session_mode == "regular" and calendar_id is not None:
+                columns.append("available_at")
             return pd.DataFrame(columns=columns)
 
         if timeframe == "1d":
@@ -662,6 +697,8 @@ class IBKRAdapter:
                 timeframe,
                 calendar_id=completion_calendar,
             )
+        if timeframe != "1d" and resolved_session_mode == "regular" and calendar_id is not None:
+            df = with_settled_available_at(df, timeframe, calendar_id)
         return df.reset_index(drop=True)
 
     # ------------------------------------------------------------------

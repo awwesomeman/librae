@@ -82,7 +82,11 @@ subscription identity and daily completion boundary explicit without forcing
 the registry entry to own that calendar. A missing calendar in both places
 fails closed. These optional capability shapes are exported as
 `MarketDataRouteOwner` and `MarketDataCalendarProvider` from
-`librae.integrations`.
+`librae.integrations`. A source whose bars become available later than their
+completion floor declares when with a `market_data_available_at(ts, timeframe,
+*, calendar_id, session_mode)` method, returning the `available_at` it stamps
+on the bar at `ts`; the live engine then does not hold other symbols for that
+bar before it can arrive.
 
 The reference deployment factory resolves these capabilities in two phases.
 Built-in native routes are known from configuration, so a missing daily

@@ -165,7 +165,7 @@ def _poll(adapter, clock, at: str, timeframe: str = "1m", limit: int = 1000) -> 
     bars.index = (
         pd.to_datetime(bars.pop("ts"), utc=True).dt.tz_convert(_TAIPEI).dt.strftime("%H:%M")
     )
-    return bars
+    return bars.drop(columns="available_at")
 
 
 def _exchange_minutes(adapter, clock, at: str, timeframe: str = "1m") -> pd.DataFrame:
@@ -175,7 +175,7 @@ def _exchange_minutes(adapter, clock, at: str, timeframe: str = "1m") -> pd.Data
     bars.index = (
         pd.to_datetime(bars.pop("ts"), utc=True).dt.tz_convert(_TAIPEI).dt.strftime("%H:%M")
     )
-    return bars
+    return bars.drop(columns="available_at")
 
 
 def _trade_each_minute(session, first: str, last: str, *, second: int = 20, **kwargs) -> None:
@@ -241,7 +241,11 @@ class TestMinuteRule:
         session.trade("2026-11-05 13:45:00.024", 104, 5)
 
         clock.at("2026-11-05 13:45:30")
-        streamed = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True).set_index("ts")
+        streamed = (
+            adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)
+            .set_index("ts")
+            .drop(columns="available_at")
+        )
         polled = _poll(adapter, clock, "2026-11-05 13:46:01")
 
         assert streamed.loc[_taipei("2026-11-05 13:41")].tolist() == [100, 101, 100, 101, 3]

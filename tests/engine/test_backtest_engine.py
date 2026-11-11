@@ -2176,10 +2176,12 @@ class TestMultiAsset:
                 _make_multiindex_df([100.0] * 5, symbol="MU"),
             ]
         )
+        # Half-hour regular-session bars: the two calendars' bars share starts.
         cfg = RunConfig(
             strategy_name="t",
             symbols=["CRYPTO", "MU"],
-            timeframe="1d",
+            timeframe="30m",
+            session_mode="regular",
             market="multi",
             data_source="multi",
             account=AccountConfig(currency="USD", initial_cash=100_000.0),

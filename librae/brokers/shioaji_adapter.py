@@ -68,8 +68,10 @@ from .base import (
     AdapterInfo,
     drop_incomplete_ohlcv,
     find_position,
+    settled_available_at,
     validate_order_signal,
     validate_time_in_force,
+    with_settled_available_at,
 )
 from .shioaji_stream import ShioajiBarStream
 from .shioaji_time import shioaji_kbar_starts
@@ -187,6 +189,18 @@ class ShioajiAdapter:
     """
 
     market_data_route = "shioaji"
+
+    def market_data_available_at(
+        self,
+        ts: pd.Timestamp,
+        timeframe: str,
+        *,
+        calendar_id: str,
+        session_mode: str,
+    ) -> pd.Timestamp:
+        """When the bar at ``ts`` is safe to observe: the ``available_at`` a
+        fetch stamps on it (``settled_available_at``)."""
+        return settled_available_at(ts, timeframe, calendar_id)
 
     def __init__(
         self,
@@ -405,8 +419,9 @@ class ShioajiAdapter:
             continuous_alias: For futures only, require a native R1/R2 route.
             contract_month: For exact futures only, expected ``YYYYMM`` month.
 
-        Returns columns: ``[ts, open, high, low, close, volume]``
-        where ``ts`` is the true UTC-aware bar-start datetime.
+        Returns columns: ``[ts, open, high, low, close, volume, available_at]``
+        where ``ts`` is the true UTC-aware bar-start datetime and
+        ``available_at`` comes from ``market_data_available_at``.
         """
         contract = self._resolve_contract(symbol)
         self._validate_contract_selection(
@@ -431,7 +446,9 @@ class ShioajiAdapter:
             TAIFEX_INDEX_CALENDAR if security_type == "FUT" else "XTAI"
         )
 
-        empty = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+        empty = pd.DataFrame(
+            columns=["ts", "open", "high", "low", "close", "volume", "available_at"]
+        )
         if dateless and interval_to_timedelta(timeframe) == timedelta(days=1):
             start = _dateless_first_day(limit, resolved_calendar)
         today = pd.Timestamp.now(tz=_TAIPEI).date()
@@ -501,7 +518,10 @@ class ShioajiAdapter:
         if dateless and len(df) > limit:
             df = df.tail(limit).reset_index(drop=True)
 
-        return df[["ts", "open", "high", "low", "close", "volume"]]
+        df = with_settled_available_at(
+            df[["ts", "open", "high", "low", "close", "volume"]], timeframe, resolved_calendar
+        )
+        return df.reset_index(drop=True)
 
     def _kbars_minutes(
         self, contract: object, first_day: date, last_day: date, calendar_id: str

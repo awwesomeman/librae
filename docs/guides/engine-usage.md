@@ -310,7 +310,8 @@ operations require reconfiguration and restart; they are not behavior that
 strategy code should emulate.
 
 Per-symbol `OrderIntent`s become eligible on that symbol's next observed bar
-and can wait indefinitely without blocking anything else. `PortfolioWeights`
+(in a backtest, the first that starts once the decision's bars were all
+available) and can wait indefinitely without blocking anything else. `PortfolioWeights`
 is intentionally synchronous and must be immediately executable when
 returned: the strategy checks `ctx.available_symbols` for every non-zero
 target and currently held symbol *before* returning one — the engine does not
@@ -468,8 +469,11 @@ already decided is recorded beside the old one (`run_bars` in
 defined under data staleness below. Both modes advance a durable per-symbol
 watermark only after successful processing. A late symbol at the same
 timestamp is processed with any same-timestamp bars already present in cache,
-so a waiting target basket can become executable. An older event that would
-rewind the global clock fails explicitly. If a backtest still holds a symbol
+so a waiting target basket can become executable. A bar delivered after a
+later-starting event was decided is decided at its own start; how events are
+ordered and held is in
+[architecture.md](../../architecture.md#data-acquisition-and-ownership-boundary).
+If a backtest still holds a symbol
 without a real bar at the final
 timestamp, forced liquidation fails explicitly rather than fabricating a fill
 from its last mark.

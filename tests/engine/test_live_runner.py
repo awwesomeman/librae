@@ -8105,10 +8105,13 @@ class TestMultiAdapterRouting:
         assert executor.get_order_adapter("MU") is ibkr
 
     def test_live_trader_resolves_costs_per_symbol(self):
+        # Half-hour regular-session bars: the two calendars' bars share starts.
         cfg = _test_cfg(
             symbols=["BTCUSDT", "MU"],
             market="multi",
             data_source="multi",
+            timeframe="30m",
+            session_mode="regular",
             instrument_overrides={"MU": {"currency": "USDT"}},
         )
         fetchers = {
