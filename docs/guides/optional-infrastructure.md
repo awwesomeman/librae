@@ -595,7 +595,7 @@ The relevant identities are intentionally not interchangeable:
 | `run_id` | Engine run restored from the checkpoint |
 
 The live runtime requires a non-empty `runtime_revision` and execution
-identity. It accepts only the current checkpoint schema (or the previous one
+identity. It accepts only the current checkpoint schema (or a previous one
 `state.py` names as additive, below) and exact revision and
 execution-identity matches; it does not convert,
 discard, adopt, or overwrite incompatible state. The compatibility check runs
@@ -621,9 +621,9 @@ stored as `schema_version` inside the JSON in `execution_runtime_state.state`,
 is compared for exact equality on load, and **nothing migrates it
 automatically** — neither database initialization nor a schema upgrade
 transforms stored checkpoint JSON. The one exception is a previous version
-whose only difference is a field none of its writers could hold, named beside
-`_STATE_SCHEMA_VERSION`: it loads with that field empty, so that bump alone
-does not force a flat stop. A changed runtime revision still does, as above.
+whose only difference is fields none of its writers could hold, named beside
+`_STATE_SCHEMA_VERSION`: it loads with those fields empty, so those bumps
+alone do not force a flat stop. A changed runtime revision still does, as above.
 
 Any other version is rejected outright rather
 than silently defaulted, and the refusal names the versions involved and the

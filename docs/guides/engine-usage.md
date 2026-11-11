@@ -343,10 +343,19 @@ unrelated groups and independent intents keep executing; it does not attempt
 to unwind legs that already filled. A `PortfolioWeights` rebalance whose
 grouped leg fails that way stops whole without halting, because replanning
 it would send the same leg again. The strategy's decision on the next bar
-replans from the current book: on the bar where a rebalance stopped the
-strategy is not evaluated, so a leg goes out at most once per bar, except
-that a restart before the bar is recorded, or a store outage while the stop
-is written, may send it once more.
+replans from the current book: on the bar the failed leg was planned on the
+strategy is not evaluated, so a leg goes out at most once per bar. The stop
+holds in the process before it is written: its alert goes out, saying
+`not recorded yet (<error>)` if the state store fails the write, and the
+error then fails the cycle; the poll's retry of the bar neither replans nor
+asks the strategy. The stop and its bar are checkpointed, so only a restart
+before the store records them may send the leg once more.
+If that symbol's leg ends unfilled again on the next target rebalance, with
+no fill of the symbol between, the account halts instead, with the order's
+alert saying the leg failed on the previous target rebalance too: a refusal
+that repeats with nothing changed has a cause the engine cannot fix, and
+replanning would send the leg on every bar. A fill of the symbol, a target
+rebalance that completes, or a halt starts it over.
 If a broker adds native combo support in
 the future, use that adapter-specific capability instead. Before anything is
 submitted, live planning preflights each group as a whole: a grouped `close`

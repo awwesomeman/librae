@@ -978,8 +978,13 @@ class LiveTrader:
         self._flatten_at: datetime | None = None
         # The last order an entry fill was booked for, until the risk limits are checked.
         self._entry_fill_unchecked: TrackedOrder | None = None
-        # The last bar a target rebalance stopped on; not checkpointed.
+        # The bar the last target rebalance stopped on, which no decision
+        # replans: the same bar and book would size the same leg and send it
+        # again. Checkpointed, so a restart that retries the bar holds it too.
         self._rebalance_stopped_at: datetime | None = None
+        # Symbols whose target-rebalance leg last ended unfilled, with no fill
+        # of the symbol since; another such end halts. Checkpointed.
+        self._failed_rebalance_symbols: set[str] = set()
         self._cycle_fetch_seconds: dict[str, float] = {}
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
@@ -1200,6 +1205,8 @@ class LiveTrader:
             status_period_count=self._status_period_count,
             halted=self._halted,
             pending_flatten=self._pending_flatten,
+            rebalance_stopped_at=self._rebalance_stopped_at,
+            failed_rebalance_symbols=sorted(self._failed_rebalance_symbols),
             entries_paused=self._entries_paused,
             unstarted_groups=sorted(self._unstarted_groups),
             adv_session_labels=dict(self._adv_session_labels),
@@ -1265,6 +1272,8 @@ class LiveTrader:
         self._status_period_count = state.status_period_count
         self._halted = state.halted
         self._pending_flatten = state.pending_flatten
+        self._rebalance_stopped_at = state.rebalance_stopped_at
+        self._failed_rebalance_symbols = set(state.failed_rebalance_symbols)
         self._entries_paused = state.entries_paused
         self._adv_session_labels = state.adv_session_labels
         self._adv_filled_quantities = state.adv_filled_quantities
@@ -2285,6 +2294,8 @@ class LiveTrader:
         self._pending_decision = []
         self._pending_resting_since = {}
         self._live_rebalance = None
+        # Reviewed before any reset, so a leg failing after it starts over.
+        self._failed_rebalance_symbols.clear()
         self._entry_fill_unchecked = None
         self._drop_pending_halt_reset()
 
@@ -2450,7 +2461,12 @@ class LiveTrader:
         only that group's other still-active legs and alerts — unrelated
         groups and independent intents keep executing. A target rebalance
         stops instead, since replanning it would send the same leg again;
-        the next bar's decision replans from the book. Returns True if the
+        the next bar's decision replans from the book. A leg ending unfilled
+        for a symbol whose leg did so on the previous target rebalance, with
+        no fill of the symbol since, halts instead: the venue keeps refusing
+        it, and replanning would send it on every bar. The stop holds in
+        memory before its checkpoint, and alerts even when that write fails,
+        which then raises. Returns True if the
         whole account was halted (caller should stop advancing this tick),
         False otherwise (caller should continue to the next active order).
         """
@@ -2471,16 +2487,34 @@ class LiveTrader:
         if group_id is None or account_fault:
             self._halt_live(title=title, message=message)
             return True
+        rebalance_stopped = self._live_rebalance is not None
+        if rebalance_stopped and tracked.filled_quantity <= EPSILON:
+            if request.symbol in self._failed_rebalance_symbols:
+                self._halt_live(
+                    title=title,
+                    message=(
+                        f"{message}; the {request.symbol} leg failed on the previous target "
+                        "rebalance too, with no fill since"
+                    ),
+                )
+                return True
+            self._failed_rebalance_symbols.add(request.symbol)
+        if rebalance_stopped:
+            self._stop_live_rebalance()
         if not self._executor.simulation:
             for sibling in list(self._active_orders):
                 if sibling.request.group_id == group_id:
                     self._cancel_tracked_order(sibling)
-        rebalance_stopped = self._live_rebalance is not None
+        failure: Exception | None = None
         if rebalance_stopped:
-            self._live_rebalance = None
-            self._persist_state()
+            try:
+                self._persist_state()
+            except Exception as exc:
+                failure = exc
         scope = "the target rebalance stopped" if rebalance_stopped else "other groups unaffected"
         outcome = f"{message}; group {group_id!r} cancelled, {scope}"
+        if failure is not None:
+            outcome += f"; not recorded yet ({type(failure).__name__}: {failure})"
         logger.error("%s: %s", title, outcome)
         self._notify(
             "send_alert",
@@ -2498,7 +2532,19 @@ class LiveTrader:
             },
             symbol=request.symbol,
         )
+        if failure is not None:
+            raise failure
         return False
+
+    def _stop_live_rebalance(self) -> None:
+        """End the target rebalance short of its targets, before anything records it.
+
+        No decision on the bar its last leg was planned on replans it, also
+        when a write that fails after the stop leaves that bar to be retried.
+        """
+        assert self._live_rebalance is not None
+        self._rebalance_stopped_at = self._live_rebalance.execution_bar_ts
+        self._live_rebalance = None
 
     def _post_fill_risk_halted(self) -> bool:
         """Halt if an entry fill booked since the last check took the account past a limit.
@@ -5082,6 +5128,7 @@ class LiveTrader:
             return False
         if not requests:
             self._live_rebalance = None
+            self._failed_rebalance_symbols.clear()
             self._persist_state()
             if withheld:
                 symbols = sorted(withheld)
@@ -5120,8 +5167,7 @@ class LiveTrader:
         """Advance serial target legs using only one current market snapshot.
 
         Returns whether the rebalance is complete. A leg that fails or is
-        refused ends it short of its targets, and the trader remembers the
-        bar, so that no decision on it replans them.
+        refused ends it short of its targets (``_stop_live_rebalance``).
         """
         while self._live_rebalance is not None and not self._active_orders and not self._halted:
             if not self._queue_next_live_rebalance_order(
@@ -5131,8 +5177,6 @@ class LiveTrader:
             ):
                 break
             self._advance_live_orders()
-            if self._live_rebalance is None:
-                self._rebalance_stopped_at = ts
         return self._live_rebalance is None and not self._active_orders and not self._halted
 
     def _timed_order_call[T](self, callback: Callable[[], T]) -> T:
@@ -5326,6 +5370,15 @@ class LiveTrader:
                     submit_planned=submit_planned,
                 )
                 return
+            except Exception:
+                # Booked, but not recorded, as in a store outage. A failed
+                # order still ends its group or rebalance, and alerts, before
+                # the error fails the cycle: the bar the next poll retries
+                # would otherwise replan the leg and send it again.
+                if tracked in self._active_orders or report.status not in ("cancelled", "rejected"):
+                    raise
+                self._fail_reported_order(tracked, report)
+                raise
             if self._post_fill_risk_halted():
                 return
             if report.status == "cancel_pending":
@@ -5333,21 +5386,7 @@ class LiveTrader:
                 # and one that reverts to working is under its timeout again.
                 return
             if report.status in ("cancelled", "rejected"):
-                message = (
-                    f"{request.symbol} order_id={report.order_id or 'unassigned'} "
-                    f"filled={report.filled_quantity:.4f}/"
-                    f"{report.requested_quantity:.4f}"
-                )
-                if report.rejection_reason:
-                    message += f"; venue: {report.rejection_reason}"
-                if report.account_fault:
-                    message += "; the venue refused the account, not only this order"
-                if self._fail_group_or_halt(
-                    tracked,
-                    title=f"Order {report.status.title()}",
-                    message=message,
-                    account_fault=report.account_fault,
-                ):
+                if self._fail_reported_order(tracked, report):
                     return
                 continue
             if report.status != "filled" and self._live_order_timed_out(tracked):
@@ -5355,6 +5394,23 @@ class LiveTrader:
                 return
             if report.status != "filled":
                 return
+
+    def _fail_reported_order(self, tracked: TrackedOrder, report: ExecutionReport) -> bool:
+        """Fail an order the venue reported cancelled or rejected; returns whether that halted."""
+        message = (
+            f"{tracked.request.symbol} order_id={report.order_id or 'unassigned'} "
+            f"filled={report.filled_quantity:.4f}/{report.requested_quantity:.4f}"
+        )
+        if report.rejection_reason:
+            message += f"; venue: {report.rejection_reason}"
+        if report.account_fault:
+            message += "; the venue refused the account, not only this order"
+        return self._fail_group_or_halt(
+            tracked,
+            title=f"Order {report.status.title()}",
+            message=message,
+            account_fault=report.account_fault,
+        )
 
     def _poll_answer_not_applied(
         self, tracked: TrackedOrder, order_id: str, error: ValueError, *, submit_planned: bool
@@ -5409,17 +5465,12 @@ class LiveTrader:
             leg.request.position_effect in ("reduce", "close") for leg in legs
         ):
             # Replanning would queue the same exit again.
-            self._live_rebalance = None
+            self._stop_live_rebalance()
             scope = "the target rebalance stopped"
         if group_id is not None:
             self._unstarted_groups.discard(group_id)
             scope = f"group {group_id!r} dropped whole"
-        # Out of the queue before the one write, so a failed write leaves no
-        # leg to go out.
-        for leg in legs:
-            leg.status = "cancelled"
-            self._active_orders.remove(leg)
-        self._persist_state(*legs)
+        failure = self._drop_unsent(legs)
         for leg in legs:
             request = leg.request
             message = (
@@ -5442,7 +5493,24 @@ class LiveTrader:
                         },
                     )
                 )
+        if failure is not None:
+            raise failure
         return True
+
+    def _drop_unsent(self, legs: list[TrackedOrder]) -> Exception | None:
+        """Cancel unsent ``legs`` locally in one write; returns the write's failure, if any.
+
+        They leave the queue before the write, so a failed write leaves no leg
+        to go out, and the caller still reports the drop before raising it.
+        """
+        for leg in legs:
+            leg.status = "cancelled"
+            self._active_orders.remove(leg)
+        try:
+            self._persist_state(*legs)
+        except Exception as exc:
+            return exc
+        return None
 
     def _reduces_held_position(self, request: OrderRequest) -> bool:
         """Whether ``request`` only reduces the ledger position it trades against.
@@ -5528,15 +5596,12 @@ class LiveTrader:
         if self._live_rebalance is not None:
             # Replanning would queue the same leg again; the next bar's
             # decision replans the targets from the current book.
-            self._live_rebalance = None
+            self._stop_live_rebalance()
             scope = "the target rebalance stopped"
         if group_id is not None:
             scope = f"group {group_id!r} cancelled, other groups unaffected"
-        for leg in legs:
-            self._cancel_tracked_order(leg)
-        if group_id is not None:
-            # Only now: a write that failed above leaves the rest queued to be judged again.
             self._unstarted_groups.discard(group_id)
+        write_failure = self._drop_unsent(legs)
         if group_id is None:
             what = f"{request.side} {request.quantity:g} to {request.position_effect}"
             needs = "needs"
@@ -5585,6 +5650,8 @@ class LiveTrader:
                 title=f"[{self._executor.strategy_name}] {title}: {subject}",
                 message=message,
             )
+        if write_failure is not None:
+            raise write_failure
         return True
 
     def _cash_needed_up_front(self, legs: list[TrackedOrder]) -> float:
@@ -5766,6 +5833,7 @@ class LiveTrader:
                 time_in_force=request.time_in_force,
             )
             self._record_adv_fill(report.symbol, delta_quantity, adv_session)
+            self._failed_rebalance_symbols.discard(report.symbol)
             # A halted account is not checked, and a mark left from its cancel
             # passes would halt the first exit after a reset.
             if request.position_effect in ("open", "add") and not self._halted:
