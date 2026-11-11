@@ -20,6 +20,7 @@ from librae.core.market_data import MarketDataSubscription, normalize_bar_times
 from librae.core.readiness import next_expected_close
 from librae.core.trading_calendar import resample_session_ohlcv
 from librae.live.executor import (
+    BrokerUnavailableError,
     LiveExecutor,
     OrderBelowVenueMinimumError,
     OrderRequest,
@@ -283,7 +284,15 @@ class TestFetchOhlcv:
 
         df = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)
 
-        assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
+        assert list(df.columns) == [
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "available_at",
+        ]
         assert len(df) == 3
         assert pd.api.types.is_datetime64_any_dtype(df["ts"])
 
@@ -310,7 +319,15 @@ class TestFetchOhlcv:
         df = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)
 
         assert df.empty
-        assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
+        assert list(df.columns) == [
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "available_at",
+        ]
 
     def test_limit_trims_tail(self):
         adapter = _make_adapter()
@@ -361,7 +378,12 @@ class TestFetchOhlcv:
             adapter.fetch_ohlcv(
                 "TXFR1",
                 "5m",
-                continuous_alias=security_type == "FUT",
+                # Only a future may be polled without dates.
+                **(
+                    {"continuous_alias": True}
+                    if security_type == "FUT"
+                    else {"start": "2026-04-01", "end": "2026-04-01"}
+                ),
             )
 
         assert resample.call_args.args[2] == expected_calendar
@@ -519,10 +541,103 @@ class TestTaifexSessionBars:
             1140,
         )
 
-    def test_a_print_after_the_close_is_dropped_not_a_stub_bar(self, caplog):
-        """A print stamped one minute past the last day minute starts at the
-        13:45 close, which is outside the session."""
-        late = {"ts": "2026-11-02 13:46", "Open": 20000, "High": 20000}
+    @pytest.mark.parametrize(
+        ("closing_stamp", "last_minute", "hour", "four_hours", "four_hour_volume", "day_close"),
+        [
+            # Day close: kbars() stamps the 13:45:00 trades 13:46.
+            (
+                "2026-11-02 13:46",
+                "2026-11-02 13:44",
+                "2026-11-02 12:45",
+                "2026-11-02 12:45",
+                63,
+                20000,
+            ),
+            # Night close, past midnight into a Saturday: 05:00:00 trades stamped 05:01.
+            (
+                "2026-10-31 05:01",
+                "2026-10-31 04:59",
+                "2026-10-31 04:00",
+                "2026-10-31 03:00",
+                123,
+                11140,
+            ),
+        ],
+    )
+    def test_trades_at_a_segment_close_join_its_last_bar(
+        self, closing_stamp, last_minute, hour, four_hours, four_hour_volume, day_close, caplog
+    ):
+        """Some contracts' kbars() put the trades matched at a segment close
+        in a minute stamped one past it, which starts at the close."""
+        closing = {"ts": closing_stamp, "Open": 20000, "High": 20000}
+        closing |= {"Low": 20000, "Close": 20000, "Volume": 3}
+        kbars = _txfr1_kbars(extra=closing)
+
+        with caplog.at_level("WARNING"):
+            minutes = _fetch_txfr1("1m", kbars)
+            hours = _fetch_txfr1("1h", kbars)
+            four = _fetch_txfr1("4h", kbars)
+            days = _fetch_txfr1("1d", kbars)
+
+        assert "dropped" not in caplog.text
+        assert len(minutes) == 1140, "no minute of its own"
+        last = minutes.loc[_taipei(last_minute)]
+        assert (last["high"], last["close"], last["volume"]) == (20000, 20000, 4)
+        assert (hours.loc[_taipei(hour), "close"], hours.loc[_taipei(hour), "volume"]) == (
+            20000,
+            63,
+        )
+        assert four.loc[_taipei(four_hours), "volume"] == four_hour_volume
+        assert (days.iloc[0]["close"], days.iloc[0]["volume"]) == (day_close, 1143)
+
+    def test_a_closing_minute_with_no_minute_before_it_becomes_the_last(self):
+        """A thin contract may trade only at the close in the last minute."""
+        closing = {"ts": "2026-11-02 13:46", "Open": 20000, "High": 20000}
+        closing |= {"Low": 20000, "Close": 20000, "Volume": 3}
+
+        minutes = _fetch_txfr1("1m", _txfr1_kbars(through="2026-11-02 13:40", extra=closing))
+
+        assert minutes.index[-2:].tolist() == [
+            _taipei("2026-11-02 13:39"),
+            _taipei("2026-11-02 13:44"),
+        ]
+        assert minutes.iloc[-1]["volume"] == 3
+
+    def test_index_minutes_past_the_xtai_close_are_not_folded(self):
+        """Index kbars run minutes past 13:30; none of them is known to hold
+        closing trades, so the frame keeps them as they come."""
+        from librae.brokers.shioaji_adapter import _kbar_frame
+
+        raw = _raw_kbars(pd.date_range("2026-11-05 13:29", "2026-11-05 13:34", freq="min"))
+
+        frame = _kbar_frame([raw], "XTAI")
+
+        assert frame["ts"].tolist() == [
+            _taipei(f"2026-11-05 13:{minute}") for minute in range(28, 34)
+        ]
+        assert frame["volume"].tolist() == [1] * 6
+
+    def test_a_fold_merges_only_the_closing_minute(self):
+        """A repeated minute elsewhere in the answer is left for the caller,
+        not summed by the fold."""
+        from librae.brokers.shioaji_adapter import _kbar_frame
+
+        repeated = {"ts": "2026-11-02 10:00", "Open": 1, "High": 1, "Low": 1, "Close": 1}
+        raw = _txfr1_kbars(extra=repeated | {"Volume": 1})
+        closing = {"ts": "2026-11-02 13:46", "Open": 20000, "High": 20000}
+        closing |= {"Low": 20000, "Close": 20000, "Volume": 3}
+        for column, value in _raw_kbars(pd.DatetimeIndex([]), extra=closing).items():
+            raw[column] = raw[column] + value
+
+        frame = _kbar_frame([raw], "XTAIFEX")
+
+        assert (frame["ts"] == _taipei("2026-11-02 09:59")).sum() == 2
+        assert frame.loc[frame["ts"] == _taipei("2026-11-02 13:44"), "volume"].tolist() == [4]
+
+    def test_a_print_past_the_closing_minute_is_still_dropped(self, caplog):
+        """Only the minute starting at the close holds closing trades; one
+        starting later is an off-hours print, dropped as before."""
+        late = {"ts": "2026-11-02 13:47", "Open": 20000, "High": 20000}
         late |= {"Low": 20000, "Close": 20000, "Volume": 1}
         kbars = _txfr1_kbars(extra=late)
 
@@ -611,9 +726,11 @@ class TestDateWindow:
         raw = _raw_kbars(_trading_day_stamps(), untraded=untraded)
         adapter._api.kbars.side_effect = _kbars_by_date(raw)
         adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
-        bars = adapter.fetch_ohlcv(
-            "TXFR1", timeframe, start=start, end=end, continuous_alias=True
-        ).set_index("ts")
+        bars = (
+            adapter.fetch_ohlcv("TXFR1", timeframe, start=start, end=end, continuous_alias=True)
+            .set_index("ts")
+            .drop(columns="available_at")
+        )
         queries = [(c.kwargs["start"], c.kwargs["end"]) for c in adapter._api.kbars.call_args_list]
         return bars, queries
 
@@ -777,6 +894,38 @@ class TestDatelessPoll:
         assert list(polled.index) == [_taipei("2026-11-02 11:45"), _taipei("2026-11-02 12:45")]
         assert kbars.call_args.kwargs["start"] == "2026-11-01"
         assert kbars.call_args.kwargs["end"] == "2026-11-02"
+
+
+class TestDatelessPollRefusal:
+    """The tick path is verified for futures only; polling any other contract
+    would spend kbars() queries on every poll."""
+
+    @pytest.mark.parametrize("security_type", ["STK", "IND", "OPT"])
+    @pytest.mark.parametrize("timeframe", ["1m", "1d"])
+    def test_a_poll_without_dates_is_refused_before_any_query(self, security_type, timeframe):
+        adapter = _make_adapter()
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(security_type=security_type, code="2330")
+        )
+
+        with pytest.raises(ValueError, match="without a date window"):
+            adapter.fetch_ohlcv("2330", timeframe, drop_incomplete=True)
+
+        adapter._api.kbars.assert_not_called()
+        adapter._api.subscribe.assert_not_called()
+
+    def test_a_dated_fetch_of_a_stock_still_reads_kbars(self):
+        adapter = _make_adapter()
+        adapter._api.kbars.return_value = _make_kbars_response()
+        adapter._resolve_contract = MagicMock(
+            return_value=SimpleNamespace(security_type="STK", code="2330")
+        )
+
+        bars = adapter.fetch_ohlcv("2330", "1m", start="2026-04-01", end="2026-04-01")
+
+        assert len(bars) == 3
+        adapter._api.kbars.assert_called_once()
+        assert adapter._api.kbars.call_args.kwargs["start"] == "2026-04-01"
 
 
 class TestLiveBarClock:
@@ -1560,6 +1709,124 @@ class TestGetBalance:
 
         with pytest.raises(NotImplementedError, match="read-only"):
             adapter.get_balance("TWD")
+
+
+def _sdk_errors() -> SimpleNamespace:
+    """A stand-in for the shioaji module's error types, shaped as the SDK declares them."""
+
+    class ShioajiError(Exception):
+        pass
+
+    class ShioajiConnectionError(ShioajiError, ConnectionError):
+        pass
+
+    class ShioajiTimeoutError(ShioajiError, TimeoutError):
+        pass
+
+    class SystemMaintenance(ShioajiError):
+        pass
+
+    class TokenError(ShioajiError):
+        pass
+
+    return SimpleNamespace(
+        ShioajiConnectionError=ShioajiConnectionError,
+        ShioajiTimeoutError=ShioajiTimeoutError,
+        SystemMaintenance=SystemMaintenance,
+        TokenError=TokenError,
+        Action=SimpleNamespace(Buy="Buy", Sell="Sell"),
+    )
+
+
+def _failing_read(read: str, error: Exception):
+    """An adapter whose ``read`` meets ``error`` in the SDK call it makes."""
+    adapter = _make_adapter(ca_activated=True)
+    adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(code="2330"))
+    sdk_call = {
+        "get_order": adapter._api.update_status,
+        "find_order": adapter._api.update_status,
+        "list_open_orders": adapter._api.update_status,
+        "get_position": adapter._api.list_positions,
+        "get_balance": adapter._api.margin,
+    }[read]
+    sdk_call.side_effect = error
+    call = {
+        "get_order": lambda: adapter.get_order("ord-1", "2330"),
+        "find_order": lambda: adapter.find_order("strategy-1", "2330"),
+        "list_open_orders": lambda: adapter.list_open_orders("2330"),
+        "get_position": lambda: adapter.get_position(_position_request("2330")),
+        "get_balance": lambda: adapter.get_balance("TWD"),
+    }[read]
+    return adapter, call
+
+
+_READS = ["find_order", "get_balance", "get_order", "get_position", "list_open_orders"]
+
+
+class TestUnansweredReads:
+    """A read the venue never answered is unavailable; every other SDK error keeps its type."""
+
+    @pytest.mark.parametrize("read", _READS)
+    @pytest.mark.parametrize(
+        "error_name", ["ShioajiConnectionError", "ShioajiTimeoutError", "SystemMaintenance"]
+    )
+    def test_is_classified_as_unavailable(self, monkeypatch, read, error_name):
+        sdk = _sdk_errors()
+        monkeypatch.setitem(sys.modules, "shioaji", sdk)
+        original = getattr(sdk, error_name)("no answer")
+        _, call = _failing_read(read, original)
+
+        with pytest.raises(BrokerUnavailableError) as raised:
+            call()
+
+        assert raised.value.__cause__ is original
+
+    @pytest.mark.parametrize("read", _READS)
+    def test_an_answered_refusal_keeps_its_type(self, monkeypatch, read):
+        sdk = _sdk_errors()
+        monkeypatch.setitem(sys.modules, "shioaji", sdk)
+        original = sdk.TokenError("token expired")
+        _, call = _failing_read(read, original)
+
+        with pytest.raises(sdk.TokenError) as raised:
+            call()
+
+        assert raised.value is original
+
+    def test_a_refresh_after_a_sent_cancel_keeps_its_error(self, monkeypatch):
+        """The cancel went out, so the call had an effect and must not read as unavailable."""
+        sdk = _sdk_errors()
+        monkeypatch.setitem(sys.modules, "shioaji", sdk)
+        adapter = _make_adapter(ca_activated=True)
+        adapter._resolve_contract = MagicMock(return_value=SimpleNamespace(code="2330"))
+        trade = SimpleNamespace(
+            status=SimpleNamespace(id="ord-1"),
+            order=SimpleNamespace(id="ord-1"),
+            contract=SimpleNamespace(code="2330"),
+        )
+        adapter._api.list_trades.return_value = [trade]
+        original = sdk.ShioajiTimeoutError("refresh timed out")
+
+        def update_status(**kwargs):
+            if "trade" in kwargs:
+                raise original
+
+        adapter._api.update_status.side_effect = update_status
+
+        with pytest.raises(sdk.ShioajiTimeoutError) as raised:
+            adapter.cancel_order("ord-1", "2330")
+
+        assert raised.value is original
+        adapter._api.cancel_order.assert_called_once_with(trade)
+
+    @pytest.mark.sdk_contract
+    def test_the_classified_types_are_the_sdk_s_own(self):
+        from librae.brokers.shioaji_adapter import _UNANSWERED_ERRORS
+
+        sj = _require_shioaji()
+
+        for name in _UNANSWERED_ERRORS:
+            assert issubclass(getattr(sj, name), sj.ShioajiError)
 
 
 class TestLifecycle:

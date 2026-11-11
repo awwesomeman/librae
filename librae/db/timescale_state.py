@@ -5,15 +5,40 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
+import psycopg2
+import psycopg2.errors
 import psycopg2.extras
 
-from librae.db import _storable_text, get_conn, get_pool
+from librae.db import _bounded_statements, _connect_unpooled, _storable_text, get_conn
 from librae.db.schema import require_current_schema
-from librae.live.state import LiveRuntimeState, TrackedOrder
+from librae.live.state import LiveRuntimeState, StateStoreUnavailableError, TrackedOrder
+
+# Errors that end a write before the server judged its rows: the client's own
+# timeout or lost connection, a cancel or statement timeout, an
+# idle-in-transaction timeout.
+_UNJUDGED = (
+    psycopg2.InterfaceError,
+    psycopg2.errors.QueryCanceled,
+    psycopg2.errors.IdleInTransactionSessionTimeout,
+)
+
+
+def _unjudged(exc: psycopg2.Error) -> bool:
+    if isinstance(exc, _UNJUDGED):
+        return True
+    # No SQLSTATE: libpq failed on its own. Class 08 is a connection
+    # exception, class 57 an operator intervention such as a shutdown.
+    return isinstance(exc, psycopg2.OperationalError) and (
+        exc.pgcode is None or exc.pgcode[:2] in ("08", "57")
+    )
 
 
 class TimescaleLiveStateStore:
-    """Persist one atomic runtime checkpoint plus append/update order facts."""
+    """Persist one atomic runtime checkpoint plus append/update order facts.
+
+    Its statements are bounded (``_bounded_statements``): the engine waits on
+    them in its loop, so a hung one would hold up halts and order lookups.
+    """
 
     # Writes land in PostgreSQL, so they survive the process. This is the
     # capability an order-capable live run requires; see LiveStateStore.
@@ -24,7 +49,7 @@ class TimescaleLiveStateStore:
         self._lease_connections: dict[str, object] = {}
 
     def load(self, state_key: str) -> LiveRuntimeState | None:
-        with get_conn(self._dsn) as conn:
+        with _bounded_statements(), get_conn(self._dsn) as conn:
             cur = conn.cursor()
             require_current_schema(cur)
             cur.execute(
@@ -39,11 +64,13 @@ class TimescaleLiveStateStore:
         return LiveRuntimeState.from_dict(raw)
 
     def acquire_lease(self, state_key: str) -> bool:
-        """Hold one PostgreSQL advisory lock for this process lifetime."""
+        """Hold one PostgreSQL advisory lock for this process lifetime.
+
+        On its own connection outside the pool (``_connect_unpooled``).
+        """
         if state_key in self._lease_connections:
             return True
-        pool = get_pool(self._dsn)
-        conn = pool.getconn()
+        conn = _connect_unpooled(self._dsn)
         try:
             cur = conn.cursor()
             cur.execute(
@@ -54,10 +81,10 @@ class TimescaleLiveStateStore:
             cur.close()
             conn.commit()
         except Exception:
-            pool.putconn(conn, close=bool(conn.closed))
+            conn.close()
             raise
         if not acquired:
-            pool.putconn(conn, close=bool(conn.closed))
+            conn.close()
             return False
         self._lease_connections[state_key] = conn
         return True
@@ -66,7 +93,6 @@ class TimescaleLiveStateStore:
         conn = self._lease_connections.pop(state_key, None)
         if conn is None:
             return
-        pool = get_pool(self._dsn)
         try:
             cur = conn.cursor()
             cur.execute(
@@ -76,15 +102,27 @@ class TimescaleLiveStateStore:
             cur.close()
             conn.commit()
         finally:
-            pool.putconn(conn, close=bool(conn.closed))
+            conn.close()
 
     def save(
         self,
         state: LiveRuntimeState,
         orders: Sequence[TrackedOrder] = (),
     ) -> None:
-        """Atomically checkpoint portfolio state and upsert changed orders."""
-        with get_conn(self._dsn) as conn:
+        """Atomically checkpoint portfolio state and upsert changed orders.
+
+        A timeout or lost connection raises ``StateStoreUnavailableError``, so
+        the engine never reads it as the store refusing a row.
+        """
+        try:
+            self._save(state, orders)
+        except psycopg2.Error as exc:
+            if not _unjudged(exc):
+                raise
+            raise StateStoreUnavailableError(f"{type(exc).__name__}: {str(exc).strip()}") from exc
+
+    def _save(self, state: LiveRuntimeState, orders: Sequence[TrackedOrder]) -> None:
+        with _bounded_statements(), get_conn(self._dsn) as conn:
             cur = conn.cursor()
             cur.execute(
                 """INSERT INTO execution_runtime_state
@@ -171,7 +209,7 @@ class TimescaleLiveStateStore:
 
         Returns True if a checkpoint existed and was removed.
         """
-        with get_conn(self._dsn) as conn:
+        with _bounded_statements(), get_conn(self._dsn) as conn:
             cur = conn.cursor()
             cur.execute(
                 "DELETE FROM execution_runtime_state WHERE state_key = %s",

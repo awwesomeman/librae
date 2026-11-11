@@ -48,10 +48,17 @@ from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
     next_session_open,
     session_bounds,
+    session_label,
     session_lookback_days,
     validate_calendar_id,
 )
-from librae.core.utils import floor_to_step, validate_contract_month, validate_futures_selector
+from librae.core.utils import (
+    floor_to_step,
+    interval_to_timedelta,
+    to_canonical,
+    validate_contract_month,
+    validate_futures_selector,
+)
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
 from librae.live.executor import (
     BrokerUnavailableError,
@@ -64,8 +71,10 @@ from .base import (
     drop_incomplete_ohlcv,
     find_position,
     passive_price,
+    settled_available_at,
     validate_order_signal,
     validate_time_in_force,
+    with_settled_available_at,
 )
 
 # IBKR carries the lifetime on the order itself rather than as a venue
@@ -103,6 +112,17 @@ _BAR_SIZE_MAP = {
 _NATIVE_CALENDAR_TIMEFRAMES = frozenset({"1d", "1w", "1M"})
 _MARKET_RULE_CACHE_MAXSIZE = 128
 _MarketRuleLadder = tuple[tuple[float, float], ...]
+# ib_async's OrderStatus.ValidationError, spelled out so that normalizing a
+# trade does not import the SDK.
+_IB_ASYNC_WARNING_STATUS = "ValidationError"
+# Codes ib_async treats as warnings whose TWS API message-code text says the
+# request itself was refused: 321 "Server error when validating an API
+# client request", 434 "The order size cannot be zero", and 2168 and 2169,
+# whose descriptions say to remove an order attribute "to place order". The
+# rest concern an order modify, which Librae never sends, market data and
+# the connection, or a live order, such as 404 for one IB holds while shares
+# are located; codes IB's page does not describe stay non-final too.
+_IB_REFUSED_ORDER_CODES = frozenset({321, 434, 2168, 2169})
 
 
 def _utc_today() -> date:
@@ -161,17 +181,24 @@ def _normalize_daily_bars(
     frame = frame.copy()
     frame["session_date"] = session_dates
     frame["ts"] = pd.DatetimeIndex([opened_at for opened_at, _ in bounds])
-    if session_mode == "regular":
-        available_at = [closed_at for _, closed_at in bounds]
-    else:
-        # The generic exchange calendar owns regular-session geometry, not
-        # vendor-specific pre/post-market hours. Waiting until the following
-        # session opens is conservative and prevents a partial extended-hours
-        # daily value from entering a feature early. This is an eligibility
-        # policy, not an assertion about IBKR's actual publication timestamp.
-        available_at = [next_session_open(label, calendar_id) for label in session_dates]
-    frame["available_at"] = pd.DatetimeIndex(available_at)
+    frame["available_at"] = pd.DatetimeIndex(
+        [_daily_available_at(label, calendar_id, session_mode) for label in session_dates]
+    )
     return frame
+
+
+def _daily_available_at(
+    label: date, calendar_id: str, session_mode: MarketDataSessionMode
+) -> pd.Timestamp:
+    """When a daily bar of session ``label`` may be used."""
+    if session_mode == "regular":
+        return session_bounds(label, calendar_id)[1]
+    # The generic exchange calendar owns regular-session geometry, not
+    # vendor-specific pre/post-market hours. Waiting until the following
+    # session opens is conservative and prevents a partial extended-hours
+    # daily value from entering a feature early. This is an eligibility
+    # policy, not an assertion about IBKR's actual publication timestamp.
+    return next_session_open(label, calendar_id)
 
 
 def _contract_expiry_date(contract: object) -> date:
@@ -280,6 +307,23 @@ class IBKRAdapter:
     """
 
     market_data_route = "ibkr"
+
+    def market_data_available_at(
+        self,
+        ts: pd.Timestamp,
+        timeframe: str,
+        *,
+        calendar_id: str,
+        session_mode: MarketDataSessionMode,
+    ) -> pd.Timestamp:
+        """When the bar at ``ts`` is safe to observe: the ``available_at`` a
+        fetch stamps on it, or the nominal close of an extended intraday bar."""
+        canonical = to_canonical(timeframe)
+        if canonical == "D1":
+            return _daily_available_at(session_label(ts, calendar_id), calendar_id, session_mode)
+        if session_mode == "regular":
+            return settled_available_at(ts, canonical, calendar_id)
+        return pd.Timestamp(ts) + interval_to_timedelta(canonical)
 
     def __init__(
         self,
@@ -604,6 +648,8 @@ class IBKRAdapter:
             columns = ["ts", "open", "high", "low", "close", "volume"]
             if timeframe == "1d":
                 columns.extend(["session_date", "available_at"])
+            elif resolved_session_mode == "regular" and calendar_id is not None:
+                columns.append("available_at")
             return pd.DataFrame(columns=columns)
 
         if timeframe == "1d":
@@ -651,6 +697,8 @@ class IBKRAdapter:
                 timeframe,
                 calendar_id=completion_calendar,
             )
+        if timeframe != "1d" and resolved_session_mode == "regular" and calendar_id is not None:
+            df = with_settled_available_at(df, timeframe, calendar_id)
         return df.reset_index(drop=True)
 
     # ------------------------------------------------------------------
@@ -665,10 +713,12 @@ class IBKRAdapter:
             )
 
     def _require_connected(self) -> None:
-        # ib_async keeps serving its position, trade and account caches after
-        # an unexpected socket drop (only an explicit disconnect resets them;
-        # ib_async 2.1.0 Wrapper.connectionClosed), so a read on a dropped
-        # session would reconcile against stale facts.
+        # ib_async empties its position, trade and account caches once it
+        # processes a socket drop (ib_async 2.1.0 Client._onSocketDisconnected
+        # calls Wrapper.connectionClosed, which resets them), so a read after
+        # one would see a flat book with no open orders. A drop its event loop
+        # has not run since is not caught here: until then the old caches are
+        # served and the client still reports itself connected.
         if not self._ib.isConnected():
             raise BrokerUnavailableError("IBKR client is not connected to TWS/IB Gateway")
 
@@ -982,8 +1032,16 @@ class IBKRAdapter:
         supply the quantity, average price, time, and commission required by
         the engine's cumulative report contract.
         """
-        trades = list(self._ib.reqCompletedOrders(apiOnly=True))
-        fills = list(self._ib.reqExecutions())
+        try:
+            trades = list(self._ib.reqCompletedOrders(apiOnly=True))
+            fills = list(self._ib.reqExecutions())
+        except ConnectionError as exc:
+            # ib_async raises the built-in ConnectionError("Not connected")
+            # before it sends a request on a dropped session (ib_async 2.1.0
+            # Client.send and Client.getReqId), so the read had no effect.
+            raise BrokerUnavailableError(
+                f"IBKR client is not connected to TWS/IB Gateway ({exc})"
+            ) from exc
         for trade in trades:
             order_id = trade.order.orderId
             perm_id = getattr(trade.order, "permId", 0)
@@ -1019,7 +1077,7 @@ class IBKRAdapter:
                 commissions.append(commission)
         result = {
             "id": str(trade.order.orderId),
-            "status": trade.orderStatus.status,
+            "status": IBKRAdapter._order_status(trade),
         }
         client_order_id = trade.order.orderRef
         symbol = trade.contract.symbol
@@ -1043,6 +1101,51 @@ class IBKRAdapter:
             if fills:
                 result["executed_at"] = max(fill.time for fill in fills)
         return result
+
+    @staticmethod
+    def _order_status(trade) -> str:
+        """The order's status, read past the marker ib_async sets for an IB warning.
+
+        For every code ib_async treats as a warning it overwrites the status
+        with its own ``ValidationError``; IB has no such state. Most of those
+        codes leave the order live, such as 404 for a short sale IB holds
+        while shares are located, so the status the marker overwrote, kept in
+        the trade log, says where the order stands. A refusal code on an order
+        IB has not answered otherwise means IB did not take it: rejected.
+        With nothing earlier logged, the marker is reported, which
+        ``LiveExecutor`` reads as not yet final.
+        """
+        status = trade.orderStatus.status
+        if status != _IB_ASYNC_WARNING_STATUS:
+            return status
+        log = list(trade.log)
+        refused = any(
+            entry.status == _IB_ASYNC_WARNING_STATUS and entry.errorCode in _IB_REFUSED_ORDER_CODES
+            for entry in log
+        )
+        if refused and not IBKRAdapter._ib_answered(trade):
+            return "rejected"
+        for entry in reversed(log):
+            if entry.status and entry.status != _IB_ASYNC_WARNING_STATUS:
+                return entry.status
+        return status
+
+    @staticmethod
+    def _ib_answered(trade) -> bool:
+        """Whether IB may have taken the order, so a refusal code cannot end it.
+
+        ib_async logs its own PendingSubmit when it places an order, and only
+        IB assigns a permId. A log holding just that placement entry and
+        warnings, with no permId, is an order IB has not answered. Any other
+        entry counts as answered, as does a trade ib_async built from IB's own
+        report, which has no placement entry.
+        """
+        if getattr(trade.order, "permId", 0):
+            return True
+        log = list(trade.log)
+        if not log or log[0].status != "PendingSubmit" or log[0].errorCode:
+            return True
+        return any(entry.status != _IB_ASYNC_WARNING_STATUS for entry in log[1:])
 
     @staticmethod
     def _optional_float(value: object) -> float | None:

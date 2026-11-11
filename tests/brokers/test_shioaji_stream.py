@@ -39,6 +39,9 @@ class FakeSession:
         self.kbars_calls: list[tuple[str, str]] = []
         self.kbars_answer_empty = False
         self.kbars_lag = pd.Timedelta(0)  # how far behind the trades its answers run
+        # TAIFEX's TMF kbars() give the trades matched at a segment close a
+        # minute of their own, stamped one past the close; TXF's fold them in.
+        self.kbars_close_apart = False
         self.on_tick = self.on_event = self.on_session_down = None
 
     def set_on_tick_fop_v1_callback(self, callback):
@@ -96,7 +99,7 @@ class FakeSession:
                 continue
             stamp = pd.Timestamp(wall).floor("min") + pd.Timedelta(minutes=1)
             # The closing auction prints just after 13:45 into the last minute.
-            if stamp.time() == pd.Timestamp("13:46").time():
+            if not self.kbars_close_apart and stamp.time() == pd.Timestamp("13:46").time():
                 stamp -= pd.Timedelta(minutes=1)
             if not start <= stamp.strftime("%Y-%m-%d") <= end:
                 continue
@@ -162,7 +165,7 @@ def _poll(adapter, clock, at: str, timeframe: str = "1m", limit: int = 1000) -> 
     bars.index = (
         pd.to_datetime(bars.pop("ts"), utc=True).dt.tz_convert(_TAIPEI).dt.strftime("%H:%M")
     )
-    return bars
+    return bars.drop(columns="available_at")
 
 
 def _exchange_minutes(adapter, clock, at: str, timeframe: str = "1m") -> pd.DataFrame:
@@ -172,7 +175,7 @@ def _exchange_minutes(adapter, clock, at: str, timeframe: str = "1m") -> pd.Data
     bars.index = (
         pd.to_datetime(bars.pop("ts"), utc=True).dt.tz_convert(_TAIPEI).dt.strftime("%H:%M")
     )
-    return bars
+    return bars.drop(columns="available_at")
 
 
 def _trade_each_minute(session, first: str, last: str, *, second: int = 20, **kwargs) -> None:
@@ -238,7 +241,11 @@ class TestMinuteRule:
         session.trade("2026-11-05 13:45:00.024", 104, 5)
 
         clock.at("2026-11-05 13:45:30")
-        streamed = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True).set_index("ts")
+        streamed = (
+            adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)
+            .set_index("ts")
+            .drop(columns="available_at")
+        )
         polled = _poll(adapter, clock, "2026-11-05 13:46:01")
 
         assert streamed.loc[_taipei("2026-11-05 13:41")].tolist() == [100, 101, 100, 101, 3]
@@ -247,6 +254,21 @@ class TestMinuteRule:
         assert len(session.kbars_calls) == 3, "the day session's end is settled by kbars()"
         expected = _exchange_minutes(adapter, clock, "2026-11-05 13:50")
         pd.testing.assert_frame_equal(polled, expected, check_dtype=False)
+
+    def test_a_closing_print_kbars_stamps_apart_joins_the_last_minute(
+        self, adapter, session, clock
+    ):
+        session.kbars_close_apart = True
+        _poll(adapter, clock, "2026-11-05 08:44:00", "1d", limit=2)
+        _trade_each_minute(session, "2026-11-05 08:45", "2026-11-05 13:44")
+        session.trade("2026-11-05 13:45:00.024", 150, 5)
+
+        days = _poll(adapter, clock, "2026-11-05 13:46:01", "1d", limit=2)
+        minutes = _exchange_minutes(adapter, clock, "2026-11-05 13:50")
+
+        assert (days.loc["15:00", "close"], days.loc["15:00", "volume"]) == (150, 3 * 300 + 5)
+        assert minutes.index[-1] == "13:44"
+        assert minutes.loc["13:44", ["close", "volume"]].tolist() == [150, 3 + 5]
 
     def test_a_closing_print_as_the_first_tick_seen_joins_the_last_minute(self):
         from librae.brokers.shioaji_stream import _MinuteBook, _tick_ns
@@ -476,6 +498,25 @@ class TestSegments:
         assert "15:00" not in held.index
         assert settled.loc["15:00", ["close", "volume"]].tolist() == [150, 3 * 300 + 500]
         assert len(session.kbars_calls) == 3
+
+    def test_the_day_close_is_refilled_once_after_its_settle(self, adapter, session, clock):
+        _poll(adapter, clock, "2026-11-05 08:30:00")
+        _trade_each_minute(session, "2026-11-05 08:45", "2026-11-05 13:44")
+        session.trade("2026-11-05 13:45:00.024", 150, 500)
+
+        closing = _poll(adapter, clock, "2026-11-05 13:45:30")
+        assert len(session.kbars_calls) == 1, "the settle has not passed"
+        assert closing.index[-1] == "13:43", "13:44 waits for kbars()"
+
+        refilled = _poll(adapter, clock, "2026-11-05 13:46:05")
+        for later in ("2026-11-05 13:51:00", "2026-11-05 14:30:00"):
+            _poll(adapter, clock, later)
+
+        assert refilled.index[-1] == "13:44"
+        assert refilled.loc["13:44"].tolist() == [144, 150, 143, 150, 503]
+        assert session.kbars_calls == [("2026-11-04", "2026-11-05")] * 2, (
+            "one refill, asking only the day the stream took over"
+        )
 
     def test_the_segment_end_is_held_until_kbars_settles_it(self, adapter, session, clock):
         _poll(adapter, clock, "2026-11-05 08:30:00")

@@ -18,10 +18,11 @@ Single-asset is a special case where symbols has one element.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from numbers import Real
 from typing import TYPE_CHECKING
 
@@ -92,6 +93,7 @@ from librae.core.market_data import (
     _MarketDataSource,
     evaluate_batch_features,
     normalize_bar_times,
+    require_aligned_bar_grids,
     subscription_from_instrument,
     validate_bar_cadence,
     validate_ohlcv_values,
@@ -107,8 +109,10 @@ from librae.core.strategy import (
     Strategy,
     StrategyDecision,
 )
+from librae.core.taifex import taifex_final_settlement_day
 from librae.core.trading_calendar import (
     ALWAYS_OPEN_CALENDAR,
+    TAIFEX_INDEX_CALENDAR,
     bucket_geometry_is_known,
     period_start,
     require_resting_session_support,
@@ -206,7 +210,8 @@ def _partition_enveloped_decisions(
     ready: list[_DecisionEnvelope] = []
     waiting: list[_DecisionEnvelope] = []
     for envelope in envelopes:
-        if envelope.decision_at is not None and ts <= envelope.decision_at:
+        # A decision fills on the first bar that starts once it was made.
+        if envelope.decision_at is not None and ts < envelope.decision_at:
             waiting.append(envelope)
             continue
         executable, data_waiting = partition_pending_decision(
@@ -512,6 +517,96 @@ def _superseded_rebalance_events(
             )
         )
     return events
+
+
+def _taifex_settlement_days(first: date, last: date) -> list[date]:
+    """TAIFEX final settlement days from ``first`` through ``last``, inclusive."""
+    # A closure can defer settlement past the month end, so the month before
+    # ``first`` can still settle inside the range.
+    month_index = first.year * 12 + first.month - 2
+    days = []
+    while month_index <= last.year * 12 + last.month - 1:
+        day = taifex_final_settlement_day(f"{month_index // 12}{month_index % 12 + 1:02d}")
+        if first <= day <= last:
+            days.append(day)
+        month_index += 1
+    return days
+
+
+class _TaifexRollGuard:
+    """Refuse a TAIFEX continuous-alias position held through a contract switch.
+
+    The alias moves to the next contract partway through the final settlement
+    session, at a time that bars do not reveal, and Librae has no roll ledger:
+    a position held across that switch would book the price gap between the
+    two contracts as PnL. Only the session's first open is still certain to
+    be the old contract's, so a position must be closed by then and no fill
+    may be priced anywhere else in that session.
+    """
+
+    def __init__(self, labels: Mapping[str, Mapping[pd.Timestamp, date]]) -> None:
+        self._labels = labels
+        self._last_session: dict[str, date] = {}
+
+    def before_fills(
+        self,
+        ts: pd.Timestamp,
+        bars: Mapping[str, object],
+        positions: Mapping[str, PositionState],
+    ) -> None:
+        """Refuse a position carried over a settlement session that had no bar."""
+        for symbol in bars:
+            session = self._labels.get(symbol, {}).get(ts)
+            if session is None:
+                continue
+            previous = self._last_session.get(symbol)
+            self._last_session[symbol] = session
+            if symbol not in positions or previous is None or session <= previous:
+                continue
+            skipped = _taifex_settlement_days(
+                previous + timedelta(days=1), session - timedelta(days=1)
+            )
+            if skipped:
+                raise ValueError(
+                    f"{symbol!r} holds a position through the {skipped[0].isoformat()} "
+                    "TAIFEX final settlement session, which has no bar, into the "
+                    f"{ts.isoformat()} bar; a continuous alias switches contracts in that "
+                    "session and backtests do not roll positions"
+                )
+
+    def after_fills(
+        self,
+        ts: pd.Timestamp,
+        bars: Mapping[str, Mapping[str, object]],
+        positions: Mapping[str, PositionState],
+        events: Sequence[PositionEvent],
+    ) -> None:
+        """Refuse a settlement-session bar's fill away from its open, or a held position."""
+        for event in events:
+            session = self._labels.get(event.symbol, {}).get(ts)
+            if session is None or not _taifex_settlement_days(session, session):
+                continue
+            open_price = float(bars[event.symbol]["open"])  # type: ignore[arg-type]
+            if not math.isclose(event.price, open_price, rel_tol=1e-12):
+                raise ValueError(
+                    f"{event.symbol!r} fills a {event.event_type} at {event.price} inside the "
+                    f"{ts.isoformat()} bar, in the {session.isoformat()} TAIFEX final "
+                    "settlement session; the bar's range may already be the next "
+                    "contract's, and backtests do not roll positions. Only a fill at the "
+                    "session's first open is allowed."
+                )
+        for symbol in bars:
+            session = self._labels.get(symbol, {}).get(ts)
+            if session is None or symbol not in positions:
+                continue
+            if _taifex_settlement_days(session, session):
+                raise ValueError(
+                    f"{symbol!r} holds a position at the close of the {ts.isoformat()} bar, "
+                    f"in the {session.isoformat()} TAIFEX final settlement session; a "
+                    "continuous alias switches contracts during that session and backtests "
+                    "do not roll positions. Exit so the order fills no later than that "
+                    "session's first open."
+                )
 
 
 _INDEX_NAMES = ["symbol", "datetime"]
@@ -1296,6 +1391,7 @@ class Backtest:
                 self._data_source = (
                     next(iter(resolved_sources)) if len(resolved_sources) == 1 else "multi"
                 )
+        require_aligned_bar_grids(resolved_subscriptions)
         self._primary_subscriptions = resolved_subscriptions
         if normalized_auxiliary_data and not resolved_subscriptions:
             raise ValueError(
@@ -1572,13 +1668,19 @@ class Backtest:
         rebalance_delay_bars = 0
         unavailable_rebalance_symbols: tuple[str, ...] = ()
         drawdown_exit_origins: dict[str, pd.Timestamp] = {}
+        roll_guard = _TaifexRollGuard(self._taifex_alias_session_labels())
 
+        available_by = self._availability_frontier() if market_data_replay is None else {}
         for ts in self._timeline:
             decision_at = (
                 market_data_replay.advance_frontier(ts) if market_data_replay is not None else None
             )
+            # When the decision at ts can be made: what its fills and the
+            # drawdown exit it may queue wait for, with or without replay.
+            decided_at = decision_at if decision_at is not None else available_by.get(ts)
             event_start_index = len(all_events)
             bars = all_bars[ts]
+            roll_guard.before_fills(ts, bars, positions)
             lagged_adv = all_lagged_adv.get(ts, {})
             current_session_labels = all_session_labels.get(ts, {})
             for symbol, label in current_session_labels.items():
@@ -1660,7 +1762,8 @@ class Backtest:
                     stop_eligible_symbols={
                         symbol
                         for symbol in positions
-                        if symbol not in drawdown_exit_origins or ts > drawdown_exit_origins[symbol]
+                        if symbol not in drawdown_exit_origins
+                        or ts >= drawdown_exit_origins[symbol]
                     },
                 )
                 # WHY: only an executed target is the active one. Recording it
@@ -1739,6 +1842,7 @@ class Backtest:
             trades.extend(step_result.trades)
             all_events.extend(step_result.events)
             runtime_events.extend(step_result.runtime_events)
+            roll_guard.after_fills(ts, bars, positions, step_result.events)
             drawdown_exit_origins = {
                 symbol: origin
                 for symbol, origin in drawdown_exit_origins.items()
@@ -1819,8 +1923,8 @@ class Backtest:
                     positions,
                     reason=REASON_DRAWDOWN_BREACH,
                 )
-                if decision_at is not None:
-                    drawdown_exit_origins.update({symbol: decision_at for symbol in positions})
+                if decided_at is not None:
+                    drawdown_exit_origins.update({symbol: decided_at for symbol in positions})
                 halted = True
                 logger.warning(
                     "Backtest account %s halted at %s: drawdown %.2f%% breached "
@@ -1959,7 +2063,7 @@ class Backtest:
                 pending_envelopes = _merge_enveloped_decision(
                     pending_envelopes,
                     new_decision,
-                    decision_at=decision_at,
+                    decision_at=decided_at,
                     primary_symbol=primary_symbol,
                 )
                 decision_index += 1
@@ -2417,6 +2521,38 @@ class Backtest:
             )
         except ValueError as exc:
             raise ValueError(f"{symbol}: {exc}") from exc
+
+    def _taifex_alias_session_labels(self) -> dict[str, dict[pd.Timestamp, date]]:
+        """Session label of every bar of each TAIFEX continuous alias."""
+        result: dict[str, dict[pd.Timestamp, date]] = {}
+        for symbol, symbol_data in self._data.groupby(level="symbol", sort=False):
+            instrument = self._instruments.get(symbol)
+            if (
+                instrument is None
+                or not instrument.continuous_alias
+                or self._calendar_ids.get(symbol) != TAIFEX_INDEX_CALENDAR
+            ):
+                continue
+            timestamps = pd.DatetimeIndex(symbol_data.index.get_level_values("datetime"))
+            labels = session_labels(timestamps, TAIFEX_INDEX_CALENDAR)
+            result[symbol] = dict(zip(timestamps, labels, strict=True))
+        return result
+
+    def _availability_frontier(self) -> dict[pd.Timestamp, pd.Timestamp]:
+        """The latest ``available_at`` seen by each event, as replay advances it.
+
+        Empty for data without bar identities, which carry no availability.
+        """
+        if AVAILABLE_AT_COLUMN not in self._data.columns:
+            return {}
+        latest = (
+            self._data[AVAILABLE_AT_COLUMN]
+            .groupby(level="datetime")
+            .max()
+            .reindex(self._timeline)
+            .cummax()
+        )
+        return dict(zip(self._timeline, latest, strict=True))
 
     def _precompute_session_labels(self) -> dict[pd.Timestamp, dict[str, object]]:
         """Map every bar to its instrument session for cumulative ADV usage."""

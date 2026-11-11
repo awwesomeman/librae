@@ -25,7 +25,9 @@ the code simpler and easier to maintain.
   than maintaining a historical version list.
 - Persisted development data and runtime checkpoints may require explicit
   external migration or removal. Never silently default a missing field from
-  an older shape.
+  an older shape. The one exception is a field no writer of a recent
+  checkpoint version could hold, which that version loads empty; `state.py`
+  names those versions and fields beside `_STATE_SCHEMA_VERSION`.
 
 Breaking is allowed; leaving it unannounced is not. A change that makes
 previously accepted input fail — a config that ran, a public call, a persisted
@@ -225,6 +227,36 @@ Third-party data is joined point-in-time by the caller and returned as extra
 columns from the same adapter snapshot; see
 [External market data and factors](docs/guides/external-data.md).
 
+Every mode orders events by bar start, so the primaries must share their bar
+starts (`require_aligned_bar_grids`), read from the calendars' session
+boundaries rather than their names: intraday, every segment opens at one phase
+of the period's grid; a day, week or month bar never starts while another
+symbol's is open. Otherwise a decision on the earlier bar could fill on the
+later one before its data was available, so Backtest and `LiveTrader` refuse
+such primaries at construction.
+
+- A bar's `available_at` is when it is safe to observe. An adapter that holds a
+  bar ending its trading segment for `SEGMENT_END_SETTLE` stamps the settle
+  into it (`settled_available_at`), so that bar is available, and decided, a
+  settle after another grid's bar of the same start.
+- A decision is made when its event's bars are all available, the latest
+  `available_at` seen so far. A backtest fills its intents, and a drawdown exit
+  it queues, on the first bar that starts at or after that instant.
+- Sim/live decide a multi-symbol bar once with each required symbol whose next
+  bar is available by the event's availability: by the `available_at` its
+  source declares (`market_data_available_at`), else its completion floor. A
+  shut market or a later publication does not hold the rest. The event waits
+  `LiveTrader.COHORT_HOLD` for such a bar's arrival jitter; a bar arriving
+  later is decided at its own start when it arrives, ordered by its symbol's
+  watermark alone.
+- Known gap: where one symbol's segment-ending bar carries the settle, live
+  decides the others at their own availability without it and that bar in a
+  later event, while a backtest decides them together at the settled
+  availability and fills the others later. With 24/7 and XTAIFEX at M5, an
+  intent on the 05:40 bars fills the 24/7 symbol at 05:50 in a backtest when
+  the TAIFEX bar carries the settle, and at 05:45 when it carries only its
+  completion floor.
+
 Runtime health follows that polling contract rather than the strategy bar
 timeframe. `poll_seconds` is persisted with run metadata, and a heartbeat is
 stale after three missed poll cycles. The standalone watchdog and the console
@@ -249,7 +281,7 @@ consume the same multiplier.
 - Cross-broker behavior is generalized only at an observed engine boundary. `LiveExecutor` builds one broker-neutral `PositionRequest` from the configured canonical/venue identity, currency, security type, exchange, `contract_month`/`continuous_alias`, and `CostModel.multiplier`; every adapter accepts that request and returns the same position shape. Contract lookup, broker-native symbol syntax, CCXT balance conventions, Shioaji direction enums, and IBKR `conId`/`avgCost` handling stay inside the concrete adapter. Add a shared field or helper only when more than one real adapter needs the same semantic; do not create broker hierarchies or speculative capability abstractions.
 - `prepare_order` runs before durable queueing and network I/O. It applies CCXT precision plus amount/price/notional limits, Shioaji whole-lot and price-limit rules, or IBKR `ContractDetails` size increments/minimums. A quantity that rounds below the venue minimum fails; it is never silently submitted as zero. That size refusal (below the minimum amount, notional, or whole lot, or rounding to zero) raises `OrderBelowVenueMinimumError` (a `ValueError` from `librae.integrations`), so the engine can skip an ungrouped exit the venue will never accept instead of halting; every other preparation failure, including a maximum or a price outside the venue's band, stays a plain `ValueError`. A prepared limit price may not differ from the strategy's validated limit. Fixed `price_increment` metadata is authoritative when present; price-band rules remain adapter/venue-owned rather than treating a cost-model tick or IBKR's minimum possible tick as a universal grid.
 - `place_order` is an order/execution-report boundary, not a boolean acknowledgement. `LiveExecutor` normalizes submitted, accepted, partial, `cancel_pending`, filled, cancelled, and rejected states. A filled response must provide order id, requested/filled quantity, average execution price, broker execution timestamp, and explicit cash-currency fee/commission (zero is valid). A non-flat position snapshot must provide finite side/quantity and a positive average price; missing fields never mean flat or zero. A position snapshot must never be used to invent the missing fill price, fee, or timestamp.
-- Reconciliation reads (`get_position`, `list_open_orders`, `get_balance`) raise `BrokerUnavailableError` (from `librae.integrations`, chained from the SDK error) only for failures the adapter knows are transient: the venue gave no answer and the read had no effect. Everything else, including authentication and permission errors, propagates unchanged and fails closed, so an adapter that cannot tell the two apart classifies nothing. `CryptoAdapter` maps ccxt's `NetworkError` family except `InvalidNonce`, a client-side fault the venue answered. `IBKRAdapter` raises it when its client is not connected, because ib_async keeps serving its position, trade and account caches after a socket drop; nothing in Librae reconnects that client, so a drop halts at the engine's bound and needs a process restart. The Shioaji adapter classifies nothing. How the engine tolerates the type is in [engine-usage.md](docs/guides/engine-usage.md#reconciliation-live-only). Order placement and cancellation are outside this contract.
+- Reconciliation reads (`get_position`, `list_open_orders`, `get_balance`) and order status reads (`get_order`, `find_order`) raise `BrokerUnavailableError` (from `librae.integrations`, chained from the SDK error) only for failures the adapter knows are transient: the venue gave no answer and the read had no effect. Everything else, including authentication and permission errors, propagates unchanged and fails closed, so an adapter that cannot tell the two apart classifies nothing. `CryptoAdapter` maps ccxt's `NetworkError` family except `InvalidNonce`, a client-side fault the venue answered; ccxt files some refusals no retry clears in that family too (Binance's `-2015` once a session has authenticated, an unparsed 4xx reply), which only the engine's time bound ends. `IBKRAdapter` raises it when its client is not connected, because ib_async empties its position, trade and account caches once it processes a socket drop (ib_async 2.1.0 `Client._onSocketDisconnected` calls `Wrapper.connectionClosed`, which resets them), and they would then read as a flat book; nothing in Librae reconnects that client, so a drop halts at the engine's bound and needs a process restart. Its status reads look in the trade cache first and, finding it empty on a dropped session, fall back to the completed-order lookup, which ib_async refuses with `ConnectionError("Not connected")`, so they raise it there. A drop ib_async has not processed yet, because its event loop has not run since, still serves the old caches and reports the client connected; nothing detects that window. `ShioajiAdapter` maps the SDK's connection, timeout and maintenance errors (`ShioajiConnectionError`, `ShioajiTimeoutError`, `SystemMaintenance`, per the shioaji 1.7.0 type stub; which one a network blip raises is unverified live). How the engine tolerates the type is in [engine-usage.md](docs/guides/engine-usage.md#reconciliation-live-only) and its persistent poll errors. Order placement and cancellation are outside this contract: a cancel's own read after the cancel went out keeps its SDK error, and only a cancel that sent nothing may raise the type, as `IBKRAdapter.cancel_order` does by reading an order that is no longer open instead.
 - `place_order` raises `OrderRejectedError` (from `librae.integrations`, chained from the SDK error) only for a refusal the adapter knows left no order at the venue, with `account_fault=True` when the account rather than the order was refused (credentials, permissions, clock). Everything else propagates unchanged and is an unknown outcome. `CryptoAdapter` raises it for any failure before `create_order`, since nothing has been sent (missing credentials is an account fault), and for `create_order` failures only by exact ccxt type against the allowlist in `crypto_adapter.py`, so a class ccxt adds later stays unknown. That allowlist is verified offline for Binance error bodies only; its source and the single-request assumption are recorded beside it. The IBKR and Shioaji adapters classify nothing: both SDKs return a trade object from placement, and which of their exceptions would mean a definite refusal is unverified; a refusal they report as an order status already takes the rejected path. What the engine does with each outcome is in [engine-usage.md](docs/guides/engine-usage.md#related-multi-leg-order-contract).
 - CCXT's unified order shape is normalized directly; base-currency fees are converted at the reported average price, while an unrelated fee currency fails closed. Shioaji and IBKR may initially return only an acknowledgement, so their adapters retain/query the broker trade object and enrich cumulative fills from deals/fills. If execution time or explicit commission is not yet available, the report remains invalid and no local fill is invented from order price or `CostModel`.
 - `librae/brokers/base.py` only provides pieces that are genuinely shared and byte-for-byte identical: static metadata, credential loading, completed-bar filtering, and canonical order validation/rounding. `CredentialConfig.from_env(prefix)` uses `{PREFIX}_{FIELD}` (e.g. `SHIOAJI_API_KEY`, `BINANCE_API_KEY`). `CryptoAdapter`/`CryptoCredentials` are exchange-agnostic (they pick a CCXT backend via `exchange_id`); only Binance is wired up today, using `BINANCE_*` as the prefix — adding a second crypto exchange means reusing the same class with a different prefix (e.g. `OKX_*`), no changes to the shared logic needed.
@@ -260,7 +292,7 @@ consume the same multiplier.
   optional balance reads, for cash reconciliation and the free-balance check
   before an entry, are a separate `BalanceReader` capability.
 - An async-ABC layering was tried once (`MarketDataAdapter`/`OrderAdapter`/`AccountAdapter` plus a `MarketHub` for unified dispatch — see `docs/decisions/2026-03-26-market-adapter-architecture.md`), and removed because Shioaji's auth model (stateful login+CA) and CCXT's (stateless per-call REST) diverge too much, and no adapter ever actually used that layering. **The current state is flat duck-typed classes — don't reintroduce a cross-broker shared hierarchy.**
-- Futures have one broker-neutral selection rule, defined once in `validate_futures_selector` and applied both where an instrument is registered and where an adapter resolves a contract: an instrument fetched as a future — a dated monthly/quarterly `instrument_type`, or any entry carrying `security_type="FUT"` — must set exactly one of `contract_month="YYYYMM"` (an exact expiry) or `continuous_alias=True` (a deliberately dynamic contract, whose meaning is the venue's own). `symbol` is the opaque, unique engine/position key and is never parsed; use a readable key such as `ES_202609` when holding multiple expiries. `venue_symbol` is the broker-facing root or native contract code. Adapters translate those common facts into their native representation instead of forcing one broker's symbol grammar on every broker.
+- Futures have one broker-neutral selection rule, defined once in `validate_futures_selector` and applied both where an instrument is registered and where an adapter resolves a contract: an instrument fetched as a future — a dated monthly/quarterly `instrument_type` — must set exactly one of `contract_month="YYYYMM"` (an exact expiry) or `continuous_alias=True` (a deliberately dynamic contract, whose meaning is the venue's own). `security_type` must name the same product as `instrument_type` (`STK` is `spot`, `FUT` a dated contract), because it picks the venue contract bars and orders use while `instrument_type` drives accounting, shorting and margin; a contradiction is refused when the instrument is resolved rather than reconciled. `symbol` is the opaque, unique engine/position key and is never parsed; use a readable key such as `ES_202609` when holding multiple expiries. `venue_symbol` is the broker-facing root or native contract code. Adapters translate those common facts into their native representation instead of forcing one broker's symbol grammar on every broker.
 - IBKR consumes a product root in `venue_symbol` plus the separate `contract_month`. Shioaji and CCXT may instead require an exact broker-native contract code in `venue_symbol`; they still receive the common month/alias identity, but the adapter does not parse or reconstruct proprietary symbol syntax. This is one semantic interface with broker-specific resolution, not one universal ticker format.
 - `IBKRAdapter` covers US stocks and futures. Stocks are SMART-routed by
   symbol; futures require `security_type="FUT"` and an exchange. Exact
@@ -270,7 +302,7 @@ consume the same multiplier.
 - The configured Shioaji engine account route is Taiwan futures.
   `prepare_order` rejects stock (`STK`) contracts outright — stock cash and
   reconciliation semantics are not supported; stock market data remains
-  available via `fetch_ohlcv`. Futures R1/R2 contracts require `continuous_alias=True`;
+  available via `fetch_ohlcv` with a date window. Futures R1/R2 contracts require `continuous_alias=True`;
   exact contracts use a non-alias `venue_symbol` and matching
   `contract_month`. Position reconciliation checks alias and target codes
   through `futopt_account`.
@@ -280,8 +312,12 @@ consume the same multiplier.
   subscription and settles minutes the stream may have missed, since
   Shioaji caps it at 270 queries a session and rules out polling it; a
   minute that may lack trades is not served as complete. The rules and
-  their evidence are in `librae/brokers/shioaji_stream.py`. Stocks, indexes
-  and dated fetches still read `kbars()`.
+  their evidence are in `librae/brokers/shioaji_stream.py`. That path is
+  verified on TAIFEX futures only: a `fetch_ohlcv` without dates of any other
+  contract (stock, index, option) raises `ValueError` rather than poll
+  `kbars()`, so those need `start`/`end`; dated fetches read `kbars()`.
+  `LiveTrader` polls without dates, so it refuses such a symbol on a
+  Shioaji route at construction.
 - `CryptoAdapter` keeps the CCXT unified symbol as `venue_symbol`. A delivery future must set `contract_month`, checked against CCXT market `expiry`; spot and perpetual markets cannot carry that field. Binance continuous klines remain a data/research API and are explicitly rejected by order/position paths instead of being mistaken for an orderable contract.
 - On a CCXT contract market, `CryptoAdapter` sends every `reduce`/`close` order (including a flip's reduction leg) with CCXT's unified `reduceOnly`, so a stale local book makes the venue refuse the exit instead of opening opposite exposure; spot and `open`/`add` orders never carry it. The derivatives account must be in one-way (net) position mode: the engine holds one net position per instrument and never sends `positionSide`, and Binance USD-M rejects `reduceOnly` in hedge mode while requiring `positionSide` there (source: Binance USD-M Futures REST API, New Order; ccxt `binance.create_order` docstring). `CryptoAdapter.verify_venue_setup` reads the mode through ccxt's `fetch_position_mode` for each configured contract market and refuses hedge mode or no answer; a venue whose ccxt class does not declare `fetchPositionMode` in `has` starts unverified with a warning, even if it implements the method, because that answer's semantics are unverified. The same check refuses a symbol whose declared `instrument_type` (spot versus `contract_*`) disagrees with the CCXT market, because decision preflight follows the declaration while `prepare_order` follows the market.
 
@@ -315,7 +351,10 @@ base+quote so `query="MU"` cannot silently select `MUU`.
 in that catalog snapshot. Selecting such a dated result pins its
 `contract_month`; it does not roll later. A venue-native R1/R2 result has
 `continuous_alias=True` and may change its target. This distinction prevents a
-discovery convenience from silently changing live exposure.
+discovery convenience from silently changing live exposure. Backtests have no
+roll ledger, so they refuse a TAIFEX alias position held through its final
+settlement session rather than booking the gap between contracts (see the
+[backtest data contract](docs/guides/engine-usage.md#local-artifact-boundary)).
 
 Discovery can feed an adapter directly without YAML:
 
@@ -563,6 +602,8 @@ cost_model = CostModel.from_config(config, markets=my_markets)
 
 `CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_cost_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`multiplier`: `spot` auto-1.0, `contract_*` required-explicit; optional `tick_size`) and the per-product `commission_per_contract` > market-level defaults. `commission_per_contract` has no market-level value: a `tw_futures` symbol, registered or not, pays its product's fee (TXF/MXF/TMF, by code root), and an unrecognized one raises until an override sets the fee; other markets default to 0. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
 
+In a multi-symbol run, a run-wide `cost_overrides` `multiplier` or `tick_size` only fills in for symbols without their own value: one that differs from a registered symbol's value is refused at `RunConfig` construction unless `symbol_cost_overrides` sets that symbol's, since contracts in one run rarely share economics (TXFR1=200, MXFR1=50). A single-symbol run keeps the priority above.
+
 `Backtest.__init__` calls this once per symbol in the run (not just `config.symbol`) whenever `config=` is used and no explicit `cost_model=` override is given — a multi-asset run mixing symbols with different multipliers (e.g. `tw_futures`: TXFR1=200 + MXFR1=50 in the same run) gets each symbol's own multiplier automatically, not just the first symbol's applied to everyone.
 
 ```python
@@ -636,7 +677,9 @@ symbol's `data_source` labels its bars, and for a crypto symbol its
 `instrument_type` and `venue_symbol` pick the market orders go to, so an
 override that changes any of the three must state all three: the inherited
 ones would describe a different instrument than the overridden ones, and
-the bars, their label and the order market would disagree.
+the bars, their label and the order market would disagree. Its
+`data_adapter` fetches the bars `data_source` labels, so changing the
+adapter must state all three as well.
 
 `quantity_step`, `min_quantity`, `min_notional`, and a fixed `price_increment`
 are stable, cross-mode execution facts. The core rounds quantities down before
@@ -713,7 +756,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_financing_cash_flow` | `on_financing_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
 | `on_runtime_event` | `on_runtime_event(event)` — a `RuntimeEvent`; operational audit trail (state restoration, skipped decisions, halts, halt resets, group failures), not a fill. A halt, reset or group failure is offered only after it has happened, stamped with the wall clock, and a failed call for one is logged, never raised. One recorded while the checkpoint is failing is held in memory and offered once a checkpoint lands, so a sink on the same database does not drop it; shutdown offers it or logs it as dropped, and a crash before then loses it, even from a run that restores halted |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — audit projection; `bar` includes OHLCV, `available_at`, and `observed_at`, when the engine first received that version. Best-effort by default: a failed call is logged and not retried. A sink that declares `durable_ohlcv_delivery = True` instead gets at-least-once delivery — the row is queued in the checkpoint before it is offered and dropped only once the call returns, so a failed write or a crash replays it. Sinks must be idempotent either way, and the queue is bounded: reaching the bound drops loudly — each dropped identity is recorded and `ohlcv_audit_degraded` reports it — rather than halting the book for data that is re-fetchable |
-| `on_ohlcv_batch` | `on_ohlcv_batch(symbol, timeframe, bars)` — optional many-bar path of the same sink, `bars` being `(ts, bar)` pairs in ts order; the engine uses it for a decision's unrecorded window and a restart's re-read, which can run to thousands of bars, and otherwise sends them through `on_ohlcv` one by one. Only valid with `on_ohlcv`. Best-effort: a failure is logged and the rest skipped. A durable sink's queued rows also go through it, a run of one symbol's rows per call, so it must raise on a failed write as `on_ohlcv` does |
+| `on_ohlcv_batch` | `on_ohlcv_batch(symbol, timeframe, bars)` — optional many-bar path of the same sink, `bars` being `(ts, bar)` pairs in ts order; the engine uses it for a decision's unrecorded window and a restart's re-read, which can run to thousands of bars, and otherwise sends them through `on_ohlcv` one by one. Only valid with `on_ohlcv`. Best-effort: a failure is logged and the rest skipped. A durable sink's queued rows also go through it, a run of one symbol's rows per call, so it must raise on a failed write as `on_ohlcv` does, and must declare `durable_ohlcv_delivery` as well: the constructor refuses one that does not |
 | `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
 | `on_performance` | `on_performance(run_id, account_id)` after a close/reduce/funding event and the current equity callback |
@@ -909,6 +952,22 @@ Exact prefix definitions live beside the implementation in
 distinguish single-table writes, partial updates, multi-table saves, and
 aggregate refreshes. Reader helpers distinguish small
 lookups, DataFrame loads, and derived results.
+
+A call to a server that stops answering ends on the connect, TCP and keepalive
+bounds every pooled connection carries
+([`librae/db/__init__.py`](librae/db/__init__.py)) rather than on the OS TCP
+retries; none fires while the server answers, and a DSN that sets one keeps
+its own value. On an OS without `TCP_USER_TIMEOUT`, such as macOS, a query the
+server never acknowledges still waits out the OS retransmission limit. The
+live state store and the reference live callbacks also bound each
+transaction's statements and idle time, because the engine waits on them in
+its loop; the KPI refresh bounds only its upsert, since its reads cover the
+whole run. The store raises a timeout or lost connection as
+`StateStoreUnavailableError`, so the engine never takes it for a refused order
+row. Other callers get no statement bound, since a backtest or bulk load may
+run long statements. Lease connections stay outside the pool with only their
+connect bounded, so a short outage cannot end a lease's session on the client
+while the server keeps its lock.
 
 Backtest and signal-result persistence serialize writers for the same
 non-null `backtest_cache_key` with a transaction-scoped PostgreSQL advisory

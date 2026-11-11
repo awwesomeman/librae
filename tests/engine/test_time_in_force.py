@@ -728,11 +728,12 @@ class TestSimulationMirrorsTheFixedBacktest:
 
 def _two_calendar_panel() -> pd.DataFrame:
     """A union timeline where one symbol trades 24/7 and the other only
-    inside the XNYS session, so most bars belong to one instrument alone."""
+    inside the XNYS session, so most bars belong to one instrument alone.
+    Half-hour bars, so both grids share their bar starts."""
     rows: list[tuple[str, pd.Timestamp]] = []
-    for ts in pd.date_range("2025-01-02T00:00Z", periods=48, freq="h", tz="UTC"):
+    for ts in pd.date_range("2025-01-02T00:00Z", periods=96, freq="30min", tz="UTC"):
         rows.append(("CRYPTO24", ts))
-        if 15 <= ts.hour <= 20:
+        if (14, 30) <= (ts.hour, ts.minute) <= (20, 30):
             rows.append(("EQUITY", ts))
     index = pd.MultiIndex.from_tuples(rows, names=["symbol", "datetime"]).sort_values()
     size = len(index)
@@ -756,7 +757,8 @@ def _two_calendar_config():
         strategy_name="two-calendar",
         mode="backtest",
         symbols=["CRYPTO24", "EQUITY"],
-        timeframe="H1",
+        timeframe="M30",
+        session_mode="regular",
         market="us_equity",
         data_source="test",
         account=AccountConfig(currency="USD", initial_cash=100_000.0),
@@ -778,7 +780,7 @@ class TestUnionTimelineDoesNotBorrowAnotherCalendar:
             def on_bar(self, ctx):
                 # 02:00Z: only CRYPTO24 has a bar, and it lies outside every
                 # XNYS session.
-                if ctx.ts.hour == 2 and ctx.ts.day == 2:
+                if ctx.ts.hour == 2 and ctx.ts.minute == 0 and ctx.ts.day == 2:
                     return [
                         OrderIntent(
                             action="long",
@@ -805,7 +807,7 @@ class TestUnionTimelineDoesNotBorrowAnotherCalendar:
 
         class RestOverAnotherCalendar(Strategy):
             def on_bar(self, ctx):
-                if ctx.ts.hour == 15 and ctx.ts.day == 2:
+                if ctx.ts.hour == 15 and ctx.ts.minute == 0 and ctx.ts.day == 2:
                     return [
                         OrderIntent(
                             action="long",

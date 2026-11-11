@@ -319,6 +319,9 @@ class ExecutionReport:
 class OrderAdapter(Protocol):
     """Required live order lifecycle and position-reconciliation gateway.
 
+    A read the venue left unanswered raises ``BrokerUnavailableError``, as
+    that error describes; every other failure keeps its own type.
+
     An adapter whose venue cannot carry Librae's full client order id may
     additionally declare ``broker_client_order_id(client_order_id) -> str``.
     ``LiveExecutor`` then expects that compact form in every broker report
@@ -366,11 +369,16 @@ class BrokerUnavailableError(Exception):
     """A read reached no venue answer and had no effect; retrying later is safe.
 
     Adapters raise it, chained from the SDK error, only from the position,
-    open-order and balance reads, and only for failures they know are
-    transient (timeouts, connection loss, rate limits, venue maintenance).
-    Anything else, including authentication and permission errors, must
-    propagate unchanged: periodic reconciliation tolerates this type for a
-    bounded number of rounds and fails closed on every other exception.
+    open-order, balance and order status (``get_order``, ``find_order``)
+    reads, and only for failures they know are transient (timeouts,
+    connection loss, rate limits, venue maintenance). Anything else,
+    including authentication and permission errors, must propagate
+    unchanged: periodic reconciliation and the order poll tolerate this type
+    for a bounded time, and both fail closed on every other exception.
+    ``cancel_order`` raises it only when it sent no cancel, as
+    ``IBKRAdapter`` does by reading an order that is no longer open instead;
+    a read after a cancel went out keeps its SDK error, since that call had
+    an effect.
     """
 
 
@@ -875,10 +883,22 @@ class LiveExecutor:
     @staticmethod
     def _normalize_status(raw_status: object) -> OrderStatus:
         status = str(raw_status or "").lower().replace("-", "_").replace(" ", "_")
+        # States the venue has not finished are matched before the final-state
+        # substrings below, which would otherwise read them as final:
+        # - "pendingcancel": IB's PendingCancel, a cancel not yet confirmed
+        #   (TWS API, "Possible Order States").
+        # - "canceling": ccxt's non-unified status for a cancel the venue has
+        #   not finished, from parse_order_status in several exchange modules
+        #   (e.g. htx contract status 11, binance PENDING_CANCEL).
+        # - "validationerror": the status ib_async sets when IB sends a warning
+        #   about an order, which ib_async counts as still working; a warning
+        #   can come before IB accepts the order, hence submitted.
+        if status in ("pending_cancel", "pendingcancel", "canceling"):
+            return "cancel_pending"
+        if status == "validationerror":
+            return "submitted"
         if any(token in status for token in ("reject", "fail", "error", "inactive")):
             return "rejected"
-        if status in ("pending_cancel", "pendingcancel"):
-            return "cancel_pending"
         if "cancel" in status or "expired" in status:
             return "cancelled"
         if status in ("filled", "closed", "complete", "completed"):

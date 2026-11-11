@@ -42,6 +42,17 @@ def test_ccxt_standin_matches_ccxt() -> None:
     assert {name: getattr(ccxt, name) for name in PRECISION_MODES} == PRECISION_MODES
 
 
+def test_ccxt_cancel_in_progress_reads_as_pending() -> None:
+    from librae.brokers.crypto_adapter import _require_ccxt
+    from librae.live.executor import LiveExecutor
+
+    ccxt = _require_ccxt()
+
+    assert ccxt.binance().parse_order_status("PENDING_CANCEL") == "canceling"
+    assert ccxt.htx().parse_order_status("11") == "canceling"
+    assert LiveExecutor._normalize_status("canceling") == "cancel_pending"
+
+
 def test_shioaji_contract() -> None:
     from librae.brokers.shioaji_adapter import _require_shioaji
 
@@ -102,3 +113,38 @@ def test_ib_async_contract() -> None:
     assert callable(ib_async.IB.reqCompletedOrders)
     assert callable(ib_async.IB.reqExecutions)
     assert callable(ib_async.IB.cancelOrder)
+
+
+@pytest.mark.parametrize(
+    ("ib_status_first", "code", "reported", "normalized"),
+    [
+        # 404: IB holds the order while shares for the short sale are located.
+        pytest.param(False, 404, "PendingSubmit", "submitted", id="404-before-ib-status"),
+        pytest.param(True, 404, "Submitted", "accepted", id="404-after-ib-status"),
+        # 321: IB failed to validate the request.
+        pytest.param(False, 321, "rejected", "rejected", id="321-before-ib-status"),
+        pytest.param(True, 321, "Submitted", "accepted", id="321-after-ib-status"),
+    ],
+)
+def test_ib_async_warning_is_read_by_its_code_and_what_ib_said(
+    ib_status_first, code, reported, normalized
+) -> None:
+    """ib_async's own placement and warning handling, driven offline."""
+    from librae.brokers.ibkr_adapter import IBKRAdapter, _require_ib_async
+    from librae.live.executor import LiveExecutor
+
+    ib_async = _require_ib_async()
+    ib = ib_async.IB()
+    ib.client.placeOrder = lambda *_args: None  # nothing leaves the process
+    trade = ib.placeOrder(
+        ib_async.Stock("MU", "SMART", "USD"), ib_async.LimitOrder("SELL", 1, 100.0, orderId=7)
+    )
+    client_id = trade.order.clientId
+    if ib_status_first:
+        ib.wrapper.orderStatus(7, "Submitted", 0.0, 1.0, 0.0, 99, 0, 0.0, client_id, "")
+    ib.wrapper.error(7, code, f"IB message {code}", "")
+
+    assert trade.orderStatus.status == "ValidationError"
+    raw = IBKRAdapter._trade_to_order(trade)["status"]
+    assert raw == reported
+    assert LiveExecutor._normalize_status(raw) == normalized

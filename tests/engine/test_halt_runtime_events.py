@@ -523,7 +523,7 @@ class TestGroupFailureIsRecorded:
 
         assert strategy.calls == 1
         assert _submitted(adapter) == ["AAA", "AAA"], "the next bar's decision sends it once"
-        assert len(_of_type(events, "group_failed")) == 2
+        assert len(_of_type(events, "halted")) == 1, "failing again, it halts"
 
     def test_a_bar_retried_after_the_stop_is_not_decided_on_either(self):
         """A checkpoint failure after the stop leaves the bar for the next poll to retry."""

@@ -13,16 +13,25 @@ that cycle, is not sent again.
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import MagicMock
 
 import pytest
 from librae.core.run_config import RiskPolicy
 from librae.core.strategy import OrderIntent
-from librae.live.executor import LiveExecutor
+from librae.live.executor import BrokerUnavailableError, LiveExecutor
 from librae.live.state import MemoryLiveStateStore
 
+from tests.ccxt_standin import build_crypto_adapter, errors
 from tests.engine.live_factories import TEST_CLOCK_NOW
 from tests.engine.test_halt_runtime_events import _Crash, _timeout_trader
-from tests.engine.test_live_flatten import _bars, _position, _submitted, _titled
+from tests.engine.test_live_flatten import (
+    _adapter,
+    _bars,
+    _position,
+    _submitted,
+    _titled,
+    _working_exits,
+)
 from tests.engine.test_live_halt_durability import (
     OUTAGE,
     _answer_about_another_order,
@@ -56,6 +65,14 @@ def _buy_aaa(trader):
 
 def _exactly(alerts, title: str) -> list[dict]:
     return [alert for alert in alerts if alert["title"].endswith(f"] {title}")]
+
+
+def _unread_span(trader) -> timedelta:
+    """How long reconciliation may go unanswered before it halts."""
+    return timedelta(
+        seconds=trader._reconciliation_interval_seconds
+        * trader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS
+    )
 
 
 class TestAReportThatCannotBeAppliedOnAPoll:
@@ -675,13 +692,13 @@ class TestACancelThatEndsAnOrderPastAnAnswerThatCannotApply:
         assert trader._halted is False
         assert _exactly(alerts, "Order Reconciliation Failed") == []
         assert len(_exactly(alerts, NOT_APPLIED)) == 1
+        # Either way the unsent BBB leaves with it: the group can no longer fill together.
+        assert trader._active_orders == []
         if past_timeout:
             [timeout] = _exactly(alerts, "Order Timeout")
             assert "group 'pair' cancelled" in timeout["message"]
-            assert trader._active_orders == []
         else:
             assert _exactly(alerts, "Order Timeout") == []
-            assert [order.request.symbol for order in trader._active_orders] == ["BBB"]
 
     def test_a_fill_its_answer_carries_past_a_risk_limit_halts(self):
         adapter = _resting_adapter()
@@ -781,27 +798,148 @@ class TestAnOrderWhoseStatusCannotBeRead:
 
         assert len(_exactly(alerts, "Halt Cancellation Completed")) == 1
 
-    def test_a_read_that_keeps_failing_is_named_in_the_poll_error(self):
+    @staticmethod
+    def _restarted_reading(failing_read, now=None):
+        """A restart whose startup reads AAA's working order, every later read ``failing_read``.
+
+        The order has no timeout, so nothing but the poll error speaks for it.
+        Both traders read the clock ``now``.
+        """
         store = MemoryLiveStateStore(restart_durable_for_tests=True)
         adapter = _resting_adapter()
-        now = [TEST_CLOCK_NOW]
+        now = now or [TEST_CLOCK_NOW]
         trader, _, _ = _timeout_trader(adapter, store, now)
         aaa = _buy_aaa(trader)
         reads = iter([_resting(aaa.order_id)])
         adapter.get_order.side_effect = lambda order_id, symbol: (
-            next(reads, None) or _unreachable(order_id, symbol)
+            next(reads, None) or failing_read(order_id, symbol)
         )
         restarted, _, alerts = _timeout_trader(adapter, store, now)
         restarted._live_order_timeout_seconds = None
+        return restarted, adapter, alerts, aaa
 
-        restarted.run(max_iterations=3)
+    def test_a_read_the_venue_leaves_unanswered_retries_and_alerts(self):
+        exchange = MagicMock()
+        exchange.fetch_order.side_effect = errors.RequestTimeout("GET /fapi/v1/order timed out")
+        venue = build_crypto_adapter(exchange, api_key="k", api_secret="s")
+        restarted, adapter, alerts, aaa = self._restarted_reading(venue.get_order)
+
+        restarted.run(max_iterations=4)
 
         [poll_error] = _exactly(alerts, "Poll Error")
         assert (
-            f"the last RuntimeError: AAA order_id={aaa.order_id} status unavailable "
-            "(ConnectionError: venue did not answer)"
+            f"AAA order_id={aaa.order_id} status unavailable (BrokerUnavailableError: "
+            "GET /fapi/v1/order timed out)"
         ) in poll_error["message"]
-        assert restarted._active_orders[0].request.client_order_id == aaa.request.client_order_id
+        assert _exactly(alerts, "Persistent Poll Error") == []
+        assert restarted._halted is False
+        adapter.cancel_order.assert_not_called()
+        assert [tracked.order_id for tracked in restarted._active_orders] == [aaa.order_id]
+
+    def test_reads_left_unanswered_as_long_as_reconciliation_allows_halt(self):
+        """A revoked key or lost IP whitelist, which ccxt raises as an outage.
+
+        Binance answers -2015 once the session has authenticated, and ccxt
+        files that as DDoSProtection, so the read is classified unanswered;
+        the cancel's own call keeps the raw error.
+        """
+        revoked = '{"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}'
+        exchange = MagicMock()
+        exchange.fetch_order.side_effect = errors.DDoSProtection(f"binance {revoked}")
+        venue = build_crypto_adapter(exchange, api_key="k", api_secret="s")
+        now = [TEST_CLOCK_NOW]
+        poll = {"every": timedelta(0)}
+
+        def read_a_poll_later(order_id, symbol):
+            now[0] += poll["every"]
+            return venue.get_order(order_id, symbol)
+
+        restarted, adapter, alerts, aaa = self._restarted_reading(read_a_poll_later, now)
+        poll["every"] = _unread_span(restarted) / 3
+        adapter.cancel_order.side_effect = errors.DDoSProtection(f"binance {revoked}")
+
+        restarted.run(max_iterations=5)
+
+        assert restarted._halted is True
+        assert [alert["title"] for alert in alerts] == [
+            "[test] Poll Error",
+            "[test] Order Status Unavailable",
+            "[test] Order Stuck",
+        ], "three failed polls alert; the fourth, a whole span after the first, halts"
+        halt = alerts[1]["message"]
+        assert (
+            f"AAA order_id={aaa.order_id} status unavailable (BrokerUnavailableError: "
+            f"binance {revoked}) for 30 minutes, with no drawdown check meanwhile; trading halted"
+        ) in halt
+        assert f"awaiting cancel confirmation for AAA order_id={aaa.order_id}" in halt
+        assert adapter.cancel_order.call_args.args[0] == aaa.order_id
+        assert [tracked.order_id for tracked in restarted._active_orders] == [aaa.order_id]
+        assert "cancel failed (DDoSProtection: binance" in alerts[2]["message"]
+
+    def test_an_answered_read_starts_the_span_over(self):
+        adapter = _resting_adapter()
+        trader, alerts, now = _trader(adapter)
+        trader._live_order_timeout_seconds = None
+        _buy_aaa(trader)
+        half = _unread_span(trader) / 2
+
+        def poll(*, answered: bool) -> None:
+            now[0] += half
+            if answered:
+                adapter.get_order.side_effect = lambda order_id, _s: _resting(order_id)
+                trader._poll_cycle()
+                return
+            adapter.get_order.side_effect = BrokerUnavailableError("venue did not answer")
+            with pytest.raises(RuntimeError, match="status unavailable"):
+                trader._poll_cycle()
+
+        for answered in (False, False, True, False, False):
+            poll(answered=answered)
+
+        assert trader._halted is False, "unread a span and a half in all, never a whole one"
+
+        now[0] += half
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        assert len(_exactly(alerts, "Order Status Unavailable")) == 1
+
+    def test_a_halted_account_keeps_an_exit_whose_reads_go_unanswered(self):
+        """A flatten's exit still works: cancelling it would leave its position open."""
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        trader, _, alerts = _working_exits(adapter, now)
+        trader._live_order_timeout_seconds = None
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        exits = list(trader._active_orders)
+        adapter.get_order.side_effect = BrokerUnavailableError("venue did not answer")
+
+        for _ in range(2):
+            now[0] += _unread_span(trader)
+            with pytest.raises(RuntimeError, match="status unavailable"):
+                trader._poll_cycle()
+
+        adapter.cancel_order.assert_not_called()
+        assert trader._active_orders == exits
+        assert _exactly(alerts, "Order Status Unavailable") == []
+
+    def test_a_read_failing_otherwise_halts_naming_the_order(self):
+        def refused(_order_id, _symbol):
+            raise PermissionError("API key may not read orders")
+
+        restarted, adapter, alerts, aaa = self._restarted_reading(refused)
+
+        restarted.run(max_iterations=3)
+
+        [halt] = _exactly(alerts, "Persistent Poll Error")
+        assert (
+            f"the last RuntimeError: AAA order_id={aaa.order_id} status unavailable "
+            "(PermissionError: API key may not read orders)"
+        ) in halt["message"]
+        assert _exactly(alerts, "Poll Error") == []
+        assert restarted._halted is True
+        assert adapter.cancel_order.call_args.args[0] == aaa.order_id
 
     @pytest.mark.parametrize("left", ["confirmed", "recovery_exit"])
     def test_a_restart_that_owes_nothing_more_says_so_or_stays_quiet(self, left):

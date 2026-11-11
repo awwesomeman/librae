@@ -218,6 +218,85 @@ def bucket_geometry_is_known(*, calendar_id: str, session_mode: str) -> bool:
     return session_mode == "regular" or calendar_id in _FULL_DAY_CALENDARS
 
 
+# How far a 24/7 calendar is laid out for comparison with session calendars,
+# which end where exchange_calendars' schedules do.
+_ALWAYS_OPEN_RANGE = (pd.Timestamp("2000-01-01", tz="UTC"), pd.Timestamp("2040-01-01", tz="UTC"))
+
+
+@cache
+def _session_table(calendar_id: str) -> pd.DataFrame:
+    """Every session of the calendar: label, first open, final close, and the
+    opens of its later segments (UTC), as ``_session_segments`` defines them."""
+    if calendar_id == ALWAYS_OPEN_CALENDAR:
+        opens = pd.date_range(*_ALWAYS_OPEN_RANGE, freq="D", inclusive="left")
+        return pd.DataFrame(
+            {"open": opens, "close": opens + pd.Timedelta(days=1), "later_open": pd.NaT},
+            index=pd.Index(opens.date, name="label"),
+        )
+    if calendar_id in _TAIFEX_CALENDARS:
+        labels = _exchange_calendar(calendar_id).sessions
+        night_open = time(15, 0) if calendar_id == TAIFEX_INDEX_CALENDAR else time(17, 25)
+        # Fixed Taipei clocks, which keep one UTC offset all year.
+        local = pd.DatetimeIndex(labels).tz_localize(_TAIPEI)
+        previous = local[:-1]
+        current = local[1:]
+        clock = pd.Timedelta(hours=night_open.hour, minutes=night_open.minute)
+        return pd.DataFrame(
+            {
+                "open": (previous + clock).tz_convert("UTC"),
+                "close": (current + pd.Timedelta(hours=13, minutes=45)).tz_convert("UTC"),
+                "later_open": (current + pd.Timedelta(hours=8, minutes=45)).tz_convert("UTC"),
+            },
+            index=pd.Index(current.date, name="label"),
+        )
+    schedule = _exchange_calendar(calendar_id).schedule
+    return pd.DataFrame(
+        {
+            "open": pd.DatetimeIndex(schedule["open"]),
+            "close": pd.DatetimeIndex(schedule["close"]),
+            "later_open": pd.DatetimeIndex(schedule["break_end"]),
+        },
+        index=pd.Index(schedule.index.date, name="label"),
+    )
+
+
+@cache
+def segment_open_phases(calendar_id: str, period_seconds: int) -> frozenset[int]:
+    """Where the calendar's segments open on the period's grid, in nanoseconds.
+
+    The grid is the period's multiples since the Unix epoch. An intraday bar
+    starts at its segment's open plus whole periods (``period_start``), so
+    two calendars whose segments all open at one phase start every bar on
+    one grid. Every segment the calendar holds is read, across its range.
+    """
+    period_ns = period_seconds * 10**9
+    table = _session_table(calendar_id)
+    opens = pd.DatetimeIndex(pd.concat([table["open"], table["later_open"]]).dropna())
+    return frozenset(np.unique(opens.as_unit("ns").asi8 % period_ns).tolist())
+
+
+def period_bars(calendar_id: str, timeframe: str) -> tuple[np.ndarray, np.ndarray]:
+    """Start and close, in UTC nanoseconds, of every one-period day, week or
+    month bar the calendar holds: its first session's open to its last
+    session's close, as ``period_start`` and ``period_close`` bound them."""
+    from librae.core.utils import to_canonical
+
+    canonical = to_canonical(timeframe)
+    table = _session_table(calendar_id)
+    if canonical == "D1":
+        bars = table[["open", "close"]]
+    elif canonical in ("W1", "MN1"):
+        labels = pd.DatetimeIndex(table.index)
+        period = labels.to_period("W-SUN" if canonical == "W1" else "M")
+        bars = table.groupby(period.to_numpy()).agg(open=("open", "min"), close=("close", "max"))
+    else:
+        raise ValueError(f"period bars are one day, week or month; got timeframe={canonical}")
+    return (
+        pd.DatetimeIndex(bars["open"]).as_unit("ns").asi8,
+        pd.DatetimeIndex(bars["close"]).as_unit("ns").asi8,
+    )
+
+
 def validate_calendar_id(calendar_id: str) -> None:
     """Resolve a calendar identifier without requiring an in-session timestamp."""
     if calendar_id != ALWAYS_OPEN_CALENDAR:

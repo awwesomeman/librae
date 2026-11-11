@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,9 +14,11 @@ from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
     bar_start_problem,
     bucket_geometry_is_known,
+    period_bars,
     period_close,
     period_start,
     segment_closes,
+    segment_open_phases,
     session_labels,
     session_ordinals,
 )
@@ -415,6 +417,87 @@ def subscription_from_instrument(
     )
 
 
+def require_aligned_bar_grids(subscriptions: Sequence[MarketDataSubscription]) -> None:
+    """Refuse primary subscriptions whose bars do not start on one shared grid.
+
+    Every mode orders events by bar start and fills a decision on a later
+    bar. When a symbol's bar starts while another symbol's bar is still
+    open, the bar read at the earlier start closes after the other symbol's
+    next bar opens, so a decision on it could fill before its data was
+    available, and live meets the bars out of start order.
+
+    Alignment is read from the calendars' session boundaries, not their
+    names. Primaries are aligned when they share one bar geometry, or when:
+
+    - intraday, every segment of every calendar opens at one phase of the
+      period's grid (bars start at their segment's open plus whole periods,
+      and none is longer than the period). Bars outside the sessions an
+      extended feed carries are taken to start on the clock grid, phase zero;
+    - one day, week or month, no symbol's bar starts while another's is open.
+    """
+    if len(subscriptions) < 2:
+        return
+
+    def geometry(subscription: MarketDataSubscription) -> tuple[str, str]:
+        full_day = bucket_geometry_is_known(
+            calendar_id=subscription.calendar_id, session_mode="extended"
+        )
+        return subscription.calendar_id, "any" if full_day else subscription.session_mode
+
+    if len({geometry(subscription) for subscription in subscriptions}) == 1:
+        return
+    timeframes = {subscription.timeframe for subscription in subscriptions}
+    if len(timeframes) == 1 and _grids_align(subscriptions, to_canonical(next(iter(timeframes)))):
+        return
+    described = ", ".join(
+        f"{subscription.symbol}={subscription.calendar_id}/{subscription.session_mode}"
+        for subscription in subscriptions
+    )
+    raise ValueError(
+        f"primary bars do not start on one shared grid ({described} at "
+        f"{', '.join(sorted(timeframes))}): one symbol's bar would start while another's "
+        "is still open, so a decision could fill before the data it read was available. "
+        "Use primaries whose sessions open on one grid of the bar period"
+    )
+
+
+def _grids_align(subscriptions: Sequence[MarketDataSubscription], canonical: str) -> bool:
+    if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
+        period_seconds = int(interval_to_timedelta(canonical).total_seconds())
+        phases: set[int] = set()
+        for subscription in subscriptions:
+            phases |= segment_open_phases(subscription.calendar_id, period_seconds)
+            if not bucket_geometry_is_known(
+                calendar_id=subscription.calendar_id, session_mode=subscription.session_mode
+            ):
+                phases.add(0)
+        return len(phases) == 1
+    if canonical not in ("D1", "W1", "MN1"):
+        return False
+    bars = [
+        period_bars(calendar_id, canonical)
+        for calendar_id in {subscription.calendar_id for subscription in subscriptions}
+    ]
+    # Compare only where every calendar has sessions.
+    first = max(int(starts[0]) for starts, _ in bars)
+    last = min(int(closes[-1]) for _, closes in bars)
+    bars = [
+        (starts[keep], closes[keep])
+        for starts, closes in bars
+        if (keep := (starts >= first) & (closes <= last)).any()
+    ]
+    all_starts = np.unique(np.concatenate([starts for starts, _ in bars]))
+    return not any(
+        bool(
+            (
+                np.searchsorted(all_starts, closes, side="left")
+                > np.searchsorted(all_starts, starts, side="right")
+            ).any()
+        )
+        for starts, closes in bars
+    )
+
+
 def _utc_index(values: object, *, field_name: str) -> pd.DatetimeIndex:
     try:
         raw_values = list(values)  # type: ignore[arg-type]
@@ -437,7 +520,7 @@ def _utc_index(values: object, *, field_name: str) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(normalized)
 
 
-def _completion_floor(
+def completion_floor(
     timestamp: pd.Timestamp,
     subscription: MarketDataSubscription,
     *,
@@ -487,7 +570,7 @@ def validate_bar_cadence(
     Intraday bars need not share a provider-independent phase, but two
     observations of one subscription cannot overlap. A bar overlaps its
     predecessor when it starts before that bar closed, and a bar closes where
-    ``_completion_floor`` says it does: a nominal interval, clamped at the
+    ``completion_floor`` says it does: a nominal interval, clamped at the
     segment close when the segment ends first. That clamp is the whole
     difference — without it the short gap a truncated bucket leaves before the
     next segment opens reads as an overlap.
@@ -630,7 +713,7 @@ def normalize_bar_times(
 
     floors = pd.DatetimeIndex(
         [
-            _completion_floor(
+            completion_floor(
                 timestamp,
                 subscription,
                 allow_extended_calendar_inference=provided,

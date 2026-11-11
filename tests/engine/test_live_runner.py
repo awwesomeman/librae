@@ -502,8 +502,33 @@ class TestLiveExecutor:
             ex.submit_order(ex.request_from_event(_make_fill_event()))
         mock_adapter.find_order.assert_not_called()
 
-    def test_pending_cancel_has_a_distinct_nonterminal_status(self):
-        assert LiveExecutor._normalize_status("pending_cancel") == "cancel_pending"
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            # IB's documented order states, as ib_async reports them.
+            ("ApiPending", "submitted"),
+            ("PendingSubmit", "submitted"),
+            ("PreSubmitted", "submitted"),
+            ("Submitted", "accepted"),
+            ("PendingCancel", "cancel_pending"),
+            ("ApiCancelled", "cancelled"),
+            ("Cancelled", "cancelled"),
+            ("Filled", "filled"),
+            ("Inactive", "rejected"),
+            # ib_async's own status for an order IB sent a warning about.
+            ("ValidationError", "submitted"),
+            # ccxt's unified statuses, then the non-unified in-progress one.
+            ("open", "accepted"),
+            ("closed", "filled"),
+            ("canceled", "cancelled"),
+            ("expired", "cancelled"),
+            ("rejected", "rejected"),
+            ("canceling", "cancel_pending"),
+            ("pending_cancel", "cancel_pending"),
+        ],
+    )
+    def test_venue_status_maps_to_a_final_status_only_when_the_venue_is_done(self, raw, expected):
+        assert LiveExecutor._normalize_status(raw) == expected
 
     def test_ccxt_base_fee_is_converted_to_cash_and_rebate_is_preserved(self):
         mock_adapter = MagicMock()
@@ -7005,7 +7030,6 @@ class TestLiveExecutionLifecycle:
         adapter.place_order.return_value = accepted
         adapter.get_order.side_effect = [
             accepted,
-            accepted,
             {
                 "id": "open-1",
                 "status": "cancelled",
@@ -7037,15 +7061,16 @@ class TestLiveExecutionLifecycle:
         now[0] += timedelta(seconds=30)
         runner._poll_cycle()
 
-        assert runner._halted is True
-        # The halt's status read, just after the cancel, still says accepted.
-        assert runner._active_orders[0].status == "accepted"
+        # Acknowledged, not ended: the next poll reads how it ended.
+        assert runner._halted is False
+        assert runner._active_orders[0].status == "cancel_pending"
         assert runner._active_orders[0].cancel_requested is True
         adapter.cancel_order.assert_called_once()
 
         runner._poll_cycle()
 
         assert runner._active_orders == []
+        assert runner._halted is True, "an ungrouped order's timeout halts"
         adapter.cancel_order.assert_called_once()
 
     def test_timeout_cancels_when_status_lookup_raises(self):
@@ -8080,10 +8105,13 @@ class TestMultiAdapterRouting:
         assert executor.get_order_adapter("MU") is ibkr
 
     def test_live_trader_resolves_costs_per_symbol(self):
+        # Half-hour regular-session bars: the two calendars' bars share starts.
         cfg = _test_cfg(
             symbols=["BTCUSDT", "MU"],
             market="multi",
             data_source="multi",
+            timeframe="30m",
+            session_mode="regular",
             instrument_overrides={"MU": {"currency": "USDT"}},
         )
         fetchers = {

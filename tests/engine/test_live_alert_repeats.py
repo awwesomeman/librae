@@ -83,19 +83,24 @@ def _flatten_waiting_on_aaa(cancel_status: str):
 
 class TestAFlattenWaitingForCancelConfirmation:
     @pytest.mark.parametrize(
-        "cancel_status",
+        ("cancel_status", "tracked_as"),
         [
-            pytest.param("pending_cancel", id="ibkr-pending-cancel"),
-            pytest.param("open", id="shioaji-still-submitted"),
+            pytest.param("pending_cancel", "cancel_pending", id="ibkr-pending-cancel"),
+            pytest.param("canceling", "cancel_pending", id="ccxt-canceling"),
+            pytest.param("open", "accepted", id="shioaji-still-submitted"),
+            pytest.param("ValidationError", "submitted", id="ib-async-warning"),
         ],
     )
-    def test_one_the_venue_confirms_a_cycle_later_does_not_alert(self, cancel_status, caplog):
+    def test_one_the_venue_confirms_a_cycle_later_does_not_alert(
+        self, cancel_status, tracked_as, caplog
+    ):
         adapter, trader, alerts, _, aaa = _flatten_waiting_on_aaa(cancel_status)
 
         with caplog.at_level(logging.INFO):
             trader._poll_cycle()
 
             assert trader._active_orders == [aaa], "the venue has not confirmed the cancel"
+            assert aaa.status == tracked_as
             assert trader._halted is False
             assert _exactly(alerts, WAITING) == []
 

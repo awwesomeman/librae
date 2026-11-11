@@ -659,6 +659,246 @@ jobs:
               connection.close()
           PY
 
+      - name: Verify backtest replacement leaves no rows behind
+        run: |
+          set -a
+          source .env.example
+          source .env.secrets
+          set +a
+          docker run --rm --interactive \
+            --network quant_network \
+            --env TIMESCALE_DSN="${TRADE_TIMESCALE_DSN}" \
+            librae-trade:ci \
+            python - <<'PY'
+          import os
+          from datetime import UTC, datetime
+
+          import numpy as np
+          import pandas as pd
+          import psycopg2
+
+          from librae.backtest.schema import (
+              AccountPerformance,
+              BacktestOutput,
+              PositionEventRecord,
+              RunMetadata,
+              StrategyMetrics,
+          )
+          from librae.core.market_data import MarketDataSubscription
+          from librae.db.timescale_writer import save_backtest_output
+
+          subscription = MarketDataSubscription(
+              symbol="BTCUSDT",
+              timeframe="H1",
+              calendar_id="24/7",
+              session_mode="extended",
+              data_source="binance_spot",
+              instrument_type="spot",
+          )
+          start = datetime(2026, 8, 1, tzinfo=UTC)
+          index = pd.date_range(start, periods=3, freq="h", name="ts")
+          bars = pd.DataFrame(
+              {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0},
+              index=index,
+          )
+          runs = {
+              name: f"replace-smoke-20260801t0000-{suffix}"
+              for name, suffix in (("a", "aaaaaa"), ("b", "bbbbbb"), ("c", "cccccc"))
+          }
+
+
+          def output(run_id, event_ids):
+              events = tuple(
+                  PositionEventRecord(
+                      event_id=event_id,
+                      ts=start,
+                      account_id="main",
+                      currency="USDT",
+                      symbol="BTCUSDT",
+                      side="long",
+                      event_type="open",
+                      fill_quantity=1.0,
+                      price=100.0,
+                      entry_price=100.0,
+                      remaining_quantity=1.0,
+                      notional=100.0,
+                  )
+                  for event_id in event_ids
+              )
+              return BacktestOutput(
+                  run_metadata=RunMetadata(
+                      run_id=run_id,
+                      strategy_name="replace-smoke",
+                      symbols=("BTCUSDT",),
+                      timeframe="H1",
+                      data_source="binance_spot",
+                      started_at=start,
+                      ended_at=start,
+                      run_at=start,
+                      primary_subscriptions=(subscription,),
+                  ),
+                  account=AccountPerformance(
+                      account_id="main",
+                      currency="USDT",
+                      initial_cash=10_000.0,
+                      final_equity=10_000.0,
+                      net_pnl=0.0,
+                      equity_curve=(),
+                      metrics=StrategyMetrics(total_return=0.0),
+                  ),
+                  position_events=events,
+                  position_snapshots=(),
+                  allocation_snapshots=(),
+              )
+
+
+          def save(run_id, event_ids, frame=bars, **kwargs):
+              return save_backtest_output(
+                  output(run_id, event_ids),
+                  config_hash="replace-smoke-config",
+                  backtest_revision="r1",
+                  bars_by_symbol={"BTCUSDT": frame},
+                  **kwargs,
+              )
+
+
+          connection = psycopg2.connect(os.environ["TIMESCALE_DSN"])
+          cursor = connection.cursor()
+
+
+          def count(table, run_id):
+              cursor.execute(f"SELECT count(*) FROM {table} WHERE run_id = %s", (run_id,))
+              return cursor.fetchone()[0]
+
+
+          def event_ids(run_id):
+              cursor.execute(
+                  "SELECT event_id FROM position_events WHERE run_id = %s ORDER BY event_id", (run_id,)
+              )
+              return [row[0] for row in cursor.fetchall()]
+
+
+          try:
+              assert save(runs["a"], ["a-open"])["position_events"] == 1
+              assert event_ids(runs["a"]) == ["a-open"]
+
+              # Replacing a run leaves none of its rows behind, including the
+              # position_events no foreign key cascades.
+              assert save(runs["b"], ["b-open"], replace_existing=True)["position_events"] == 1
+              assert count("backtest_runs", runs["a"]) == 0
+              assert event_ids(runs["a"]) == []
+              assert count("run_bars", runs["a"]) == 0
+              assert event_ids(runs["b"]) == ["b-open"]
+
+              # Saving the same run again replaces its events too.
+              assert save(runs["b"], ["b-reopen"])["position_events"] == 1
+              assert event_ids(runs["b"]) == ["b-reopen"]
+              assert count("run_bars", runs["b"]) == 3
+
+              # A replacement whose bars are refused rolls back whole: the run it would
+              # have replaced keeps every row, and the refused run leaves none.
+              for column in (["close"], list(bars.columns)):
+                  broken = bars.copy()
+                  broken.loc[index[1], column] = np.nan
+                  try:
+                      save(runs["c"], ["c-open"], frame=broken, replace_existing=True)
+                  except ValueError as error:
+                      assert "finite" in str(error), error
+                  else:
+                      raise AssertionError(f"bars with a NaN {column} were saved")
+                  connection.rollback()
+                  assert count("backtest_runs", runs["b"]) == 1
+                  assert event_ids(runs["b"]) == ["b-reopen"]
+                  assert count("run_bars", runs["b"]) == 3
+                  assert count("backtest_runs", runs["c"]) == 0
+                  assert event_ids(runs["c"]) == []
+                  assert count("run_bars", runs["c"]) == 0
+          finally:
+              connection.rollback()
+              for run_id in runs.values():
+                  cursor.execute("DELETE FROM position_events WHERE run_id = %s", (run_id,))
+                  cursor.execute("DELETE FROM backtest_runs WHERE run_id = %s", (run_id,))
+              connection.commit()
+              cursor.close()
+              connection.close()
+          PY
+
+      - name: Verify a restored run keeps its KPIs
+        run: |
+          set -a
+          source .env.example
+          source .env.secrets
+          set +a
+          docker run --rm --interactive \
+            --network quant_network \
+            --env TIMESCALE_DSN="${TRADE_TIMESCALE_DSN}" \
+            librae-trade:ci \
+            python - <<'PY'
+          import os
+
+          import psycopg2
+
+          from librae.backtest.schema import StrategyMetrics
+          from librae.config.symbols import resolve_symbol
+          from librae.core.run_config import AccountConfig, RunConfig
+          from librae.db.timescale_writer import write_strategy_performance
+          from librae.orchestration.live import _TimescaleCallbacks
+
+          run_id = "reregister-smoke"
+          config = RunConfig(
+              strategy_name="reregister-smoke",
+              symbols=["BTCUSDT"],
+              timeframe="H1",
+              market="crypto",
+              data_source="binance_spot",
+              account=AccountConfig(currency="USDT", initial_cash=10_000.0),
+              mode="sim",
+          )
+          callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)
+          connection = psycopg2.connect(os.environ["TIMESCALE_DSN"])
+          cursor = connection.cursor()
+
+
+          def performance():
+              cursor.execute(
+                  "SELECT final_equity, net_pnl, total_return, trades FROM strategy_performance WHERE run_id = %s",
+                  (run_id,),
+              )
+              return cursor.fetchall()
+
+
+          try:
+              callbacks.register_run(run_id)
+              assert performance() == [(10_000.0, 0.0, 0.0, 0)], performance()
+
+              # The KPIs a run has computed by the time it restarts.
+              write_strategy_performance(
+                  run_id,
+                  config.account_id,
+                  "USDT",
+                  10_000.0,
+                  10_250.0,
+                  250.0,
+                  StrategyMetrics(total_return=0.025, max_drawdown=0.01, trades=250),
+              )
+              connection.commit()
+              kept = performance()
+              assert kept == [(10_250.0, 250.0, 0.025, 250)], kept
+
+              # A restored run registers again and must keep them.
+              callbacks.register_run(run_id)
+              connection.commit()
+              assert performance() == kept, performance()
+          finally:
+              connection.rollback()
+              cursor.execute("DELETE FROM backtest_runs WHERE run_id = %s", (run_id,))
+              connection.commit()
+              cursor.execute("SELECT count(*) FROM strategy_performance WHERE run_id = %s", (run_id,))
+              assert cursor.fetchone()[0] == 0, "strategy_performance must cascade with its run"
+              cursor.close()
+              connection.close()
+          PY
+
       - name: Verify Linux host-gateway routing
         run: |
           python3 -m http.server 17497 --bind 0.0.0.0 >/tmp/fake-broker.log 2>&1 &

@@ -7,7 +7,15 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
-from librae.brokers.base import drop_incomplete_ohlcv, validate_order_signal
+from librae.brokers.base import (
+    SEGMENT_END_SETTLE,
+    drop_incomplete_ohlcv,
+    settled_available_at,
+    validate_order_signal,
+    with_settled_available_at,
+)
+from librae.brokers.ibkr_adapter import IBKRAdapter
+from librae.brokers.shioaji_adapter import ShioajiAdapter
 
 
 def test_drop_incomplete_uses_calendar_session_close() -> None:
@@ -138,6 +146,47 @@ def test_drop_incomplete_holds_a_calendar_bar_until_the_source_shows_it_closed(
     close, until the next minute appeared; a bar ending its session has no
     next one to wait for, so it waits only SEGMENT_END_SETTLE."""
     assert _taifex_bars_kept(starts, now, timeframe) == kept
+
+
+def test_a_bar_is_available_when_drop_incomplete_would_release_it() -> None:
+    """The settle a poll waits out is the bar's availability in every mode."""
+    minutes = pd.DataFrame(
+        {"ts": pd.date_range("2026-11-05 13:43", periods=2, freq="min", tz="Asia/Taipei")}
+    )
+    stamped = with_settled_available_at(minutes, "1m", "XTAIFEX")
+    closes = minutes["ts"] + pd.Timedelta(minutes=1)
+
+    assert stamped["available_at"].tolist() == [closes[0], closes[1] + SEGMENT_END_SETTLE]
+    assert settled_available_at(minutes["ts"][1], "M1", "XTAIFEX") == (
+        closes[1] + SEGMENT_END_SETTLE
+    )
+    assert _taifex_bars_kept(
+        ["2026-11-05 13:43", "2026-11-05 13:44"], "2026-11-05 13:45:59", "1m"
+    ) == ["11-05 13:43"]
+
+
+def test_the_adapters_declare_the_availability_their_fetches_stamp() -> None:
+    shioaji = ShioajiAdapter.__new__(ShioajiAdapter)
+    ibkr = IBKRAdapter.__new__(IBKRAdapter)
+    taifex_last = pd.Timestamp("2026-11-05 13:44", tz="Asia/Taipei")
+    xnys_last = pd.Timestamp("2026-01-05 20:30Z")
+    xnys_day = pd.Timestamp("2026-01-05 14:30Z")
+
+    assert shioaji.market_data_available_at(
+        taifex_last, "M1", calendar_id="XTAIFEX", session_mode="extended"
+    ) == pd.Timestamp("2026-11-05 13:46", tz="Asia/Taipei")
+    assert ibkr.market_data_available_at(
+        xnys_last, "H1", calendar_id="XNYS", session_mode="regular"
+    ) == pd.Timestamp("2026-01-05 21:01Z")
+    assert ibkr.market_data_available_at(
+        xnys_last, "H1", calendar_id="XNYS", session_mode="extended"
+    ) == pd.Timestamp("2026-01-05 21:30Z")
+    assert ibkr.market_data_available_at(
+        xnys_day, "D1", calendar_id="XNYS", session_mode="regular"
+    ) == pd.Timestamp("2026-01-05 21:00Z")
+    assert ibkr.market_data_available_at(
+        xnys_day, "D1", calendar_id="XNYS", session_mode="extended"
+    ) == pd.Timestamp("2026-01-06 14:30Z")
 
 
 @pytest.mark.parametrize(

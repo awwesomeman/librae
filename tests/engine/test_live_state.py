@@ -13,6 +13,7 @@ from librae.live.state import (
     LiveRebalance,
     LiveRuntimeState,
     MemoryLiveStateStore,
+    PendingFlatten,
     TrackedOrder,
 )
 
@@ -132,6 +133,11 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         period_index=8,
         status_period_count=2,
         halted=True,
+        pending_flatten=PendingFlatten(
+            reason="drawdown_breach", title="Max Drawdown Breach", detail="drawdown=-25.00%"
+        ),
+        rebalance_stopped_at=datetime(2025, 1, 2, tzinfo=UTC),
+        failed_rebalance_symbols=["BTC/USDT"],
         entries_paused=True,
         unstarted_groups=["pair"],
         adv_session_labels={"BTC/USDT": "2025-01-02"},
@@ -141,6 +147,34 @@ def test_runtime_state_round_trip_preserves_restart_fields():
     restored = LiveRuntimeState.from_dict(state.to_dict())
 
     assert restored == state
+
+
+@pytest.mark.parametrize(
+    ("versions_back", "missing"),
+    [
+        (1, ("rebalance_stopped_at", "failed_rebalance_symbols")),
+        (2, ("pending_flatten", "rebalance_stopped_at", "failed_rebalance_symbols")),
+    ],
+)
+def test_an_additive_previous_schema_loads_with_its_missing_fields_empty(versions_back, missing):
+    """No build writing it recorded them, so upgrading needs no flat stop."""
+    state = LiveRuntimeState(
+        state_key="sim:abc",
+        run_id="run-1",
+        config_hash="abc",
+        mode="sim",
+        account_id="default",
+        cash=1_000.0,
+        positions={"BTC/USDT": _position()},
+        active_orders=[_order()],
+        halted=True,
+    )
+    raw = state.to_dict()
+    raw["schema_version"] -= versions_back
+    for name in missing:
+        del raw[name]
+
+    assert LiveRuntimeState.from_dict(raw) == state
 
 
 @pytest.mark.parametrize("runtime_revision", [None, "", "   "])
@@ -447,7 +481,7 @@ def test_memory_store_lease_is_exclusive_until_release():
     assert store.acquire_lease("live:abc") is True
 
 
-@pytest.mark.parametrize("version_delta", [-1, 1])
+@pytest.mark.parametrize("version_delta", [-3, 1])
 def test_runtime_state_rejects_non_current_schema(version_delta):
     raw = LiveRuntimeState(
         state_key="sim:abc",

@@ -21,6 +21,7 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from math import isfinite
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from librae.core.utils import floor_to_step as floor_to_step
@@ -90,6 +91,68 @@ def find_position(
 SEGMENT_END_SETTLE = pd.Timedelta(minutes=1)
 
 
+def _segment_end_settle(start: pd.Timestamp, canonical: str, calendar_id: str) -> pd.Timedelta:
+    """``SEGMENT_END_SETTLE`` for a bar that ends its trading segment, else zero."""
+    from librae.core.readiness import next_expected_close
+    from librae.core.trading_calendar import period_close, period_start
+
+    close_at = period_close(start, canonical, calendar_id)
+    following_close = pd.Timestamp(
+        next_expected_close(start.to_pydatetime(), timeframe=canonical, calendar_id=calendar_id)
+    )
+    following_start = period_start(
+        following_close - pd.Timedelta(1, unit="ns"), canonical, calendar_id
+    )
+    return SEGMENT_END_SETTLE if following_start > close_at else pd.Timedelta(0)
+
+
+def settled_available_at(ts: object, timeframe: str, calendar_id: str) -> pd.Timestamp:
+    """When the bar at ``ts`` is safe to observe under ``drop_incomplete_ohlcv``'s rule.
+
+    Its close, or ``SEGMENT_END_SETTLE`` past it when it ends its trading
+    segment: until then no later bar can show the source finished it. This is
+    the bar's ``available_at``, so every mode treats the settle alike.
+    """
+    from librae.core.trading_calendar import period_close
+    from librae.core.utils import to_canonical
+
+    start = pd.Timestamp(ts)
+    canonical = to_canonical(timeframe)
+    return period_close(start, canonical, calendar_id) + _segment_end_settle(
+        start, canonical, calendar_id
+    )
+
+
+def with_settled_available_at(df: pd.DataFrame, timeframe: str, calendar_id: str) -> pd.DataFrame:
+    """``df`` with each bar's ``available_at`` from ``settled_available_at``.
+
+    Intraday bars are stamped from their segment closes at once, since a long
+    window holds tens of thousands of them and only a segment's last bar can
+    settle; an intraday bar outside every segment keeps its nominal close.
+    """
+    from librae.core.trading_calendar import segment_closes
+    from librae.core.utils import interval_to_timedelta, to_canonical
+
+    stamped = df.copy()
+    if stamped.empty:
+        stamped["available_at"] = pd.Series(dtype="datetime64[ns, UTC]")
+        return stamped
+    canonical = to_canonical(timeframe)
+    starts = pd.DatetimeIndex(pd.to_datetime(stamped["ts"], utc=True))
+    if not canonical.startswith(("M", "H")) or canonical.startswith("MN"):
+        available = [settled_available_at(start, canonical, calendar_id) for start in starts]
+        stamped["available_at"] = pd.DatetimeIndex(available, tz="UTC")
+        return stamped
+    nominal = starts + interval_to_timedelta(canonical)
+    segment_ends = segment_closes(starts, canonical, calendar_id)
+    closes = nominal.where(segment_ends.isna() | (nominal <= segment_ends), segment_ends)
+    available = closes.to_series(index=range(len(closes)))
+    for position in np.flatnonzero(closes == segment_ends):
+        available.iloc[position] += _segment_end_settle(starts[position], canonical, calendar_id)
+    stamped["available_at"] = available.to_numpy()
+    return stamped
+
+
 def drop_incomplete_ohlcv(
     df: pd.DataFrame,
     timeframe: str,
@@ -121,21 +184,15 @@ def drop_incomplete_ohlcv(
     canonical = to_canonical(timeframe)
     if calendar_id is not None:
         from librae.core.readiness import next_expected_close
-        from librae.core.trading_calendar import period_close, period_start
 
-        close_at = period_close(newest, canonical, calendar_id)
-        following_close = pd.Timestamp(
-            next_expected_close(
-                newest.to_pydatetime(), timeframe=canonical, calendar_id=calendar_id
-            )
-        )
-        following_start = period_start(
-            following_close - pd.Timedelta(1, unit="ns"), canonical, calendar_id
-        )
-        if following_start > close_at:
-            release_at = close_at + SEGMENT_END_SETTLE
+        if _segment_end_settle(newest, canonical, calendar_id):
+            release_at = settled_available_at(newest, canonical, calendar_id)
         else:
-            release_at = following_close
+            release_at = pd.Timestamp(
+                next_expected_close(
+                    newest.to_pydatetime(), timeframe=canonical, calendar_id=calendar_id
+                )
+            )
     else:
         period = (
             pd.offsets.MonthBegin(int(canonical[2:]))

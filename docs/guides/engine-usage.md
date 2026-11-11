@@ -64,6 +64,22 @@ currency conversion, cash yield, or settlement lag. Adjusted/continuous
 series can be research inputs, but using them as fill prices makes the
 cash-and-position simulation economically incomplete.
 
+**A TAIFEX continuous alias cannot be held through a contract switch.** An
+alias such as `TXFR1` or `MXFR2` (`continuous_alias=True` on the `XTAIFEX`
+calendar) moves to the next contract partway through the final settlement
+session, at a time its bars do not show, so a position held across the switch
+would book the price gap between the two contracts as PnL. A backtest raises
+when such a position is still held at the close of any bar in that session,
+when a fill in that session is not at a bar's open (a stop, take-profit or
+limit reached inside the bar may be priced on the next contract), or when a
+position is carried over the session and the session has no bar. Only the
+session's first open still belongs to the old contract: exit by then and
+re-enter after the session if the strategy wants to stay exposed. When to roll
+stays a strategy decision.
+`librae.core.taifex.taifex_final_settlement_day` gives the settlement day of a
+contract month. Exact contracts (`contract_month`) and other venues'
+continuous aliases are not checked.
+
 The backtest boundary fails fast on malformed input. Index levels must be
 exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps
 are timezone-aware and increasing within each symbol; and `config.symbols`, when
@@ -294,7 +310,8 @@ operations require reconfiguration and restart; they are not behavior that
 strategy code should emulate.
 
 Per-symbol `OrderIntent`s become eligible on that symbol's next observed bar
-and can wait indefinitely without blocking anything else. `PortfolioWeights`
+(in a backtest, the first that starts once the decision's bars were all
+available) and can wait indefinitely without blocking anything else. `PortfolioWeights`
 is intentionally synchronous and must be immediately executable when
 returned: the strategy checks `ctx.available_symbols` for every non-zero
 target and currently held symbol *before* returning one — the engine does not
@@ -324,13 +341,26 @@ currently exposes a venue-native combo order, so live execution submits each
 leg of a group serially. If any leg in a group is rejected, cancelled, or
 times out, the engine cancels that group's remaining legs and alerts —
 unrelated groups and independent intents keep executing; it does not attempt
-to unwind legs that already filled. A `PortfolioWeights` rebalance whose
+to unwind legs that already filled. Its unsent legs leave the queue in the
+write that records the failed leg, so a restart never finds them queued
+without it. A `PortfolioWeights` rebalance whose
 grouped leg fails that way stops whole without halting, because replanning
 it would send the same leg again. The strategy's decision on the next bar
-replans from the current book: on the bar where a rebalance stopped the
-strategy is not evaluated, so a leg goes out at most once per bar, except
-that a restart before the bar is recorded, or a store outage while the stop
-is written, may send it once more.
+replans from the current book: on the bar the failed leg was planned on the
+strategy is not evaluated, so a leg goes out at most once per bar. A leg the
+order poll sent ahead of any bar, such as one a failed write left queued,
+went out on the next bar processed, which is held instead. The stop
+holds in the process before it is written: its alert goes out, saying
+`not recorded yet (<error>)` if the state store fails the write, and the
+error then fails the cycle; the poll's retry of the bar neither replans nor
+asks the strategy. The stop and its bar are checkpointed, so only a restart
+before the store records them may send the leg once more.
+If that symbol's leg ends unfilled again on the next target rebalance, with
+no fill of the symbol between, the account halts instead, with the order's
+alert saying the leg failed on the previous target rebalance too: a refusal
+that repeats with nothing changed has a cause the engine cannot fix, and
+replanning would send the leg on every bar. A fill of the symbol, a target
+rebalance that completes, or a halt starts it over.
 If a broker adds native combo support in
 the future, use that adapter-specific capability instead. Before anything is
 submitted, live planning preflights each group as a whole: a grouped `close`
@@ -439,8 +469,11 @@ already decided is recorded beside the old one (`run_bars` in
 defined under data staleness below. Both modes advance a durable per-symbol
 watermark only after successful processing. A late symbol at the same
 timestamp is processed with any same-timestamp bars already present in cache,
-so a waiting target basket can become executable. An older event that would
-rewind the global clock fails explicitly. If a backtest still holds a symbol
+so a waiting target basket can become executable. A bar delivered after a
+later-starting event was decided is decided at its own start; how events are
+ordered and held is in
+[architecture.md](../../architecture.md#data-acquisition-and-ownership-boundary).
+If a backtest still holds a symbol
 without a real bar at the final
 timestamp, forced liquidation fails explicitly rather than fabricating a fill
 from its last mark.
@@ -461,7 +494,13 @@ returns whole bars only:
 intraday bars that start on its dates and daily bars of its trading days, with
 the minutes fetched as far either side as those bars reach. Keeping the
 vendor's bar start avoids shifting shortened or session-ending bars to an
-invented duration.
+invented duration. A Shioaji poll without dates is served from the tick
+subscription, which is verified for futures only; a stock, index or option
+symbol needs a date window, and a poll of one raises `ValueError` before any
+query, because `kbars()` is capped at 270 queries a session and cannot be
+polled. A live or sim run polls without dates, so `LiveTrader` refuses at
+construction, before any fetch, a Shioaji-routed symbol that is not a future:
+a declared `security_type` other than `FUT`, or none on a `spot` instrument.
 
 `SymbolInfo.calendar_id` is the SSOT for mapping an observed timestamp to its
 trading-session label. The built-ins use `24/7`, `XNYS`, and `XTAIFEX`;
@@ -472,7 +511,11 @@ Taiwan-futures night session with its following regular-session date.
 Shioaji's clock correction remains adapter-specific and is not a calendar:
 `librae.brokers.shioaji_time.shioaji_kbar_starts` turns its raw kbar stamp, a
 Taipei wall clock posing as UTC that marks the minute's end, into the UTC
-minute start.
+minute start. Some TAIFEX futures' kbars give the trades matched at a
+segment's closing instant a minute of their own, stamped one past the close;
+on the TAIFEX calendars the adapter merges that minute into the segment's last
+one, so those trades count toward the session they closed. Stock and index
+kbars are not covered: whether theirs do the same is unverified.
 
 Session bars follow the venue's attribution rule. Intraday buckets count from
 each segment's open (`XTAIFEX`: 15:00 night, 08:45 day), so a bucket the
@@ -488,9 +531,10 @@ session, and Q11 publishes each session's prices separately. TradingView's
 45000/45265/44700/45057).
 
 Segments are half-open: `XTAIFEX`'s are `[15:00, 05:00)` and `[08:45, 13:45)`,
-so the last day minute starts at 13:44. A print stamped at a close or later
-came after it and belongs to no bar of that session: resampling drops it with
-a warning rather than opening a one-minute stub bar. An execution is an
+so the last day minute starts at 13:44. A minute starting at a close or later
+belongs to no bar of that session: resampling drops it with a warning rather
+than opening a one-minute stub bar. An adapter whose vendor puts the closing
+trades in such a minute folds them into the last one first. An execution is an
 instant, not a bar: a fill stamped at a close, or between segments, counts
 toward the session that last traded (`execution_session_label`), and that is
 the session its ADV budget books; one stamped after a close is logged.
@@ -624,18 +668,34 @@ for example when a withdrawal left the account holding less than the ledger.
 
 While an order remains active, polling still refreshes the OHLCV cache,
 heartbeat, and staleness state, but it does not run a new strategy decision.
+It still marks the open book on each poll's newest completed bars and checks
+`max_drawdown_rate` (below), since a `day` or `gtc` limit with no timeout can
+hold decisions for days; the equity curve and periodic status wait for the
+next decided bar, and periodic reconciliation for the order to end.
 An optional local wall-clock timeout cancels an over-age order, preserves any
-confirmed partial fill, and halts dependent work for review. A cancel the
+confirmed partial fill, and halts dependent work for review. A timeout's
+cancel the venue takes without ending the order, such as one answered
+`cancel_pending`, keeps the order tracked, and a later cycle fails it as the
+timeout would once the venue confirms it ended. A cancel the
 engine sent goes out at most once per cycle, and not again while the venue
 reports it `cancel_pending`; one the venue turns down, leaving the order
 working, is sent again, and so is one whose status a later cycle cannot read
 or apply, since the venue may have put the order back to work. A status read
 that fails, other than with an answer the executor refuses, fails the cycle
-before the order's timeout, naming the order, so a **Poll Error** that
-follows says which order it is. An order the venue reports `cancel_pending`
+before the order's timeout, and the next cycle reads again. The poll error
+names the order: a read the venue left unanswered (`BrokerUnavailableError`)
+alerts, and halts only once the reads have failed as long as reconciliation
+may go unanswered, while any other failure halts once it persists (persistent
+poll errors, below). An order the venue reports `cancel_pending`
 on its own is polled until it ends, and is under its timeout again if it
-reverts to working. A status report that cannot be read or applied to its
-order (a status the executor does not know, another order id, a cumulative
+reverts to working. An order still tracked with nothing ending it alerts
+**Order Stuck**, naming it and repeating while it lasts, and the engine keeps
+waiting rather than cancelling or halting: an engine cancel the venue has not
+confirmed a cycle after the one that first found it so, a cancel the venue
+started on its own that outlasts the order's timeout, and an order still
+working one bar after placement with no timeout, by when the strategy has
+skipped a decision behind it. A status report that cannot be read or applied
+to its order (a status the executor does not know, another order id, a cumulative
 fill that went backwards) leaves the order tracked and under its timeout,
 alerts naming it, repeating while it lasts (see the runbook's
 [lasting problems](operational-runbook.md#lasting-problems)), and lets the
@@ -897,13 +957,16 @@ exceeded `RunConfig.runtime.poll_seconds`.
 - `live_order_timeout_seconds`: optional live-only local safety timeout measured
   from the persisted wall-clock placement attempt. On expiry the engine first
   refreshes the broker report, requests cancellation only if the order remains
-  non-terminal, applies any additional cumulative fill, then halts. `None`
-  leaves lifetime to the broker. This is a client-side wall-clock watchdog,
-  not broker-native time-in-force, and composes with `OrderIntent.time_in_force`
-  rather than replacing it: time-in-force governs what the *exchange* does
-  when an order can't immediately match; this timeout is the engine's own
-  backstop for cancelling a still-resting `day`/`gtc` order after N seconds
-  regardless of its time-in-force.
+  non-terminal, applies any additional cumulative fill, then fails the order
+  as **Order Timeout** once the venue confirms it ended. `None` leaves
+  lifetime to the broker, and an order still working a bar after placement
+  then alerts **Order Stuck** instead: a default timeout would cancel a `day`
+  or `gtc` limit left resting by design. This is a client-side wall-clock
+  watchdog, not broker-native time-in-force, and composes with
+  `OrderIntent.time_in_force` rather than replacing it: time-in-force governs
+  what the *exchange* does when an order can't immediately match; this
+  timeout is the engine's own backstop for cancelling a still-resting
+  `day`/`gtc` order after N seconds regardless of its time-in-force.
 
 `OrderIntent.time_in_force` (`"day"` / `"gtc"` / `"ioc"` / `"fok"`) sets the
 order's lifetime. Leaving it unset (`None`) keeps the default one-event
@@ -1011,16 +1074,37 @@ adapter at submission.
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
   confirmed broker fills; a close below the venue minimum is skipped as above.
+  Live also checks on every poll while a strategy order works, through a
+  state store outage too (see persistent poll errors below), on each
+  symbol's newest completed bar, unless an operator flatten is already
+  waiting on that order. Like a decision, that check waits while a required
+  feed of a held symbol has no usable bar, rather than value one leg of a
+  hedge at an old mark; the feed's own stale or not-ready alert covers it. The closes are sized from the book any working
+  strategy order leaves, so such an order is cancelled first, as for an operator flatten; while the
+  venue has not confirmed it ended, the account is halted owing that
+  cancellation, the breach alert names the order, and the closes go out once
+  the cancellation completes. The wait is checkpointed, so a restart resumes
+  it once startup reconciliation has read the venue's positions and open
+  orders and found them matching. The closes are sized only when sent, so any
+  halt while they wait, such as a startup read that fails, drops them.
+  Sending them alerts their outcome under the breach's title but records no
+  second `halted` event.
   An exit that ends rejected, cancelled, or cancelled after its timeout is
   skipped too, with a `decision_skipped` event (reason `close_rejected` or
   `close_cancelled`, carrying the venue's reason) and a **Close Rejected** or
   **Close Cancelled** alert, instead of halting and cancelling the other
   exits. That includes an `account_fault` refusal, since the flatten halts
-  the account anyway. An engine halt of the already-halted account, such as
-  one for an exit whose cancel or placement cannot be resolved, cancels the
-  other exits too; each it ends short of a fill is recorded the same way, its
-  cause saying it ended while a halt cancelled the account's orders, or after
-  a cancel the engine requested when it ends in a later cycle. A
+  the account anyway. An engine halt of the account a flatten has halted, or
+  is halting, leaves the other exits working, as `halt()` does: one for an
+  exit whose cancel or placement cannot be resolved cancels only that exit,
+  through the order poll, which does not halt again for it, while the exits
+  queued behind it stay unsent until it ends; one that names no order, such
+  as a failed read at a restart, cancels none. One finding the venue's
+  positions or open orders differ from the ledger the exits were sized from
+  cancels them all; a restart checks both even when a tracked order's status
+  cannot be read. An exit a halt ends short of a fill is recorded the same
+  way, its cause saying it ended after a cancel the engine requested, or
+  while a halt cancelled the account's orders. A
   strategy close that merely carries a recovery reason
   on a running account keeps the normal handling. The breach alert names what
   remains open. The halt persists across restart, emergency exits remain active while halted, and broker orders must
@@ -1037,6 +1121,36 @@ adapter at submission.
   mode then re-verifies the broker before the first new decision (see
   [Reconciliation](#reconciliation-live-only)). See the recovery procedure in
   [the operational runbook](operational-runbook.md).
+- Persistent poll errors: a poll cycle that raises is retried on the next
+  poll, in sim and live. An outage, an error that is or is chained from
+  `BrokerUnavailableError` or `StateStoreUnavailableError` (the venue or the
+  state store gave no answer), only alerts **Poll Error** once
+  `LiveTrader.CONSECUTIVE_ERROR_THRESHOLD` cycles in a row have failed. A
+  state store outage that fails the order poll's writes fails the cycle only
+  after its risk checks: the poll still reads and books each order's answer
+  but places no queued order, and the post-fill risk check and the drawdown
+  breaker run on that book; no decision runs. An audit-queue checkpoint
+  that fails so is held the same way. What a halt does then is under halt
+  durability below. Any
+  other error may be a defect every cycle repeats, such as a decision that
+  preflight refuses or a strategy that raises, so that many of them with no
+  clean cycle between halt the account with **Persistent Poll Error**,
+  carrying the last error as the reason, and cancel its tracked orders. An
+  order status read the venue left unanswered is an outage when the adapter
+  classifies it ([Broker Adapter Design](../../architecture.md#broker-adapter-design-libraebrokers));
+  one it does not classify counts as any other error. While an order status
+  read fails, the cycle stops before the drawdown check, so a tracked order whose
+  status reads keep failing, outage or not, with no answer between, halts the
+  account with **Order Status Unavailable** once they have failed for
+  `LiveTrader.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS` reconciliation
+  intervals: the span an account with no working order may go unanswered
+  before [reconciliation](#reconciliation-live-only) halts it, which a
+  working order must not stretch. It also ends refusals no retry clears that
+  an adapter classifies as outages, such as a revoked key ccxt reports that
+  way (see `CryptoAdapter`). Like the reconciliation skips, that span is not
+  checkpointed: a restart reads the head of the order queue and the venue's
+  open orders, and halts if either read fails.
+  On a halted account failures only alert.
 - Halt durability: every halt applies in memory, writes its checkpoint, and
   only then cancels, each cancel recording itself before it is sent. Every
   tracked order the venue has not confirmed ended gets a cancel, whether its
@@ -1067,10 +1181,21 @@ adapter at submission.
   cancellations go out, and a flatten's exits, sent or still queued, keep
   working. `reset_halt()` refuses with `halt_not_persisted` until then. A
   process that exits first restarts from the last written checkpoint,
-  unhalted.
+  unhalted, and its drawdown breaker measures from the peak that checkpoint
+  holds. A drawdown breach or operator flatten does not wait for a store
+  outage, since that would leave the book open for as long as the store is
+  down: its cancels and exits go out with their rows held in memory for the
+  next checkpoint that lands, its alert says `not recorded yet`, and each
+  later cycle retries the checkpoint, then goes on with the cancels and
+  exits still owed. A restart before a checkpoint lands halts on any
+  position or untracked open order the flatten left at the venue, and sends
+  nothing. An
+  order whose placement write fails was not sent, and is not taken as sent.
 - Audit trail: every halt alert records one `halted` runtime event, so one
   stop can record several: a flatten whose exit fails records the exit's halt
   and its own, and a halt repeated on an already-halted account records again.
+  The alert of closes a drawdown breach sends after waiting halts nothing new
+  and records none.
   An operator `halt()` of an already-halted account changes nothing and records
   none. Each `reset_halt()` that applies records `halt_reset`, with
   `persisted: false` when the reset's own checkpoint write failed, even if the
@@ -1327,7 +1452,11 @@ terminal meanwhile and left the snapshot. A row the store refuses while it
 still accepts the snapshot is dropped rather than failing every later
 checkpoint, a halt's included: it is recorded as an `order_row_rejected`
 runtime event, alerts once, and sets `LiveTrader.order_ledger_degraded` for
-the rest of the process. Analytics callbacks remain
+the rest of the process. A save the store fails with
+`StateStoreUnavailableError` (from `librae.integrations`), as the reference
+store does for a timeout or lost connection, is an outage instead and keeps
+every row carried; a store raises it only when the rows got no verdict.
+Analytics callbacks remain
 projections; they are not broker fill truth. `runtime_revision` deliberately
 does not form part of the checkpoint key; `architecture.md` is the canonical
 home for what that key contains.
@@ -1484,7 +1613,8 @@ bar already decided is rare and is what the audit keeps, so it rides the
 queue; a burst of them is flushed whenever the queue fills, so a healthy sink
 loses none to the bound. A sink with `on_ohlcv_batch` takes queued rows of one
 symbol in one call, so a burst does not hold the decision for a write per row;
-a durable sink's batch path must raise on a failed write, as `on_ohlcv` does.
+a durable sink's batch path must raise on a failed write, as `on_ohlcv` does,
+and declare `durable_ohlcv_delivery` too, or the constructor refuses it.
 
 Any other callback keeps the documented best-effort contract: it is invoked,
 its failure is logged, and nothing is queued. The engine cannot acknowledge on

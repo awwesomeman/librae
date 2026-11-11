@@ -43,7 +43,7 @@ from librae.core.market_data import (
     validate_ohlcv_values,
 )
 from librae.core.utils import to_canonical
-from librae.db import _storable_text, get_conn
+from librae.db import _bounded_statements, _storable_text, get_conn
 from librae.db.schema import require_current_schema
 from librae.live.execution_identity import ExecutionIdentity
 
@@ -1216,6 +1216,8 @@ def refresh_performance(
 
     The live engine calls it after a close, reduce or financing cash flow, and
     on the first equity point after a restore, to keep the KPIs current.
+    Only the upsert is bounded (``_bounded_statements``): the reads cover the
+    whole run, so a long run may legitimately take longer than the bound.
     """
     from librae.core import EPSILON
     from librae.core.executor import REASON_FORCE_CLOSE, TradePnL
@@ -1399,16 +1401,17 @@ def refresh_performance(
         raise ValueError(f"unknown account_id: {account_id!r}")
     account = config.account
     final_equity = equity_values[-1]
-    write_strategy_performance(
-        run_id,
-        account_id,
-        account.currency,
-        account.initial_cash,
-        final_equity,
-        final_equity - account.initial_cash,
-        metrics,
-        dsn=dsn,
-    )
+    with _bounded_statements():
+        write_strategy_performance(
+            run_id,
+            account_id,
+            account.currency,
+            account.initial_cash,
+            final_equity,
+            final_equity - account.initial_cash,
+            metrics,
+            dsn=dsn,
+        )
 
 
 def save_signal_results(

@@ -1279,6 +1279,67 @@ def test_trade_normalization_uses_ibkr_cumulative_fill_and_commission():
     assert result["executed_at"] == datetime(2025, 1, 1, tzinfo=UTC)
 
 
+_PLACED = ("PendingSubmit", 0)  # ib_async's own entry when it places an order
+
+
+@pytest.mark.parametrize(
+    ("log", "perm_id", "reported"),
+    [
+        pytest.param([_PLACED, ("ValidationError", 404)], 0, "PendingSubmit", id="404-before-ib"),
+        pytest.param(
+            [_PLACED, ("Submitted", 0), ("ValidationError", 404)],
+            0,
+            "Submitted",
+            id="404-after-ib",
+        ),
+        pytest.param([_PLACED, ("ValidationError", 321)], 0, "rejected", id="321-before-ib"),
+        pytest.param([_PLACED, ("ValidationError", 434)], 0, "rejected", id="434-before-ib"),
+        pytest.param(
+            [_PLACED, ("ValidationError", 404), ("ValidationError", 321)],
+            0,
+            "rejected",
+            id="404-then-321-before-ib",
+        ),
+        pytest.param(
+            [_PLACED, ("Submitted", 0), ("ValidationError", 321)],
+            0,
+            "Submitted",
+            id="321-after-ib",
+        ),
+        pytest.param(
+            [_PLACED, ("ValidationError", 321)], 99, "PendingSubmit", id="321-after-ib-perm-id"
+        ),
+        pytest.param(
+            [_PLACED, ("Submitted", 0), ("PendingCancel", 0), ("ValidationError", 399)],
+            0,
+            "PendingCancel",
+            id="cancel-sent",
+        ),
+        pytest.param(
+            [_PLACED, ("PreSubmitted", 0), ("ValidationError", 399), ("ValidationError", 2109)],
+            0,
+            "PreSubmitted",
+            id="second-warning",
+        ),
+        pytest.param([("ValidationError", 321)], 0, "ValidationError", id="built-from-ib-report"),
+    ],
+)
+def test_trade_normalization_reads_an_ib_warning_by_its_code_and_what_ib_said(
+    log, perm_id, reported
+):
+    trade = SimpleNamespace(
+        order=SimpleNamespace(
+            orderId=123, permId=perm_id, orderRef="strategy-1", action="SELL", totalQuantity=2
+        ),
+        orderStatus=SimpleNamespace(status="ValidationError", filled=0, avgFillPrice=0),
+        contract=SimpleNamespace(symbol="MU"),
+        fills=[],
+        log=[SimpleNamespace(status=status, errorCode=code) for status, code in log],
+    )
+
+    assert IBKRAdapter._trade_to_order(trade)["status"] == reported
+
+
 def test_find_order_recovers_completed_order_from_prior_session():
     adapter = _make_adapter(trading_enabled=True)
     completed = SimpleNamespace(
@@ -1332,6 +1393,39 @@ def test_find_order_does_not_query_history_when_session_trade_exists():
     assert result is not None
     adapter._ib.reqCompletedOrders.assert_not_called()
     adapter._ib.reqExecutions.assert_not_called()
+
+
+_STATUS_READS = {
+    "get_order": lambda adapter: adapter.get_order("123", "MU"),
+    "find_order": lambda adapter: adapter.find_order("strategy-1", "MU"),
+}
+
+
+@pytest.mark.parametrize("read", sorted(_STATUS_READS))
+def test_order_history_on_a_dropped_session_is_unavailable(read):
+    """ib_async refuses to send the request at all, so the read had no effect."""
+    adapter = _make_adapter(trading_enabled=True)
+    adapter._ib.trades.return_value = []
+    original = ConnectionError("Not connected")
+    adapter._ib.reqCompletedOrders.side_effect = original
+
+    with pytest.raises(BrokerUnavailableError, match="not connected") as raised:
+        _STATUS_READS[read](adapter)
+
+    assert raised.value.__cause__ is original
+
+
+@pytest.mark.parametrize("read", sorted(_STATUS_READS))
+def test_order_history_failing_otherwise_keeps_its_error(read):
+    adapter = _make_adapter(trading_enabled=True)
+    adapter._ib.trades.return_value = []
+    original = RuntimeError("malformed completed order")
+    adapter._ib.reqCompletedOrders.side_effect = original
+
+    with pytest.raises(RuntimeError) as raised:
+        _STATUS_READS[read](adapter)
+
+    assert raised.value is original
 
 
 # ---------------------------------------------------------------------------

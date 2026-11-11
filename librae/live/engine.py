@@ -11,8 +11,9 @@ import logging
 import signal
 import types
 from collections import deque
-from collections.abc import Callable, Container, Mapping, Sequence
+from collections.abc import Callable, Container, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -68,8 +69,10 @@ from librae.core.market_data import (
     FeatureBatch,
     MarketDataSubscription,
     MarketDataView,
+    completion_floor,
     evaluate_batch_features,
     normalize_bar_times,
+    require_aligned_bar_grids,
     subscription_from_instrument,
     validate_feature_frame,
     validate_ohlcv_values,
@@ -88,6 +91,7 @@ from librae.core.strategy import (
 )
 from librae.core.trading_calendar import (
     execution_session_label,
+    period_start,
     session_label,
     session_labels,
     validate_calendar_id,
@@ -134,7 +138,9 @@ from .state import (
     LiveRebalance,
     LiveRuntimeState,
     LiveStateStore,
+    PendingFlatten,
     PendingOhlcvDelivery,
+    StateStoreUnavailableError,
     TrackedOrder,
     normalize_runtime_revision,
 )
@@ -374,6 +380,24 @@ def _market_data_capability(source: object, name: str) -> str | None:
     return value
 
 
+def _market_data_available_at(source: object) -> Callable[..., pd.Timestamp] | None:
+    """Read a source's declared ``market_data_available_at``, if it has one.
+
+    Called with a bar's start, timeframe, ``calendar_id`` and
+    ``session_mode``, it returns the ``available_at`` the source gives that
+    bar. A source without one is taken to give its completion floor.
+    """
+    declaration = getattr_static(
+        source, "market_data_available_at", _MISSING_MARKET_DATA_CAPABILITY
+    )
+    if declaration is _MISSING_MARKET_DATA_CAPABILITY:
+        return None
+    available_at = source.market_data_available_at
+    if not callable(available_at):
+        raise TypeError("market_data_available_at must be callable when supplied")
+    return available_at
+
+
 def _market_data_route_owner(source: object) -> str | None:
     """Read an adapter's explicit native-route capability without duck-mocking it."""
     return _market_data_capability(source, "market_data_route")
@@ -488,6 +512,7 @@ def _resolve_market_data_subscription_snapshot(
         )
         for symbol in instruments
     }
+    _validate_market_data_poll_routes(instruments, route_owners)
     effective_calendars = _resolve_effective_calendars_from_capabilities(
         instruments,
         source_capabilities,
@@ -505,6 +530,38 @@ def _resolve_market_data_subscription_snapshot(
         effective_calendars,
     )
     return _MarketDataSubscriptionSnapshot(route_owners, subscriptions)
+
+
+def _validate_market_data_poll_routes(
+    instruments: Mapping[str, SymbolInfo],
+    route_owners: Mapping[str, str | None],
+) -> None:
+    """Fail before polling when a route cannot serve the engine's poll.
+
+    The runtime polls without a date window, which a Shioaji route serves
+    from its tick subscription for futures only (``ShioajiAdapter.fetch_ohlcv``),
+    so any other contract would fail every poll. The route is named here for
+    the reason given in ``_validate_market_data_calendar_preconditions``. A
+    declared ``security_type`` names the venue contract; without one, the
+    ``contract_*`` instrument types are the futures.
+    """
+    refused = sorted(
+        symbol
+        for symbol, instrument in instruments.items()
+        if route_owners.get(symbol) == "shioaji"
+        and not (
+            instrument.security_type == "FUT"
+            or (
+                instrument.security_type is None
+                and instrument.instrument_type.startswith("contract_")
+            )
+        )
+    )
+    if refused:
+        raise ValueError(
+            f"Shioaji market data for {refused} cannot be polled: the runtime fetches "
+            "without a date window, which Shioaji serves for futures only"
+        )
 
 
 def _validate_market_data_calendar_preconditions(
@@ -567,6 +624,31 @@ class ReportNotAppliedError(RuntimeError):
         # mismatch, without what became of its cancel, which can carry a
         # venue's error text that differs on every attempt.
         self.content = content
+
+
+def _is_outage(
+    error: BaseException,
+    kinds: tuple[type[Exception], ...] = (BrokerUnavailableError, StateStoreUnavailableError),
+) -> bool:
+    """Whether a failed call got no answer from ``kinds``, by default the state store or the venue.
+
+    Either type says the call had no effect and retrying later is safe; it
+    counts here whether raised or chained as the cause.
+    """
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        if isinstance(cause, kinds):
+            return True
+        seen.add(id(cause))
+        cause = cause.__cause__
+    return False
+
+
+def _declares_durable_ohlcv(callback: object) -> bool:
+    """Whether an OHLCV callback, or the sink it is bound to, declares durable delivery."""
+    sink = getattr(callback, "__self__", callback)
+    return getattr(sink, "durable_ohlcv_delivery", False) is True
 
 
 def _report_failure(request: OrderRequest, order_id: str, error: Exception) -> str:
@@ -666,6 +748,17 @@ class LiveTrader:
             raise ValueError("exactly one of feature_fn and batch_feature_fn is required")
         if on_ohlcv_batch is not None and on_ohlcv is None:
             raise ValueError("on_ohlcv_batch is the many-bar path of an on_ohlcv sink; pass both")
+        if (
+            on_ohlcv_batch is not None
+            and _declares_durable_ohlcv(on_ohlcv)
+            and not _declares_durable_ohlcv(on_ohlcv_batch)
+        ):
+            # Queued rows are acknowledged through either callable, so a batch
+            # path that returns after a failed write would drop them unseen.
+            raise ValueError(
+                "on_ohlcv declares durable_ohlcv_delivery, so on_ohlcv_batch acknowledges "
+                "queued rows too and must come from a sink that declares it as well"
+            )
         if feature_fn is not None and not callable(feature_fn):
             raise TypeError("feature_fn must be callable or None")
         if batch_feature_fn is not None and not callable(batch_feature_fn):
@@ -759,6 +852,9 @@ class LiveTrader:
         )
         self._optional_symbols = frozenset(config.optional_symbols)
         self._market_data_subscriptions = dict(snapshot.subscriptions)
+        require_aligned_bar_grids(
+            [self._market_data_subscriptions[symbol] for symbol in self._symbols]
+        )
         # Auxiliary inputs reuse their symbol's resolved instrument, calendar
         # and data route, so they need no separate resolution or source
         # binding — only a different timeframe through the same fetcher.
@@ -787,6 +883,11 @@ class LiveTrader:
                 calendar_id=self._market_data_subscriptions[symbol].calendar_id,
             )
             for symbol in self._symbols
+        }
+        self._declared_available_at = {
+            symbol: declared
+            for symbol in self._symbols
+            if (declared := _market_data_available_at(sources[symbol])) is not None
         }
 
         if config.mode == "live":
@@ -880,6 +981,13 @@ class LiveTrader:
         # as a column so strategies never see it; it feeds only the audit row.
         self._bar_observed_at: dict[str, dict[tuple[int, int], datetime]] = {}
         self._consecutive_errors: int = 0
+        # Of those, the ones not an outage met on a running account.
+        self._unclassified_cycle_errors = 0
+        # The order whose status reads have failed, unbroken by an answer, and
+        # since when. Not checkpointed, as reconciliation's skips are not: a
+        # restart reads the head of the order queue and the venue's open
+        # orders, and halts if either read fails.
+        self._status_unread_since: tuple[str, datetime] | None = None
         self._market_data_fetch_failures: dict[str, int] = {}
         # Recent fetch health is intentionally process-local. Persisting a
         # short operational window across downtime would mix unlike polling
@@ -908,21 +1016,30 @@ class LiveTrader:
         # Whether a halt still owes the live cancellation it skipped, that failed,
         # or that the venue has not yet confirmed for every tracked order.
         self._halt_cancels_pending = False
+        # A flatten whose exits wait on that cancellation; checkpointed.
+        self._pending_flatten: PendingFlatten | None = None
         # Each poll cycle and each synchronous operator halt is one pass over
         # the tracked orders, and a cancel goes out at most once per order in
         # a pass: a status read just after it may not show it yet.
         self._order_pass = 0
         # The pass that last sent a cancel the venue answered, by client order
-        # id. Beyond that pass, a cancel is held back only while the venue
-        # reports it pending; a pending state the venue set itself was never
-        # ours. Not checkpointed, so after a restart a pending cancel goes out
-        # once more.
-        self._cancels_sent: dict[str, int] = {}
+        # id, with the ValueError text if that answer was one: the call may
+        # have been refused before it reached the venue. Beyond that pass, a
+        # cancel is held back only while the venue reports it pending; a
+        # pending state the venue set itself was never ours. Not checkpointed,
+        # so after a restart a pending cancel goes out once more.
+        self._cancels_sent: dict[str, tuple[int, str]] = {}
+        # The pass that first left each tracked order's engine cancel
+        # unconfirmed. Not checkpointed: after a restart the count starts over.
+        self._cancel_unconfirmed_since: dict[str, int] = {}
         # Alerts that would otherwise repeat every cycle while the venue's
         # answers about an order do not apply, keyed by client order id, or
         # while a flatten waits for the venue to confirm its cancels.
         self._report_alerts = PersistentAlerts(self._send_alert, self._utc_now)
         self._flatten_alert = PersistentAlerts(self._send_alert, self._utc_now)
+        # Orders tracked past their bound that no other alert speaks for,
+        # keyed by client order id (``_alert_stuck``).
+        self._stuck_alerts = PersistentAlerts(self._send_alert, self._utc_now)
         # The order pass of each tracked order's latest unappliable answer,
         # alerted or not.
         self._report_failed_pass: dict[str, int] = {}
@@ -940,6 +1057,11 @@ class LiveTrader:
         # sink usually writes to the same database.
         self._checkpoint_failing = False
         self._held_runtime_events: list[RuntimeEvent] = []
+        # Inside ``_acting_through_store_outage``, the store outages its writes
+        # met; None outside it.
+        self._unrecorded: list[Exception] | None = None
+        # A store outage this poll cycle met and held until its risk checks ran.
+        self._held_store_outage: Exception | None = None
         self._pending_decision: StrategyDecision = []
         # Bar timestamp each pending intent first rested on, keyed by symbol.
         # A resting "day" limit expires against the session it first rested in.
@@ -974,8 +1096,23 @@ class LiveTrader:
         self._flatten_at: datetime | None = None
         # The last order an entry fill was booked for, until the risk limits are checked.
         self._entry_fill_unchecked: TrackedOrder | None = None
-        # The last bar a target rebalance stopped on; not checkpointed.
+        # The bar the last target rebalance stopped on, which no decision
+        # replans: the same bar and book would size the same leg and send it
+        # again. Checkpointed, so a restart that retries the bar holds it too.
         self._rebalance_stopped_at: datetime | None = None
+        # Symbols whose target-rebalance leg last ended unfilled, with no fill
+        # of the symbol since; another such end halts. Checkpointed.
+        self._failed_rebalance_symbols: set[str] = set()
+        # The bar ``_continue_live_rebalance`` is sending legs on, if any.
+        self._rebalance_bar: datetime | None = None
+        # Whether the order poll placed a rebalance leg, as one a failed write
+        # left queued, since the last bar processed: that leg goes out on the
+        # next bar processed. Then whether the rebalance stopped since, so
+        # that bar is the one no decision replans. Not checkpointed: the bar
+        # is recorded within the same poll unless the poll gets none, and a
+        # restart before then lets that bar decide once.
+        self._leg_ahead_of_bar = False
+        self._stop_holds_next_bar = False
         self._cycle_fetch_seconds: dict[str, float] = {}
         self._cycle_strategy_seconds = 0.0
         self._cycle_order_seconds = 0.0
@@ -1022,8 +1159,7 @@ class LiveTrader:
         # A sink opts into at-least-once delivery by declaring it. Anything
         # else keeps the documented best-effort contract, because the engine
         # cannot acknowledge on a caller's behalf.
-        sink_owner = getattr(on_ohlcv, "__self__", on_ohlcv)
-        self._durable_ohlcv_delivery = getattr(sink_owner, "durable_ohlcv_delivery", False) is True
+        self._durable_ohlcv_delivery = _declares_durable_ohlcv(on_ohlcv)
         self._ohlcv_audit_degraded = False
         self._on_heartbeat = on_heartbeat
         self._on_signal_outcome = on_signal_outcome
@@ -1195,6 +1331,9 @@ class LiveTrader:
             period_index=self._period_index,
             status_period_count=self._status_period_count,
             halted=self._halted,
+            pending_flatten=self._pending_flatten,
+            rebalance_stopped_at=self._rebalance_stopped_at,
+            failed_rebalance_symbols=sorted(self._failed_rebalance_symbols),
             entries_paused=self._entries_paused,
             unstarted_groups=sorted(self._unstarted_groups),
             adv_session_labels=dict(self._adv_session_labels),
@@ -1259,6 +1398,9 @@ class LiveTrader:
         self._period_index = state.period_index
         self._status_period_count = state.status_period_count
         self._halted = state.halted
+        self._pending_flatten = state.pending_flatten
+        self._rebalance_stopped_at = state.rebalance_stopped_at
+        self._failed_rebalance_symbols = set(state.failed_rebalance_symbols)
         self._entries_paused = state.entries_paused
         self._adv_session_labels = state.adv_session_labels
         self._adv_filled_quantities = state.adv_filled_quantities
@@ -1309,6 +1451,11 @@ class LiveTrader:
         written on its own and one the store still refuses is dropped loudly:
         a carried row the store never accepts would otherwise fail every
         later checkpoint, including a halt's, and its cancellation with it.
+        A ``StateStoreUnavailableError`` skips that check: a timed-out row
+        write, e.g. behind a lock on the row, was not refused.
+
+        Inside ``_acting_through_store_outage`` a store outage returns instead,
+        its rows still carried, with ``_checkpoint_failing`` left set.
         """
         if self._state_store is None:
             return
@@ -1317,14 +1464,51 @@ class LiveTrader:
         snapshot = self._snapshot_state()
         self._checkpoint_failing = True
         try:
-            self._state_store.save(snapshot, tuple(self._unpersisted_orders.values()))
+            try:
+                self._state_store.save(snapshot, tuple(self._unpersisted_orders.values()))
+            except Exception as exc:
+                if (
+                    isinstance(exc, StateStoreUnavailableError)
+                    or not self._unpersisted_orders
+                    or not self._store_accepts(snapshot)
+                ):
+                    self._log_checkpoint_failure(exc)
+                    raise
+                self._write_rows_one_by_one(snapshot)
         except Exception as exc:
-            if not self._unpersisted_orders or not self._store_accepts(snapshot):
-                self._log_checkpoint_failure(exc)
+            if self._unrecorded is None or not _is_outage(exc, (StateStoreUnavailableError,)):
                 raise
-            self._write_rows_one_by_one(snapshot)
+            self._unrecorded.append(exc)
+            return
         self._unpersisted_orders.clear()
         self._checkpoint_failing = False
+
+    @contextmanager
+    def _acting_through_store_outage(self) -> Iterator[None]:
+        """Let a flatten's cancels and exits reach the venue while the store is down.
+
+        Every order and cancel is otherwise recorded before it is sent, so a
+        restart can find it, and a store outage holds it back. For a flatten
+        that would leave the book open for as long as the store is down. In
+        here a write that meets an outage keeps its rows carried for the next
+        checkpoint that lands and the work goes on; the outermost scope then
+        raises the outage, as any failed write does. A restart before a
+        checkpoint lands starts from one that does not know this work:
+        startup reconciliation halts on the positions or untracked open orders
+        it left at the venue and sends nothing, and an order it cancelled reads
+        as one the venue ended.
+        """
+        if self._unrecorded is not None:
+            yield
+            return
+        self._unrecorded = []
+        try:
+            yield
+            unrecorded = self._unrecorded
+        finally:
+            self._unrecorded = None
+        if unrecorded:
+            raise unrecorded[0]
 
     def _store_accepts(self, snapshot: LiveRuntimeState) -> bool:
         """Write the snapshot with no rows; False means the store itself is failing."""
@@ -1340,13 +1524,14 @@ class LiveTrader:
         A row is tried twice, so a connection lost mid-write does not read as
         a refusal, and its second failure is re-checked with the snapshot
         alone, so a store that goes down partway keeps the rest carried and
-        raises, as an outage does.
+        raises, as an outage does. A ``StateStoreUnavailableError`` raises at
+        once, the same way.
         """
         for client_order_id, tracked in list(self._unpersisted_orders.items()):
             try:
                 self._save_row(snapshot, tracked)
             except Exception as exc:
-                if not self._store_accepts(snapshot):
+                if isinstance(exc, StateStoreUnavailableError) or not self._store_accepts(snapshot):
                     self._log_checkpoint_failure(exc)
                     raise
                 del self._unpersisted_orders[client_order_id]
@@ -1357,6 +1542,8 @@ class LiveTrader:
     def _save_row(self, snapshot: LiveRuntimeState, tracked: TrackedOrder) -> None:
         try:
             self._state_store.save(snapshot, (tracked,))
+        except StateStoreUnavailableError:
+            raise
         except Exception:
             self._state_store.save(snapshot, (tracked,))
 
@@ -1416,20 +1603,29 @@ class LiveTrader:
 
         Called only where order work owns the outcome, never from inside a
         checkpoint: a sink error raised there would read as the checkpoint
-        failing, and a halt would report itself unpersisted.
+        failing, and a halt would report itself unpersisted. Nothing goes out
+        while the last checkpoint failed, as one acting through a store outage
+        does without raising.
         """
+        if self._checkpoint_failing:
+            return
         while self._unpublished_results:
             self._publish_action_results(self._unpublished_results.pop(0))
 
     # WHY: 3 consecutive errors likely means a persistent issue (API down, DB
-    # unreachable), not a transient blip — worth alerting the operator.
+    # unreachable), not a transient blip — worth alerting the operator. When
+    # they are not an outage (``_is_outage``) the account halts instead: a
+    # defect the cycle repeats every poll would otherwise retry unseen after
+    # one alert.
     CONSECUTIVE_ERROR_THRESHOLD = 3
 
     # WHY: a skipped reconciliation round only stretches the interval, so
     # bounding consecutive skips bounds how long broker/local drift can go
     # undetected. Only consecutive skips halt: every answered round runs a full
     # reconcile, so intermittent skips thin coverage without removing it, and
-    # the FETCH_HEALTH_* window below alerts on them instead.
+    # the FETCH_HEALTH_* window below alerts on them instead. The order poll
+    # halts after the same span of failed status reads
+    # (``_halt_status_unread_too_long``).
     RECONCILIATION_UNAVAILABLE_HALT_ROUNDS = 6
 
     # A six-poll window catches a sustained two-out-of-three failure pattern
@@ -1447,13 +1643,14 @@ class LiveTrader:
     # than submitting decisions from obsolete market snapshots.
     STALE_DATA_TOLERANCE_BARS = 2
 
-    # How long past a bar's close the symbols that have it wait for a
-    # required symbol due the same bar. A venue starts each symbol's next
-    # candle at its own time, and an adapter releases a bar only then (58
-    # Binance perpetuals took 0.8 to 12.2 seconds after a close on 2026-11-05),
-    # so one poll can hold a bar for some symbols and not others. Deciding
-    # then would read the rest a bar stale, which a backtest never does. Past
-    # the hold the late symbols are decided on their own, a poll later.
+    # How long past a bar's availability the symbols that have it wait for a
+    # required symbol whose bar is available by then too (see _held_cohort).
+    # A venue starts each symbol's next candle at its own time, and an
+    # adapter releases a bar only then (58 Binance perpetuals took 0.8 to
+    # 12.2 seconds after a close on 2026-11-05), so one poll can hold a bar
+    # for some symbols and not others. Deciding then would read the rest a
+    # bar stale, which a backtest never does. Past the hold the late symbols
+    # are decided on their own, a poll later.
     COHORT_HOLD = timedelta(seconds=30)
 
     # The retry queue is in memory, one event per fill, so this sits far above
@@ -1574,8 +1771,20 @@ class LiveTrader:
             on_ohlcv=self._on_ohlcv,
             on_ohlcv_batch=self._on_ohlcv_batch,
             degraded=self._ohlcv_audit_degraded,
-            persist=self._persist_state,
+            persist=self._persist_audit_queue,
         )
+
+    def _persist_audit_queue(self) -> None:
+        """Checkpoint the audit rows a sink took off the queue; hold a store outage.
+
+        The sink may answer while the state store does not. Those rows are
+        off the queue in memory, so the next checkpoint that lands records
+        them, and the outage must not stop the cycle before its risk checks.
+        """
+        try:
+            self._persist_state()
+        except Exception as exc:
+            self._hold_store_outage(exc)
 
     def _staleness_grace(self, subscription: MarketDataSubscription) -> timedelta:
         return data_readiness.staleness_grace(
@@ -1863,6 +2072,7 @@ class LiveTrader:
                 self._halt_live(
                     title="Position Reconciliation Mismatch",
                     message="Persisted and broker positions differ for configured symbols",
+                    book_differs=True,
                 )
             return
         if self._bootstrap_broker_positions():
@@ -1958,6 +2168,7 @@ class LiveTrader:
             self._halt_live(
                 title="Orphan Broker Orders",
                 message="Untracked open orders on configured symbols: " + ", ".join(orphans),
+                book_differs=True,
             )
 
     def _bootstrap_broker_positions(self) -> bool:
@@ -2162,17 +2373,58 @@ class LiveTrader:
                 message=f"Skipped rounds fell to {skipped_rounds}/{len(history)}; alert cleared.",
             )
 
-    def _halt_live(self, *, title: str, message: str) -> None:
+    def _halt_live(
+        self,
+        *,
+        title: str,
+        message: str,
+        order: TrackedOrder | None = None,
+        book_differs: bool = False,
+    ) -> None:
         """Fail closed and cancel every tracked order that may still execute.
 
         The halt is checkpointed before cancelling, and each cancel records
         itself. A failure of either still alerts, naming it, before it
-        propagates.
+        propagates. Within a flatten, a store outage holds back neither
+        (``_acting_through_store_outage``).
+
+        On an account a flatten has halted or is halting, whose only orders
+        are its exits, the exits keep working, as for a manual halt:
+        cancelling them would leave their positions open. Only ``order``, the
+        one the halt is about, is cancelled, and by the order poll, which
+        finishes a cancel without halting again, so an exit that stays
+        unresolved does not halt the account every cycle. The exits behind it
+        stay queued, unsent, until it ends.
+
+        A halt finding the venue's positions or open orders differ from the
+        ledger (``book_differs``) cancels them all, since they were sized from
+        that ledger. Any halt drops the exits a flatten still waits to send:
+        those are sized only when sent, so they go out only from a book no
+        halt has called into question, such as one a restart could not read.
         """
+        keep_exits = (
+            not book_differs
+            and (self._halted or self._flatten_at is not None)
+            and self._has_active_recovery_orders()
+        )
+        cancelled: tuple[TrackedOrder, ...] = ()
+        if keep_exits and order is not None and order in self._active_orders:
+            order.cancel_requested = True
+            cancelled = (order,)
+        dropped, self._pending_flatten = self._pending_flatten, None
         self._enter_halt()
-        failure, note = self._persist_halt(cancel_on_retry=True)
-        if failure is None and not self._executor.simulation:
+        failure, note = self._persist_halt(*cancelled, cancel_on_retry=not keep_exits)
+        if keep_exits:
+            others = [tracked for tracked in self._active_orders if tracked not in cancelled]
+            unsent = sum(1 for tracked in others if not tracked.placement_attempted)
+            prefix = "; cancelling that order only; other" if cancelled else ";"
+            note += (
+                f"{prefix} recovery exits: {len(others) - unsent} working, {unsent} queued unsent"
+            )
+        elif failure is None and not self._executor.simulation:
             failure, note = self._cancel_for_halt()
+        if dropped is not None:
+            note += f"; the {dropped.title} exits not yet sent are dropped"
         logger.error("%s: %s", title, message)
         self._notify(
             "send_alert",
@@ -2228,17 +2480,25 @@ class LiveTrader:
         self._pending_decision = []
         self._pending_resting_since = {}
         self._live_rebalance = None
+        # Reviewed before any reset, so a leg failing after it starts over.
+        self._failed_rebalance_symbols.clear()
         self._entry_fill_unchecked = None
         self._drop_pending_halt_reset()
 
-    def _persist_halt(self, *, cancel_on_retry: bool) -> tuple[Exception | None, str]:
+    def _persist_halt(
+        self, *orders: TrackedOrder, cancel_on_retry: bool
+    ) -> tuple[Exception | None, str]:
         """Checkpoint a halt, or keep it for retry and return a note naming the failure.
 
         ``cancel_on_retry`` is whether the halt still owes a cancellation: a
         plain halt does, a flatten leaves its recovery exits working.
+
+        Acting through a store outage (``_acting_through_store_outage``), a
+        halt whose write fails returns no failure: its work goes on, and the
+        note says what a restart would find.
         """
         try:
-            self._persist_state()
+            self._persist_state(*orders)
         except Exception as exc:
             self._halt_unpersisted = True
             self._halt_cancels_pending = cancel_on_retry and not self._executor.simulation
@@ -2247,6 +2507,15 @@ class LiveTrader:
             return exc, (
                 f"; halt not persisted ({type(exc).__name__}: {exc}), "
                 "so a restart now would resume unhalted"
+            )
+        if self._checkpoint_failing and self._unrecorded:
+            error = self._unrecorded[-1]
+            self._halt_unpersisted = True
+            logger.error("Halt checkpoint not written: %s", error)
+            return None, (
+                f"; not recorded yet ({type(error).__name__}: {error}), so a restart now "
+                "would start unhalted from the last checkpoint and halt only if the venue's "
+                "positions or open orders differ from it"
             )
         return None, ""
 
@@ -2307,11 +2576,35 @@ class LiveTrader:
 
         A failure of either propagates, so no order work runs on a state the
         store never saw or ahead of the cancellation, and the next cycle tries
-        again. Returns whether it sent the cancellation pass, which already
-        polled and cancelled every tracked order.
+        again. Once the cancellation completes, here or before a restart, a
+        flatten that waited on it sends its exits. Returns whether it sent the
+        cancellation pass, which already polled and cancelled every tracked
+        order, or those exits, which already advanced the queue.
+
+        A flatten's halt is the exception: its cancels and exits go on through
+        a store outage (``_acting_through_store_outage``). While the halt itself
+        is unrecorded the outage then stops the cycle, so its exits are also
+        advanced here.
         """
+        if not self._flatten_owns_halt():
+            return self._retry_halt_work()
+        with self._acting_through_store_outage():
+            sent = self._retry_halt_work()
+            if self._halt_unpersisted and not sent:
+                self._advance_live_orders()
+                sent = True
+        return sent
+
+    def _flatten_owns_halt(self) -> bool:
+        """Whether a halted account's order work is a flatten's: its exits, sent or waiting."""
+        return self._halted and (
+            self._pending_flatten is not None or self._has_active_recovery_orders()
+        )
+
+    def _retry_halt_work(self) -> bool:
         if self._halt_unpersisted:
             self._persist_state()
+        if self._halt_unpersisted and not self._checkpoint_failing:
             self._halt_unpersisted = False
             logger.warning("Halt checkpoint persisted")
             failure, note = None, ""
@@ -2325,7 +2618,7 @@ class LiveTrader:
             )
             if failure is not None:
                 raise failure
-            return cancelled
+            return self._send_pending_flatten() or cancelled
         if self._halt_cancels_pending:
             # Owed while any order is tracked, since a cancel the venue has not
             # confirmed may still fill; the halt alert named what was left.
@@ -2334,13 +2627,30 @@ class LiveTrader:
                 return True
             self._halt_cancels_pending = False
             logger.warning("Halt cancellation completed")
+            pending = self._pending_flatten
             self._notify(
                 "send_alert",
                 title=f"[{self._executor.strategy_name}] Halt Cancellation Completed",
-                message="The venue confirmed every cancel the halt owed; no order is tracked.",
+                message="The venue confirmed every cancel the halt owed; no order is tracked"
+                + (f"; the {pending.title} exits go out now." if pending else "."),
             )
+            self._send_pending_flatten()
             return True
-        return False
+        return self._send_pending_flatten()
+
+    def _send_pending_flatten(self) -> bool:
+        """Send the exits of a flatten that waited on its halt's cancellation, once that is done.
+
+        Returns whether it sent them.
+        """
+        pending = self._pending_flatten
+        if pending is None or self._halt_cancels_pending or self._active_orders:
+            return False
+        self._pending_flatten = None
+        self._flatten_account_and_halt(
+            self._utc_now(), reason=pending.reason, title=pending.title, detail=pending.detail
+        )
+        return True
 
     def _fail_group_or_halt(
         self,
@@ -2372,7 +2682,14 @@ class LiveTrader:
         only that group's other still-active legs and alerts — unrelated
         groups and independent intents keep executing. A target rebalance
         stops instead, since replanning it would send the same leg again;
-        the next bar's decision replans from the book. Returns True if the
+        the next bar's decision replans from the book. A leg ending unfilled
+        for a symbol whose leg did so on the previous target rebalance, with
+        no fill of the symbol since, halts instead: the venue keeps refusing
+        it, and replanning would send it on every bar. The group's unsent
+        legs left the queue in the write that recorded the failure
+        (``_apply_order_report``). The stop holds in memory before its
+        checkpoint, which is also retried when that write failed, and alerts
+        even when the retry fails, which then raises. Returns True if the
         whole account was halted (caller should stop advancing this tick),
         False otherwise (caller should continue to the next active order).
         """
@@ -2393,16 +2710,34 @@ class LiveTrader:
         if group_id is None or account_fault:
             self._halt_live(title=title, message=message)
             return True
+        rebalance_stopped = self._live_rebalance is not None
+        if rebalance_stopped and tracked.filled_quantity <= EPSILON:
+            if request.symbol in self._failed_rebalance_symbols:
+                self._halt_live(
+                    title=title,
+                    message=(
+                        f"{message}; the {request.symbol} leg failed on the previous target "
+                        "rebalance too, with no fill since"
+                    ),
+                )
+                return True
+            self._failed_rebalance_symbols.add(request.symbol)
+        if rebalance_stopped:
+            self._stop_live_rebalance()
         if not self._executor.simulation:
             for sibling in list(self._active_orders):
                 if sibling.request.group_id == group_id:
                     self._cancel_tracked_order(sibling)
-        rebalance_stopped = self._live_rebalance is not None
-        if rebalance_stopped:
-            self._live_rebalance = None
-            self._persist_state()
+        failure: Exception | None = None
+        if rebalance_stopped or self._checkpoint_failing:
+            try:
+                self._persist_state()
+            except Exception as exc:
+                failure = exc
         scope = "the target rebalance stopped" if rebalance_stopped else "other groups unaffected"
         outcome = f"{message}; group {group_id!r} cancelled, {scope}"
+        if failure is not None:
+            outcome += f"; not recorded yet ({type(failure).__name__}: {failure})"
         logger.error("%s: %s", title, outcome)
         self._notify(
             "send_alert",
@@ -2420,7 +2755,25 @@ class LiveTrader:
             },
             symbol=request.symbol,
         )
+        if failure is not None:
+            raise failure
         return False
+
+    def _stop_live_rebalance(self) -> None:
+        """End the target rebalance short of its targets, before anything records it.
+
+        No decision on the bar its last leg was planned on replans it, also
+        when a write that fails after the stop leaves that bar to be retried.
+        A leg the order poll placed since the last bar, as one a failed write
+        left queued, goes out on the next bar processed instead, which that
+        bar's decision would otherwise send again in the same poll; that bar
+        is held too. A leg placed on its own bar that ends before the next
+        holds only its own: the next bar's decision replans it.
+        """
+        assert self._live_rebalance is not None
+        self._rebalance_stopped_at = self._live_rebalance.execution_bar_ts
+        self._stop_holds_next_bar = self._leg_ahead_of_bar
+        self._live_rebalance = None
 
     def _post_fill_risk_halted(self) -> bool:
         """Halt if an entry fill booked since the last check took the account past a limit.
@@ -2502,6 +2855,7 @@ class LiveTrader:
 
     def _initialize_run(self) -> None:
         """Acquire live ownership and reconcile broker facts before polling."""
+        restored_flatten = self._pending_flatten
         if not self._executor.simulation:
             if not self._state_store.acquire_lease(self._account_lease_key):
                 raise RuntimeError(
@@ -2538,19 +2892,35 @@ class LiveTrader:
                             "owed; no order is tracked.",
                         )
                 else:
-                    self._advance_live_orders(submit_planned=False)
+                    self._advance_live_orders(submit_planned=False, restoring=True)
+            except Exception as exc:
+                self._halt_order_reconciliation(exc, halted=restored_halted)
+            halted = self._halted
+            try:
+                # Even when the tracked orders could not be read: an order
+                # placed at the venue while the run was down must still halt it.
                 self._reconcile_open_orders()
             except Exception as exc:
-                if self._halted and not restored_halted:
-                    # A halt during reconciliation has alerted already.
-                    raise
-                logger.exception("Broker order reconciliation failed")
-                self._halt_live(
-                    title="Order Reconciliation Failed",
-                    message=str(exc),
-                )
+                self._halt_order_reconciliation(exc, halted=halted)
 
         self._reconcile_positions()
+        if restored_flatten is not None:
+            # The breach alerted in the process that is gone. A startup halt
+            # dropped the exits if it could not read or match the book.
+            if self._pending_flatten is None:
+                outcome = (
+                    "its exits are dropped, not sent, since startup reconciliation did not "
+                    "confirm the book; after review, reset_halt() and request the flatten"
+                )
+            elif self._halt_cancels_pending:
+                outcome = "its exits go out once the venue confirms the cancels owed"
+            else:
+                outcome = "its exits go out next cycle"
+            self._send_alert(
+                restored_flatten.title,
+                f"account_id={self._account_id} restarted halted with "
+                f"{', '.join(sorted(self._positions)) or 'no position'} open; {outcome}",
+            )
         try:
             self._reconcile_cash()
         except BrokerUnavailableError:
@@ -2561,6 +2931,17 @@ class LiveTrader:
         self._resume_unverified = False
         if not self._executor.simulation:
             self._last_reconciliation_at = self._utc_now()
+
+    def _halt_order_reconciliation(self, error: Exception, *, halted: bool) -> None:
+        """Halt for a startup order reconciliation that raised ``error``.
+
+        ``halted`` is whether the account was halted before that step: a halt
+        during it has alerted already, so its error propagates instead.
+        """
+        if self._halted and not halted:
+            raise error
+        logger.error("Broker order reconciliation failed", exc_info=error)
+        self._halt_live(title="Order Reconciliation Failed", message=str(error))
 
     def _release_lease(self) -> None:
         if self._lease_acquired:
@@ -2619,21 +3000,14 @@ class LiveTrader:
                     try:
                         self._poll_cycle()
                         self._consecutive_errors = 0
+                        self._unclassified_cycle_errors = 0
                     except Exception as exc:
                         self._consecutive_errors += 1
                         logger.exception(
                             "Error in poll cycle (%d consecutive), will retry next interval",
                             self._consecutive_errors,
                         )
-                        if self._consecutive_errors == self.CONSECUTIVE_ERROR_THRESHOLD:
-                            self._notify(
-                                "send_alert",
-                                title=f"[{strategy_name}] Poll Error",
-                                message=(
-                                    f"{self._consecutive_errors} consecutive failures, the "
-                                    f"last {type(exc).__name__}: {exc}. Check logs."
-                                ),
-                            )
+                        self._answer_poll_error(exc)
                     finally:
                         self._finish_cycle_diagnostics(cycle_started_at, cycle_started)
 
@@ -2664,6 +3038,42 @@ class LiveTrader:
                 finally:
                     self._close()
             logger.info("LiveTrader stopped (reason: %s)", shutdown_reason)
+
+    def _answer_poll_error(self, error: Exception) -> None:
+        """Alert a cycle failing again and again, halting once its error is not an outage.
+
+        The next cycle retries either way. An outage clears on its own, so it
+        only alerts. Any other error may be a defect every cycle repeats, such
+        as a decision that preflight refuses, so it halts with the error as
+        the reason. A halted account has nothing more to stop.
+        """
+        if self._halted:
+            self._unclassified_cycle_errors = 0
+        elif not _is_outage(error):
+            self._unclassified_cycle_errors += 1
+            if self._unclassified_cycle_errors >= self.CONSECUTIVE_ERROR_THRESHOLD:
+                self._unclassified_cycle_errors = 0
+                try:
+                    self._halt_live(
+                        title="Persistent Poll Error",
+                        message=(
+                            f"{self._consecutive_errors} poll cycles in a row failed, the last "
+                            f"{type(error).__name__}: {error}"
+                        ),
+                    )
+                except Exception:
+                    # Its alert named the failure, and the next cycle retries it.
+                    logger.exception("Persistent Poll Error halt not finished")
+                return
+        if self._consecutive_errors == self.CONSECUTIVE_ERROR_THRESHOLD:
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] Poll Error",
+                message=(
+                    f"{self._consecutive_errors} consecutive failures, the "
+                    f"last {type(error).__name__}: {error}. Check logs."
+                ),
+            )
 
     def _close(self) -> None:
         """Refuse further operator calls and release the account; hold the cycle lock."""
@@ -2900,8 +3310,10 @@ class LiveTrader:
                 self._last_reconciliation_at = None
                 self._resume_unverified = True
             self._halted = False
-            # A reset needs every tracked order resolved: nothing is left to cancel.
+            # A reset needs every tracked order resolved: nothing is left to
+            # cancel, and a flatten still waiting is the operator's to request again.
             self._halt_cancels_pending = False
+            self._pending_flatten = None
             # A new risk epoch starts a fresh unverified window.
             self._reconciliation_unavailable_rounds = 0
             self._reconciliation_history.clear()
@@ -2987,6 +3399,26 @@ class LiveTrader:
             signal.signal(signal.SIGUSR2, _halt_reset_handler)
 
     def _poll_cycle(self) -> None:
+        """Run one poll cycle, then raise a state store outage it held.
+
+        A store outage fails the writes of order work and of the audit queue,
+        not the risk checks on what that work read and booked: an order can
+        rest through the whole outage. So the cycle holds the outage until
+        those checks have run and then fails, before any decision.
+        """
+        self._held_store_outage = None
+        self._run_poll_cycle()
+        if self._held_store_outage is not None:
+            raise self._held_store_outage
+
+    def _hold_store_outage(self, error: Exception) -> None:
+        """Hold a state store outage for ``_poll_cycle`` to raise; raise anything else."""
+        if not _is_outage(error, (StateStoreUnavailableError,)):
+            raise error
+        if self._held_store_outage is None:
+            self._held_store_outage = error
+
+    def _run_poll_cycle(self) -> None:
         """Process completed market-data events without live catch-up orders."""
         self._order_pass += 1
         # An order that ended once its answers applied again resolves; one
@@ -2998,6 +3430,9 @@ class LiveTrader:
             for client_order_id, failed_in in self._report_failed_pass.items()
             if client_order_id in tracked_ids
         }
+        # An order's end resolves its stuck alert; this drops one whose end
+        # was not recorded, as in a store outage.
+        self._stuck_alerts.retain(tracked_ids)
         # A halt's cancel pass that meets an answer it cannot apply alerts
         # instead of failing the cycle, so reconciliation still runs. A
         # requested halt has already alerted it, naming the order.
@@ -3025,15 +3460,33 @@ class LiveTrader:
         # Order work that hit a store outage may have left ledger rows and
         # fills behind, with no later order work to carry them.
         if self._unpersisted_orders:
-            self._persist_state()
+            try:
+                self._persist_state()
+            except Exception as exc:
+                self._hold_store_outage(exc)
         self._publish_checkpointed_results()
         # After the halt retry, which may land the checkpoint they wait on,
         # and never ahead of a requested halt.
         self._offer_held_runtime_events()
         self._flush_pending_position_events(count_attempt=True)
         if not self._executor.simulation and self._active_orders and not cancelled:
-            self._advance_live_orders()
-        self._run_requested_flatten()
+            try:
+                if self._flatten_owns_halt():
+                    with self._acting_through_store_outage():
+                        self._advance_live_orders()
+                else:
+                    # In an outage, read and book but place nothing: its write would fail.
+                    self._advance_live_orders(submit_planned=self._held_store_outage is None)
+            except Exception as exc:
+                self._hold_store_outage(exc)
+        if self._held_store_outage is not None:
+            # A fill booked before its write failed skipped this check.
+            self._post_fill_risk_halted()
+        try:
+            with self._acting_through_store_outage():
+                self._run_requested_flatten()
+        except Exception as exc:
+            self._hold_store_outage(exc)
         # Retry unacknowledged audit rows every cycle, not only when a new bar
         # arrives: a stalled feed would otherwise leave them queued
         # indefinitely while the database recovers.
@@ -3095,10 +3548,16 @@ class LiveTrader:
         # Keep heartbeat, cache, and staleness monitoring alive while a broker
         # order is resting. Strategy evaluation remains serialized behind the
         # active order so a later bar cannot create a conflicting order queue,
-        # and after a reset behind a periodic round that answered and matched.
-        if not self._executor.simulation and (
-            self._active_orders or self._halted or self._resume_unverified
+        # after a reset behind a periodic round that answered and matched, and
+        # behind a store outage the order work met, whose rows are unwritten.
+        if self._held_store_outage is not None or (
+            not self._executor.simulation
+            and (self._active_orders or self._halted or self._resume_unverified)
         ):
+            # The drawdown breaker is not held with them. A requested flatten
+            # owns the working orders and closes the book itself.
+            if not (self._halted or self._resume_unverified or self._flatten_cancels_this_cycle()):
+                self._check_drawdown_while_orders_work(frames)
             return
 
         # A required subscription with no usable observation blocks evaluation
@@ -3139,11 +3598,6 @@ class LiveTrader:
         for cycle_ts in sorted(candidate_symbols_by_timestamp):
             if held_from is not None and cycle_ts >= held_from:
                 break
-            if self._last_cycle_ts is not None and cycle_ts < self._last_cycle_ts:
-                raise RuntimeError(
-                    "out-of-order completed bar cannot be applied after a newer event: "
-                    f"{cycle_ts} < {self._last_cycle_ts}"
-                )
 
             event_frames: dict[str, pd.DataFrame] = {}
             advanced_symbols: list[str] = []
@@ -3185,7 +3639,10 @@ class LiveTrader:
             # full feature/strategy/execution cycle succeeded.
             for symbol in advanced_symbols:
                 self._last_bar_ts[symbol] = cycle_ts
-            self._last_cycle_ts = cycle_ts
+            # Each symbol's watermark orders its own bars. On aligned grids a
+            # bar can still start before the last event when its source
+            # delivered past the hold; it is decided, not refused.
+            self._last_cycle_ts = max(cycle_ts, self._last_cycle_ts or cycle_ts)
             if committed_feature_as_of is not None:
                 self._last_feature_as_of = committed_feature_as_of
             self._persist_state()
@@ -3198,15 +3655,18 @@ class LiveTrader:
     ) -> datetime | None:
         """The first event to hold back for a required symbol due it too (``COHORT_HOLD``).
 
-        A symbol is due the event when the bar after its newest one closes
-        by the event's close on its own calendar, so a market that is shut
-        then does not hold the rest. Nothing is held when the next poll
-        comes after the following bar closes: live then keeps only each
-        symbol's newest bar and would skip the held one.
+        A symbol is due the event when the bar after its newest one is
+        available by the event's own availability: by the ``available_at`` its
+        source declares for that bar (``market_data_available_at``), or else by
+        its completion floor. A market that is shut then, or a source that
+        publishes later, does not hold the rest; the hold only absorbs the
+        jitter of a bar arriving after it is available. Nothing is held when
+        the next poll comes after the following bar closes: live then keeps
+        only each symbol's newest bar and would skip the held one.
         """
         now = self._utc_now()
         next_poll = now + timedelta(seconds=self._poll_seconds)
-        closes = {
+        available = {
             symbol: frame.set_index("ts")[AVAILABLE_AT_COLUMN] for symbol, frame in frames.items()
         }
 
@@ -3223,11 +3683,38 @@ class LiveTrader:
             except ValueError:  # outside the calendar: nothing to wait for
                 return None
 
+        def next_available(symbol: str, after: pd.Timestamp) -> pd.Timestamp | None:
+            due_close = next_close(symbol, after)
+            if due_close is None:
+                return None
+            subscription = self._market_data_subscriptions[symbol]
+            try:
+                due_start = period_start(
+                    due_close - pd.Timedelta(1, unit="ns"),
+                    subscription.timeframe,
+                    subscription.calendar_id,
+                )
+            except ValueError:  # no calendar geometry: the close is all there is
+                return due_close
+            declared = self._declared_available_at.get(symbol)
+            if declared is None:
+                return completion_floor(
+                    due_start, subscription, allow_extended_calendar_inference=True
+                )
+            return pd.Timestamp(
+                declared(
+                    due_start,
+                    subscription.timeframe,
+                    calendar_id=subscription.calendar_id,
+                    session_mode=subscription.session_mode,
+                )
+            )
+
         for event_ts in sorted(candidates):
             released = candidates[event_ts]
             event = pd.Timestamp(event_ts)
-            event_close = min(closes[symbol][event] for symbol in released)
-            if now >= event_close + self.COHORT_HOLD:
+            event_available = min(available[symbol][event] for symbol in released)
+            if now >= event_available + self.COHORT_HOLD:
                 continue
             following = [
                 close for symbol in released if (close := next_close(symbol, event)) is not None
@@ -3239,8 +3726,8 @@ class LiveTrader:
                 newest = pd.Timestamp(frames[symbol]["ts"].iloc[-1])
                 if symbol in self._optional_symbols or symbol in released or newest >= event:
                     continue
-                due = next_close(symbol, newest)
-                if due is not None and due <= event_close:
+                due = next_available(symbol, newest)
+                if due is not None and due <= event_available:
                     late.append(symbol)
             if late:
                 logger.info(
@@ -3248,7 +3735,7 @@ class LiveTrader:
                     event_ts,
                     sorted(released),
                     sorted(late),
-                    event_close + self.COHORT_HOLD,
+                    event_available + self.COHORT_HOLD,
                 )
                 return event_ts
         return None
@@ -4826,7 +5313,9 @@ class LiveTrader:
         lagged_adv_by_symbol: dict[str, float] | None = None,
     ) -> bool:
         """Persist a deterministic order queue, then advance it serially."""
-        intent = self._without_halted_account(intent)
+        if self._flatten_at is None:
+            # A flatten that waited on its halt's cancellation exits a halted account.
+            intent = self._without_halted_account(intent)
         if not intent:
             return True
 
@@ -4972,6 +5461,7 @@ class LiveTrader:
             return False
         if not requests:
             self._live_rebalance = None
+            self._failed_rebalance_symbols.clear()
             self._persist_state()
             if withheld:
                 symbols = sorted(withheld)
@@ -5010,19 +5500,20 @@ class LiveTrader:
         """Advance serial target legs using only one current market snapshot.
 
         Returns whether the rebalance is complete. A leg that fails or is
-        refused ends it short of its targets, and the trader remembers the
-        bar, so that no decision on it replans them.
+        refused ends it short of its targets (``_stop_live_rebalance``).
         """
-        while self._live_rebalance is not None and not self._active_orders and not self._halted:
-            if not self._queue_next_live_rebalance_order(
-                bars,
-                ts,
-                lagged_adv_by_symbol=lagged_adv_by_symbol,
-            ):
-                break
-            self._advance_live_orders()
-            if self._live_rebalance is None:
-                self._rebalance_stopped_at = ts
+        self._rebalance_bar = ts
+        try:
+            while self._live_rebalance is not None and not self._active_orders and not self._halted:
+                if not self._queue_next_live_rebalance_order(
+                    bars,
+                    ts,
+                    lagged_adv_by_symbol=lagged_adv_by_symbol,
+                ):
+                    break
+                self._advance_live_orders()
+        finally:
+            self._rebalance_bar = None
         return self._live_rebalance is None and not self._active_orders and not self._halted
 
     def _timed_order_call[T](self, callback: Callable[[], T]) -> T:
@@ -5032,7 +5523,7 @@ class LiveTrader:
         finally:
             self._cycle_order_seconds += perf_counter() - started
 
-    def _advance_live_orders(self, *, submit_planned: bool = True) -> None:
+    def _advance_live_orders(self, *, submit_planned: bool = True, restoring: bool = False) -> None:
         """Poll or submit the head order; dependent orders stay serialized.
 
         A requested flatten does this work itself, reading, booking and
@@ -5040,6 +5531,9 @@ class LiveTrader:
         cancel or a fill past a risk limit would halt the account, which then
         refuses the flatten and leaves its positions open, and a queued order
         would go out ahead of it.
+
+        ``submit_planned`` False places no queued order. ``restoring`` is the
+        startup restore, where an answer that does not apply fails closed.
         """
         while self._active_orders and (
             not self._halted
@@ -5047,7 +5541,7 @@ class LiveTrader:
             or self._active_orders[0].cancel_requested
             or self._active_orders[0].status == "cancel_pending"
         ):
-            if submit_planned and self._flatten_cancels_this_cycle():
+            if not restoring and self._flatten_cancels_this_cycle():
                 return
             tracked = self._active_orders[0]
             request = tracked.request
@@ -5073,33 +5567,15 @@ class LiveTrader:
                         return
                     else:
                         self._alert_unapplied(exc)
-                if self._post_fill_risk_halted():
-                    return
-                if tracked in self._active_orders or tracked.status not in (
-                    "cancelled",
-                    "rejected",
-                ):
-                    return
-                # On a halted account the cancel was the halt's or the exit's
-                # own timeout's, which a restart leaves no way to tell apart;
-                # a recovery exit's position stays open either way, so it is
-                # recorded, and a strategy order's end was the halt's to name.
-                if self._halted:
-                    if _is_recovery_exit(request):
-                        self._report_exit_a_halt_ended(tracked, in_halt_pass=False)
-                        continue
-                    return
-                # Over age, the order fails as its timeout would have failed
-                # it, whichever cancel this was: a restart between the
-                # timeout's recorded cancel and its outcome leaves that to
-                # this pass, and drops a flatten request. A younger order's
-                # cancel was a flatten's or a failed group's, each alerting on
-                # its own, as are the cancels of a flatten still waiting on them.
-                if self._flatten_request is not None or not self._live_order_timed_out(tracked):
-                    return
-                if self._fail_group_or_halt(
-                    tracked, title="Order Timeout", message=_timeout_message(tracked)
-                ):
+                except Exception:
+                    # Booked, but not recorded, as in a store outage. An order
+                    # the answer ended still ends below, alerting, before the
+                    # error fails the cycle: the bar the next poll retries
+                    # would otherwise replan the leg and send it again.
+                    if tracked not in self._active_orders:
+                        self._end_engine_cancelled(tracked)
+                    raise
+                if not self._end_engine_cancelled(tracked):
                     return
                 continue
             polled = tracked.placement_attempted
@@ -5114,12 +5590,23 @@ class LiveTrader:
                 attempted_at = self._clock()
                 if attempted_at.tzinfo is None:
                     raise ValueError("clock must return a timezone-aware datetime")
+                unsent = (set(self._unstarted_groups), self._leg_ahead_of_bar)
                 tracked.placement_attempted = True
                 tracked.placement_attempted_at = attempted_at.astimezone(UTC)
                 # Its first leg starts a group, recorded in the same write.
                 if request.group_id is not None:
                     self._unstarted_groups.discard(request.group_id)
-                self._persist_state(tracked)
+                if self._live_rebalance is not None and self._rebalance_bar is None:
+                    self._leg_ahead_of_bar = True
+                try:
+                    self._persist_state(tracked)
+                except Exception:
+                    # Nothing was sent, so nothing may read it as sent: a later
+                    # poll would look it up, find nothing and halt as ambiguous.
+                    tracked.placement_attempted = False
+                    tracked.placement_attempted_at = None
+                    self._unstarted_groups, self._leg_ahead_of_bar = unsent
+                    raise
                 try:
                     report = self._timed_order_call(
                         lambda request=request: self._executor.submit_order(request)
@@ -5155,6 +5642,7 @@ class LiveTrader:
                                 f"{request.symbol} qty={request.quantity:.4f} client_order_id="
                                 f"{request.client_order_id} was not found after placement failure"
                             ),
+                            order=tracked,
                         )
                         return
             else:
@@ -5170,24 +5658,32 @@ class LiveTrader:
                             lambda request=request: self._executor.find_order(request)
                         )
                 except ValueError as exc:
+                    self._status_unread_since = None
                     self._poll_answer_not_applied(
-                        tracked, tracked.order_id, exc, submit_planned=submit_planned
+                        tracked, tracked.order_id, exc, restoring=restoring
                     )
                     return
                 except Exception as exc:
                     if not self._live_order_timed_out(tracked):
-                        # The cycle fails and the next one reads again; a Poll
-                        # Error that follows names the order.
-                        raise RuntimeError(
+                        # The cycle fails and the next one reads again. Either
+                        # way the poll error names the order: an unanswered
+                        # read only alerts, any other error halts once it
+                        # persists (``_answer_poll_error``), and both halt
+                        # once they have lasted too long.
+                        failure = (
                             f"{request.symbol} order_id={tracked.order_id or 'unassigned'} "
                             f"status unavailable ({type(exc).__name__}: {exc})"
-                        ) from exc
+                        )
+                        if self._halt_status_unread_too_long(tracked, failure):
+                            return
+                        raise RuntimeError(failure) from exc
                     logger.exception(
                         "Order status unavailable after local timeout: %s",
                         request.client_order_id,
                     )
                     self._cancel_timed_out_order(tracked, None, status_error=exc)
                     return
+                self._status_unread_since = None
                 if report is None:
                     # Same reasoning as "Ambiguous Order Placement" above:
                     # unknown broker state always halts, group or not.
@@ -5197,6 +5693,7 @@ class LiveTrader:
                             f"{request.symbol} client_order_id={request.client_order_id} "
                             "was placement-attempted but cannot be found"
                         ),
+                        order=tracked,
                     )
                     return
 
@@ -5211,41 +5708,132 @@ class LiveTrader:
                     tracked,
                     tracked.order_id or report.order_id,
                     exc,
-                    submit_planned=submit_planned,
+                    restoring=restoring,
                 )
                 return
+            except Exception:
+                # Booked, but not recorded, as in a store outage. A failed
+                # order still ends its group or rebalance, and alerts, before
+                # the error fails the cycle: the bar the next poll retries
+                # would otherwise replan the leg and send it again.
+                if tracked in self._active_orders or report.status not in ("cancelled", "rejected"):
+                    raise
+                self._fail_reported_order(tracked, report)
+                raise
             if self._post_fill_risk_halted():
                 return
             if report.status == "cancel_pending":
                 # The venue is cancelling it on its own; its outcome is polled,
                 # and one that reverts to working is under its timeout again.
+                self._alert_overdue(tracked)
                 return
             if report.status in ("cancelled", "rejected"):
-                message = (
-                    f"{request.symbol} order_id={report.order_id or 'unassigned'} "
-                    f"filled={report.filled_quantity:.4f}/"
-                    f"{report.requested_quantity:.4f}"
-                )
-                if report.rejection_reason:
-                    message += f"; venue: {report.rejection_reason}"
-                if report.account_fault:
-                    message += "; the venue refused the account, not only this order"
-                if self._fail_group_or_halt(
-                    tracked,
-                    title=f"Order {report.status.title()}",
-                    message=message,
-                    account_fault=report.account_fault,
-                ):
+                if self._fail_reported_order(tracked, report):
                     return
                 continue
             if report.status != "filled" and self._live_order_timed_out(tracked):
                 self._cancel_timed_out_order(tracked, report)
                 return
             if report.status != "filled":
+                self._alert_overdue(tracked)
                 return
 
+    def _end_engine_cancelled(self, tracked: TrackedOrder) -> bool:
+        """Act on how a pass of the engine's cancel left ``tracked``; returns whether to go on.
+
+        Going on means advancing the next order in the queue.
+        """
+        if self._post_fill_risk_halted():
+            return False
+        if tracked in self._active_orders or tracked.status not in ("cancelled", "rejected"):
+            return False
+        # On a halted account the cancel was the halt's or the exit's own
+        # timeout's, which a restart leaves no way to tell apart; a recovery
+        # exit's position stays open either way, so it is recorded, and a
+        # strategy order's end was the halt's to name.
+        if self._halted:
+            if _is_recovery_exit(tracked.request):
+                self._report_exit_a_halt_ended(tracked, in_halt_pass=False)
+                return True
+            return False
+        # Over age, the order fails as its timeout would have failed it,
+        # whichever cancel this was: a timeout's cancel the venue only
+        # acknowledged, or one a restart came between, ends here, and drops a
+        # flatten request. A younger order's cancel was a flatten's or a
+        # failed group's, each alerting on its own, as are the cancels of a
+        # flatten still waiting on them.
+        if self._flatten_request is not None or not self._live_order_timed_out(tracked):
+            return False
+        return not self._fail_group_or_halt(
+            tracked, title="Order Timeout", message=_timeout_message(tracked)
+        )
+
+    def _alert_overdue(self, tracked: TrackedOrder) -> None:
+        """Alert an order no engine cancel is ending once it outlasts its bound.
+
+        The bound is its timeout, which only a cancel the venue started on
+        its own outlasts, or one bar without one: the strategy has then
+        skipped a decision behind it. The engine keeps waiting rather than
+        cancelling or halting. A venue's own cancel is the venue's to finish,
+        and an order without a timeout was left to the venue to end.
+        """
+        timeout = self._live_order_timeout_seconds
+        venue_cancelling = tracked.status == "cancel_pending"
+        if timeout is not None and not venue_cancelling:
+            return
+        bound = f"its {timeout}s timeout" if timeout is not None else f"a {self._timeframe} bar"
+        attempted_at = tracked.placement_attempted_at
+        assert attempted_at is not None
+        limit = timedelta(seconds=timeout) if timeout is not None else self._interval_delta
+        if self._utc_now() - attempted_at < limit:
+            return
+        if venue_cancelling:
+            self._alert_stuck(
+                tracked,
+                "the venue has not finished a cancel it started",
+                f"past {bound}; the engine waits for it",
+            )
+        else:
+            self._alert_stuck(
+                tracked,
+                "still working",
+                f"past {bound} with no live_order_timeout_seconds to cancel it",
+            )
+
+    def _alert_stuck(self, tracked: TrackedOrder, problem: str, detail: str) -> None:
+        """Alert ``tracked`` as a lasting problem until it ends, which resolves the alert.
+
+        ``problem`` alone makes a later firing the same alert, so its
+        details may change between cycles without alerting again.
+        """
+        request = tracked.request
+        self._stuck_alerts.fire(
+            request.client_order_id,
+            "Order Stuck",
+            f"{request.symbol} order_id={tracked.order_id or 'unassigned'} ({tracked.status}): "
+            f"{problem}; {detail}; no strategy decision runs while it is tracked",
+            content=problem,
+        )
+
+    def _fail_reported_order(self, tracked: TrackedOrder, report: ExecutionReport) -> bool:
+        """Fail an order the venue reported cancelled or rejected; returns whether that halted."""
+        message = (
+            f"{tracked.request.symbol} order_id={report.order_id or 'unassigned'} "
+            f"filled={report.filled_quantity:.4f}/{report.requested_quantity:.4f}"
+        )
+        if report.rejection_reason:
+            message += f"; venue: {report.rejection_reason}"
+        if report.account_fault:
+            message += "; the venue refused the account, not only this order"
+        return self._fail_group_or_halt(
+            tracked,
+            title=f"Order {report.status.title()}",
+            message=message,
+            account_fault=report.account_fault,
+        )
+
     def _poll_answer_not_applied(
-        self, tracked: TrackedOrder, order_id: str, error: ValueError, *, submit_planned: bool
+        self, tracked: TrackedOrder, order_id: str, error: ValueError, *, restoring: bool
     ) -> None:
         """Alert a polled answer that does not apply to its order, whether read or applied.
 
@@ -5257,7 +5845,7 @@ class LiveTrader:
         self._note_unappliable(tracked)
         failure = _report_failure(tracked.request, order_id, error)
         timed_out = self._live_order_timed_out(tracked)
-        if not submit_planned and not timed_out:
+        if restoring and not timed_out:
             raise ValueError(failure) from error
         self._alert_report_not_applied(
             tracked,
@@ -5297,17 +5885,12 @@ class LiveTrader:
             leg.request.position_effect in ("reduce", "close") for leg in legs
         ):
             # Replanning would queue the same exit again.
-            self._live_rebalance = None
+            self._stop_live_rebalance()
             scope = "the target rebalance stopped"
         if group_id is not None:
             self._unstarted_groups.discard(group_id)
             scope = f"group {group_id!r} dropped whole"
-        # Out of the queue before the one write, so a failed write leaves no
-        # leg to go out.
-        for leg in legs:
-            leg.status = "cancelled"
-            self._active_orders.remove(leg)
-        self._persist_state(*legs)
+        failure = self._drop_unsent(legs)
         for leg in legs:
             request = leg.request
             message = (
@@ -5330,7 +5913,57 @@ class LiveTrader:
                         },
                     )
                 )
+        if failure is not None:
+            raise failure
         return True
+
+    def _drop_unsent(self, legs: list[TrackedOrder]) -> Exception | None:
+        """Cancel unsent ``legs`` locally in one write; returns the write's failure, if any.
+
+        They leave the queue before the write, so a failed write leaves no leg
+        to go out, and the caller still reports the drop before raising it.
+        """
+        for leg in legs:
+            leg.status = "cancelled"
+            self._active_orders.remove(leg)
+        try:
+            self._persist_state(*legs)
+        except Exception as exc:
+            return exc
+        return None
+
+    def _take_unsent_group_legs(self, tracked: TrackedOrder) -> list[TrackedOrder]:
+        """Take the unsent legs of a failed ``tracked``'s group off the queue, cancelled.
+
+        The caller writes them with ``tracked``'s own row: a later write that
+        failed would leave a restart to find them queued, and they would go
+        out alone, unhedged. Every path ending a grouped order so fails its
+        group, halts or flattens the account, each of which drops them too,
+        except for an exit of a flatten closing the account, whose other
+        exits keep going.
+        """
+        group_id = tracked.request.group_id
+        if group_id is None or self._executor.simulation:
+            return []
+        if (self._halted or self._flatten_at is not None) and _is_recovery_exit(tracked.request):
+            return []
+        legs = [
+            leg
+            for leg in self._active_orders
+            if leg.request.group_id == group_id and not leg.placement_attempted
+        ]
+        for leg in legs:
+            leg.status = "cancelled"
+            self._active_orders.remove(leg)
+        if legs:
+            logger.warning(
+                "Group %r: %s ended %s; unsent %s dropped",
+                group_id,
+                tracked.request.client_order_id,
+                tracked.status,
+                ", ".join(leg.request.client_order_id for leg in legs),
+            )
+        return legs
 
     def _reduces_held_position(self, request: OrderRequest) -> bool:
         """Whether ``request`` only reduces the ledger position it trades against.
@@ -5416,15 +6049,12 @@ class LiveTrader:
         if self._live_rebalance is not None:
             # Replanning would queue the same leg again; the next bar's
             # decision replans the targets from the current book.
-            self._live_rebalance = None
+            self._stop_live_rebalance()
             scope = "the target rebalance stopped"
         if group_id is not None:
             scope = f"group {group_id!r} cancelled, other groups unaffected"
-        for leg in legs:
-            self._cancel_tracked_order(leg)
-        if group_id is not None:
-            # Only now: a write that failed above leaves the rest queued to be judged again.
             self._unstarted_groups.discard(group_id)
+        write_failure = self._drop_unsent(legs)
         if group_id is None:
             what = f"{request.side} {request.quantity:g} to {request.position_effect}"
             needs = "needs"
@@ -5473,6 +6103,8 @@ class LiveTrader:
                 title=f"[{self._executor.strategy_name}] {title}: {subject}",
                 message=message,
             )
+        if write_failure is not None:
+            raise write_failure
         return True
 
     def _cash_needed_up_front(self, legs: list[TrackedOrder]) -> float:
@@ -5520,6 +6152,39 @@ class LiveTrader:
             raise ValueError("clock must return a timezone-aware datetime")
         return (now.astimezone(UTC) - attempted_at).total_seconds() >= timeout_seconds
 
+    def _halt_status_unread_too_long(self, tracked: TrackedOrder, failure: str) -> bool:
+        """Halt once ``tracked``'s status reads have failed for the span reconciliation allows.
+
+        After ``RECONCILIATION_UNAVAILABLE_HALT_ROUNDS`` unanswered intervals
+        an account with no working order halts, and a working order, which
+        holds reconciliation and the drawdown check while its reads fail,
+        must not stretch that. Halting rather than alerting on also ends
+        refusals no retry clears that adapters classify as outages, such as
+        Binance's -2015 (see ``CryptoAdapter``); nothing in the error tells
+        them from a passing outage, so every failure counts alike. A halted
+        account is left alone: it has nothing more to stop, and cancelling a
+        recovery exit would leave its position open. Returns whether it halted.
+        """
+        now = self._utc_now()
+        key = tracked.request.client_order_id
+        if self._status_unread_since is None or self._status_unread_since[0] != key:
+            self._status_unread_since = (key, now)
+        unread_for = now - self._status_unread_since[1]
+        bound = timedelta(
+            seconds=self._reconciliation_interval_seconds
+            * self.RECONCILIATION_UNAVAILABLE_HALT_ROUNDS
+        )
+        if self._halted or unread_for < bound:
+            return False
+        self._halt_live(
+            title="Order Status Unavailable",
+            message=(
+                f"{failure} for {unread_for.total_seconds() / 60:.0f} minutes, with no "
+                "drawdown check meanwhile"
+            ),
+        )
+        return True
+
     def _cancel_timed_out_order(
         self,
         tracked: TrackedOrder,
@@ -5541,16 +6206,25 @@ class LiveTrader:
                     "exceeded its local timeout without a broker order id"
                     + (f"; latest status error: {status_error}" if status_error else "")
                 ),
+                order=tracked,
             )
             return
         # Checkpoint cancellation intent before broker I/O. A restart can
         # retry this transition by order id without resubmitting placement.
         tracked.cancel_requested = True
         self._persist_state(tracked)
+        cancel_report: ExecutionReport | None = None
         try:
             cancel_report = self._send_cancel(tracked, order_id)
             self._apply_order_report(tracked, cancel_report)
         except Exception as exc:
+            if cancel_report is not None and not isinstance(exc, ValueError):
+                # Booked, but not recorded, as in a store outage. An order the
+                # answer ended still fails, alerting, before the error fails
+                # the cycle; one still working is left to the next poll.
+                if tracked not in self._active_orders:
+                    self._end_timeout_cancel(tracked, cancel_report)
+                raise
             if isinstance(exc, ValueError):
                 # The venue answered, with something that does not apply.
                 self._note_unappliable(tracked)
@@ -5561,23 +6235,28 @@ class LiveTrader:
                     f"{request.symbol} order_id={order_id} could not be confirmed cancelled: {exc}"
                     + (f"; latest status error: {status_error}" if status_error else "")
                 ),
+                order=tracked,
             )
             return
-        if self._post_fill_risk_halted():
-            return
+        self._end_timeout_cancel(tracked, cancel_report)
 
-        if cancel_report.status == "filled":
+    def _end_timeout_cancel(self, tracked: TrackedOrder, cancel_report: ExecutionReport) -> None:
+        """Fail an order its timeout's cancel ended unfilled, or leave it to finish.
+
+        A cancel the venue has taken but not finished, as IB answers one
+        PendingCancel before confirming it, keeps the order tracked with its
+        cancel requested. The order poll then finishes it as Order Timeout,
+        as it does after a restart, and from the pass after this one names it
+        in an Order Stuck alert while the venue does not confirm it.
+        """
+        if self._post_fill_risk_halted() or cancel_report.status == "filled":
             return
-        status = cancel_report.status
-        message = _timeout_message(tracked)
-        if status in ("cancelled", "rejected"):
-            self._fail_group_or_halt(tracked, title="Order Timeout", message=message)
-        else:
-            # Cancellation itself didn't reach a confirmed terminal status —
-            # still unknown broker state, always halt.
-            tracked.status = cancel_report.status
-            self._persist_state(tracked)
-            self._halt_live(title="Order Timeout Cancellation Unresolved", message=message)
+        if cancel_report.status in ("cancelled", "rejected"):
+            self._fail_group_or_halt(
+                tracked, title="Order Timeout", message=_timeout_message(tracked)
+            )
+            return
+        self._cancel_unconfirmed_since.setdefault(tracked.request.client_order_id, self._order_pass)
 
     def _note_unappliable(self, tracked: TrackedOrder) -> None:
         """Record an answer met that does not apply, whether or not it is alerted.
@@ -5595,7 +6274,11 @@ class LiveTrader:
         tracked: TrackedOrder,
         report: ExecutionReport,
     ) -> None:
-        """Apply only the new cumulative-fill delta, then checkpoint it."""
+        """Apply only the new cumulative-fill delta, then checkpoint it.
+
+        An order it ends unfilled or part-filled takes its group's unsent legs
+        off the queue in the same checkpoint (``_take_unsent_group_legs``).
+        """
         request = tracked.request
         if (
             report.client_order_id != request.client_order_id
@@ -5650,6 +6333,7 @@ class LiveTrader:
                 time_in_force=request.time_in_force,
             )
             self._record_adv_fill(report.symbol, delta_quantity, adv_session)
+            self._failed_rebalance_symbols.discard(report.symbol)
             # A halted account is not checked, and a mark left from its cancel
             # passes would halt the first exit after a reset.
             if request.position_effect in ("open", "add") and not self._halted:
@@ -5666,14 +6350,19 @@ class LiveTrader:
         tracked.tax = report.tax
         tracked.executed_at = report.executed_at or tracked.executed_at
         tracked.error = report.rejection_reason or tracked.error
-        if report.status in ("filled", "cancelled", "rejected"):
+        ended = report.status in ("filled", "cancelled", "rejected")
+        dropped: list[TrackedOrder] = []
+        if ended:
             self._active_orders.remove(tracked)
             self._cancels_sent.pop(request.client_order_id, None)
+            self._cancel_unconfirmed_since.pop(request.client_order_id, None)
+            if report.status != "filled":
+                dropped = self._take_unsent_group_legs(tracked)
         if result is not None:
             self._trade_count += len(result.trades)
             self._unpublished_results.append(result)
         try:
-            self._persist_state(tracked)
+            self._persist_state(tracked, *dropped)
             self._publish_checkpointed_results()
         except ValueError as exc:
             # Booked already: every caller reads a ValueError as an answer
@@ -5684,6 +6373,8 @@ class LiveTrader:
         # the failure gone, such as a cancel's after an unappliable read.
         if self._report_failed_pass.get(request.client_order_id) != self._order_pass:
             self._report_alerts.clear(request.client_order_id)
+        if ended:
+            self._stuck_alerts.resolve(request.client_order_id)
 
     def _cancel_tracked_order(self, tracked: TrackedOrder) -> None:
         """Reconcile and cancel one tracked order without resubmitting it.
@@ -5702,6 +6393,11 @@ class LiveTrader:
         ``_cancel_unreconciled`` once the cancel is out; any other broker error
         is the venue not answering, logged, and the cancel goes out by order id
         all the same.
+
+        An order still tracked in a pass after the one that first left its
+        cancel unconfirmed alerts Order Stuck, naming why, since nothing else
+        speaks for it: a venue that confirms a cancel a cycle later makes one
+        pass normal. A waiting operator flatten alerts for it instead.
         """
         if not tracked.placement_attempted:
             tracked.status = "cancelled"
@@ -5713,10 +6409,25 @@ class LiveTrader:
             tracked.cancel_requested = True
             self._persist_state(tracked)
 
+        outcome = self._reconcile_and_cancel(tracked)
+        if tracked not in self._active_orders:
+            return
+        client_order_id = tracked.request.client_order_id
+        since = self._cancel_unconfirmed_since.setdefault(client_order_id, self._order_pass)
+        if since != self._order_pass and self._flatten_request is None:
+            self._alert_stuck(
+                tracked,
+                "the venue has not confirmed the engine's cancel",
+                f"{outcome}; the cancel goes again each cycle the venue does not report it pending",
+            )
+
+    def _reconcile_and_cancel(self, tracked: TrackedOrder) -> str:
+        """Read ``tracked``'s status, then cancel it unless a cancel stands; return how that went."""
         request = tracked.request
         order_id = tracked.order_id
         cancel_sent = False
         status_read = False
+        unread = ""
         try:
             try:
                 report = self._timed_order_call(
@@ -5728,37 +6439,43 @@ class LiveTrader:
                 )
             except ValueError:
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Failed to reconcile tracked order before cancellation %s",
                     request.client_order_id,
                 )
+                unread = f"status unavailable ({type(exc).__name__}: {exc}); "
                 if not order_id:
-                    return
+                    return f"{unread}no order id to cancel"
             else:
                 if report is None:
                     logger.error("Cannot cancel unresolved order %s", request.client_order_id)
-                    return
+                    return "the venue does not find the order"
                 order_id = order_id or report.order_id
                 self._apply_order_report(tracked, report)
                 if report.status in ("filled", "cancelled", "rejected"):
-                    return
+                    return f"ended {report.status}"
                 status_read = True
-            if self._cancel_outcome_so_far(tracked, status_read=status_read) is not None:
-                return
+            standing = self._cancel_outcome_so_far(tracked, status_read=status_read)
+            if standing is not None:
+                return f"{unread}{standing}"
 
-            cancel_sent = True
             try:
                 cancel_report = self._send_cancel(tracked, order_id)
             except ValueError:
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to cancel tracked order %s", request.client_order_id)
-                return
+                return f"{unread}cancel failed ({type(exc).__name__}: {exc})"
+            # Only once the venue answered: a call that raised may have been
+            # refused before anything reached it.
+            cancel_sent = True
             self._apply_order_report(tracked, cancel_report)
+            return f"{unread}cancel sent"
         except ValueError as exc:
-            self._cancel_unreconciled(tracked, order_id, exc, cancel_sent=cancel_sent)
-            return
+            raise self._cancel_unreconciled(
+                tracked, order_id, exc, cancel_sent=cancel_sent
+            ) from exc
 
     def _cancel_outcome_so_far(self, tracked: TrackedOrder, *, status_read: bool) -> str | None:
         """What became of a cancel this process sent that still stands, or None if none does.
@@ -5766,35 +6483,44 @@ class LiveTrader:
         One stands through the rest of the pass that sent it, and while the
         venue reports it pending in an answer ``status_read`` says this pass
         applied: a pending state from an earlier pass, with the status now
-        unreadable, may hide an order the venue put back to work.
+        unreadable, may hide an order the venue put back to work. One whose
+        call raised stands through its pass, so it is not repeated, but
+        reads as not confirmed: the adapter may have refused it unsent.
         """
-        sent_in = self._cancels_sent.get(tracked.request.client_order_id)
-        if sent_in is None:
+        sent = self._cancels_sent.get(tracked.request.client_order_id)
+        if sent is None:
             return None
+        sent_in, raised = sent
         if status_read and tracked.status == "cancel_pending":
             return "cancel already pending"
-        return "cancel already sent" if sent_in == self._order_pass else None
+        if sent_in != self._order_pass:
+            return None
+        return f"cancel not confirmed ({raised})" if raised else "cancel already sent"
 
     def _send_cancel(self, tracked: TrackedOrder, order_id: str) -> ExecutionReport:
         """Cancel ``tracked`` by order id, recording the cancel once the venue answers.
 
-        A ValueError is an answer too. The caller applies the report.
+        A ValueError is an answer too, recorded with its text. The caller
+        applies the report.
         """
         request = tracked.request
         try:
             report = self._timed_order_call(lambda: self._executor.cancel_order(request, order_id))
-        except ValueError:
-            self._cancels_sent[request.client_order_id] = self._order_pass
+        except ValueError as exc:
+            self._cancels_sent[request.client_order_id] = (
+                self._order_pass,
+                f"{type(exc).__name__}: {exc}",
+            )
             raise
         if report is None:
             raise RuntimeError("broker cancellation returned no execution report")
-        self._cancels_sent[request.client_order_id] = self._order_pass
+        self._cancels_sent[request.client_order_id] = (self._order_pass, "")
         return report
 
     def _cancel_unreconciled(
         self, tracked: TrackedOrder, order_id: str, error: ValueError, *, cancel_sent: bool
-    ) -> None:
-        """Send the cancel a venue answer that does not reconcile held back, then raise it.
+    ) -> ReportNotAppliedError:
+        """Send the cancel a venue answer that does not reconcile held back; return the error.
 
         The order may still be working at the venue, and the answer may carry
         fills the ledger lacks, so the error names the order and what became
@@ -5829,7 +6555,7 @@ class LiveTrader:
                     outcome = f"cancel sent, its answer not recorded ({type(exc).__name__}: {exc})"
                 else:
                     outcome = "cancel sent"
-        raise ReportNotAppliedError(f"{failure}; {outcome}", tracked, content=failure) from error
+        return ReportNotAppliedError(f"{failure}; {outcome}", tracked, content=failure)
 
     def _cancel_active_orders(self) -> None:
         """Cancel every tracked order, then raise the first failure, if any.
@@ -5843,6 +6569,9 @@ class LiveTrader:
         failure: Exception | None = None
         ended_exits: list[TrackedOrder] = []
         for tracked in list(self._active_orders):
+            if tracked not in self._active_orders:
+                # Unsent, it left with a leg of its group that ended before it.
+                continue
             try:
                 self._cancel_tracked_order(tracked)
             except Exception as exc:
@@ -6120,6 +6849,10 @@ class LiveTrader:
                 if not pd.isna(lagged_adv):
                     lagged_adv_by_symbol[symbol] = float(lagged_adv)
 
+        if self._stop_holds_next_bar:
+            # The leg that stopped the rebalance went out ahead of this bar.
+            self._rebalance_stopped_at = ts
+        self._leg_ahead_of_bar = self._stop_holds_next_bar = False
         if (
             not execution_already_committed
             and not self._executor.simulation
@@ -6547,9 +7280,11 @@ class LiveTrader:
             get_cost_model=self._get_cost_model,
         )
 
-    def _record_equity(self, ts: datetime) -> None:
-        """Calculate equity + drawdown, check the max-drawdown circuit
-        breaker, call on_bar callback, and send periodic status."""
+    def _check_drawdown(self, ts: datetime) -> tuple[float, float]:
+        """Value the book, raise the peak, and flatten and halt past ``max_drawdown_rate``.
+
+        Returns the equity and drawdown left after any flatten.
+        """
         equity, _ = self._calc_account_snapshot()
         self._equity_peak = max(self._equity_peak, equity)
         drawdown = (
@@ -6560,16 +7295,56 @@ class LiveTrader:
             and not self._halted
             and drawdown <= -self._risk_policy.max_drawdown_rate
         ):
-            self._flatten_account_and_halt(
-                ts,
-                reason=REASON_DRAWDOWN_BREACH,
-                title="Max Drawdown Breach",
-                detail=f"drawdown={drawdown:.2%} <= -{self._risk_policy.max_drawdown_rate:.2%}",
-            )
+            with self._acting_through_store_outage():
+                self._flatten_account_and_halt(
+                    ts,
+                    reason=REASON_DRAWDOWN_BREACH,
+                    title="Max Drawdown Breach",
+                    detail=f"drawdown={drawdown:.2%} <= -{self._risk_policy.max_drawdown_rate:.2%}",
+                )
             equity, _ = self._calc_account_snapshot()
             drawdown = (
                 (equity - self._equity_peak) / self._equity_peak if self._equity_peak > 0 else 0.0
             )
+        return equity, drawdown
+
+    def _check_drawdown_while_orders_work(self, frames: Mapping[str, pd.DataFrame]) -> None:
+        """Mark the book on each frame's latest completed bar and check drawdown.
+
+        A working order holds every strategy decision for as long as it rests,
+        days for a day or gtc limit with no timeout, and so does a state store
+        outage the order work meets, for as long as it lasts; the breaker must
+        wait with neither. A breach cancels the order before the exits go out,
+        as on a decided bar. Only the marks and the peak move: the bar stays
+        undecided for the decision that follows the order, and the equity
+        curve keeps one point per decided bar. Stamped with the wall clock,
+        since the breach is not a decision on any bar.
+
+        It waits, as a decision does, while a required feed has no usable
+        bar for a held symbol: valued at its old mark, one leg of a hedged
+        book could show a breach the other offsets, or hide one. The
+        stale-data and not-ready alerts already speak for that feed.
+        """
+        unready = set(self._positions) - set(frames) - self._optional_symbols
+        if unready:
+            logger.debug("Drawdown check waits for %s", sorted(unready))
+            return
+        moved = False
+        for symbol, frame in frames.items():
+            close = float(frame["close"].iloc[-1])
+            if not isfinite(close) or close <= 0:
+                raise ValueError(f"{symbol} has invalid latest close: {close}")
+            moved = moved or self._last_prices.get(symbol) != close
+            self._last_prices[symbol] = close
+        self._check_drawdown(self._utc_now())
+        # A restart measures drawdown from the checkpointed peak.
+        if moved and not self._halted:
+            self._persist_state()
+
+    def _record_equity(self, ts: datetime) -> None:
+        """Calculate equity + drawdown, check the max-drawdown circuit
+        breaker, call on_bar callback, and send periodic status."""
+        equity, drawdown = self._check_drawdown(ts)
 
         period_return = equity / self._prev_equity - 1.0 if self._prev_equity > 0 else 0.0
         self._prev_equity = equity
@@ -6635,14 +7410,40 @@ class LiveTrader:
     def _flatten_account_and_halt(
         self, ts: datetime, *, reason: str, title: str, detail: str
     ) -> None:
-        """Queue or submit exits for every position, halt, and alert the outcome."""
+        """Queue or submit exits for every position, halt, and alert the outcome.
+
+        Live exits queue behind working orders and are sized from the book
+        those leave, so working orders are cancelled first, as for an
+        operator flatten. Until the venue confirms every one ended, the halt
+        owes their cancellation and no exit goes out; ``_retry_halt`` sends
+        the exits once that completes, after a restart too, since the wait is
+        checkpointed.
+
+        Sending them alerts the outcome under the same title, which the
+        breach's own alert could not know, but records no second ``halted``
+        event: the breach halted the account once.
+
+        Callers run it in ``_acting_through_store_outage``, so a store outage
+        holds back neither the cancels nor the exits; the alert then says the
+        halt is not recorded yet.
+        """
+        halted = self._halted
         exit_queued = False
+        exits_owed = False
         submit_failure: Exception | None = None
+        cancel_failure: Exception | None = None
+        cancel_note = ""
         held_before = set(self._positions)
+        if not self._executor.simulation and self._active_orders:
+            cancel_failure, cancel_note = self._cancel_for_halt()
+            exits_owed = self._halt_cancels_pending
         if self._executor.simulation:
             queue_market_exit_all(self._positions, reason=reason)
             flattened = not self._positions
             exit_queued = not flattened
+        elif exits_owed:
+            self._pending_flatten = PendingFlatten(reason=reason, title=title, detail=detail)
+            flattened = False
         else:
             actions = [
                 OrderIntent(action="close", symbol=symbol, reason=reason)
@@ -6670,26 +7471,30 @@ class LiveTrader:
             # execution reports remain authoritative for partial fills.
             self._flatten_at = ts
             try:
+                # Sent on an account already halted, they are done once none is tracked.
                 flattened = self._execute_live_decision(
                     actions,
                     reference_bars,
                     ts,
                     apply_volume_limit=False,
-                )
+                ) or (halted and not self._active_orders)
             except Exception as exc:
-                if self._halted:
+                if self._halted and not halted:
                     # A halt during submission has alerted already.
                     raise
-                # Queueing the exits checkpoints them first, so a store
-                # outage fails here, before the account is halted.
+                # Queueing the exits checkpoints them first, so a failed
+                # write other than a store outage fails here, before the
+                # account is halted.
                 submit_failure = exc
                 flattened = False
             finally:
                 self._flatten_at = None
         self._enter_halt()
-        failure, note = self._persist_halt(cancel_on_retry=False)
+        failure, note = self._persist_halt(cancel_on_retry=exits_owed)
         if submit_failure is not None:
             outcome = f"exit submission failed ({type(submit_failure).__name__}: {submit_failure})"
+        elif exits_owed:
+            outcome = "exits wait on the working orders' cancellation"
         elif flattened and self._positions and set(self._positions) == held_before:
             outcome = f"no position fully closed; {', '.join(sorted(self._positions))} remain open"
         elif flattened and self._positions:
@@ -6702,10 +7507,13 @@ class LiveTrader:
             outcome = "flattening in progress"
         else:
             outcome = "flatten attempt failed"
+        ending = "once the working orders ended; still halted" if halted else "and halted"
         self._notify(
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}",
-            message=f"account_id={self._account_id} {detail} — {outcome} and halted{note}",
+            message=(
+                f"account_id={self._account_id} {detail} — {outcome} {ending}{cancel_note}{note}"
+            ),
         )
         logger.warning(
             "LiveTrader account %s halted at %s: %s %s — %s",
@@ -6715,9 +7523,14 @@ class LiveTrader:
             detail,
             outcome,
         )
-        self._record_runtime_event("halted", {"reason": title, "message": f"{detail} — {outcome}"})
+        if not halted:
+            self._record_runtime_event(
+                "halted", {"reason": title, "message": f"{detail} — {outcome}"}
+            )
         if submit_failure is not None:
             raise submit_failure
+        if cancel_failure is not None:
+            raise cancel_failure
         if failure is not None:
             raise failure
 

@@ -24,6 +24,9 @@ def reset_pool():
     db._pool = None
 
 
+DSN = "dbname=librae"
+
+
 def _mock_pool(conn: MagicMock) -> MagicMock:
     pool = MagicMock()
     pool.closed = False
@@ -37,7 +40,7 @@ class TestGetConn:
         conn.closed = 0
         pool = _mock_pool(conn)
         with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool):
-            with db.get_conn("dsn") as c:
+            with db.get_conn(DSN) as c:
                 assert c is conn
             conn.commit.assert_called_once()
             pool.putconn.assert_called_once_with(conn, close=False)
@@ -47,7 +50,7 @@ class TestGetConn:
         conn.closed = 0
         pool = _mock_pool(conn)
         with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool):
-            with pytest.raises(ValueError), db.get_conn("dsn"):
+            with pytest.raises(ValueError), db.get_conn(DSN):
                 raise ValueError("boom")
             conn.rollback.assert_called_once()
             pool.putconn.assert_called_once_with(conn, close=False)
@@ -68,7 +71,7 @@ class TestGetConn:
         with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool):
             with (
                 pytest.raises(Exception, match="connection already closed"),
-                db.get_conn("dsn"),
+                db.get_conn(DSN),
             ):
                 pass
             pool.putconn.assert_called_once_with(conn, close=True)
@@ -79,7 +82,7 @@ class TestGetConn:
         conn.rollback.side_effect = Exception("rollback also fails on dead conn")
         pool = _mock_pool(conn)
         with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool):
-            with pytest.raises(ValueError, match="original error"), db.get_conn("dsn"):
+            with pytest.raises(ValueError, match="original error"), db.get_conn(DSN):
                 raise ValueError("original error")
             pool.putconn.assert_called_once_with(conn, close=True)
 
@@ -99,14 +102,14 @@ class TestGetPool:
         with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool) as ctor:
             assert db.get_pool() is pool
 
-        ctor.assert_called_once_with(1, 5, "postgresql://test")
+        assert ctor.call_args.args == (1, 5, "postgresql://test")
 
     def test_reuses_existing_open_pool(self):
         pool = MagicMock()
         pool.closed = False
         with patch("psycopg2.pool.SimpleConnectionPool", return_value=pool) as ctor:
-            p1 = db.get_pool("dsn")
-            p2 = db.get_pool("dsn")
+            p1 = db.get_pool(DSN)
+            p2 = db.get_pool(DSN)
             assert p1 is p2
             ctor.assert_called_once()
 
@@ -116,7 +119,72 @@ class TestGetPool:
         pool2 = MagicMock()
         pool2.closed = False
         with patch("psycopg2.pool.SimpleConnectionPool", side_effect=[pool1, pool2]):
-            p1 = db.get_pool("dsn")
+            p1 = db.get_pool(DSN)
             assert p1 is pool1
-            p2 = db.get_pool("dsn")
+            p2 = db.get_pool(DSN)
             assert p2 is pool2
+
+
+class TestUnansweredServerBounds:
+    """libpq waits on a server that stops answering for as long as the OS
+    retries, so every connection carries bounds a deployment can override."""
+
+    def test_pooled_connections_carry_every_bound(self):
+        with patch("psycopg2.pool.SimpleConnectionPool") as ctor:
+            db.get_pool(DSN)
+
+        assert ctor.call_args.kwargs == {**db._CONNECT_PARAMS, **db._SILENCE_PARAMS}
+
+    def test_a_bound_the_dsn_sets_keeps_the_dsn_value(self):
+        dsn = "postgresql://u@h/d?connect_timeout=30&keepalives_idle=60"
+
+        with patch("psycopg2.pool.SimpleConnectionPool") as ctor:
+            db.get_pool(dsn)
+
+        assert ctor.call_args.args[2] == dsn
+        assert "connect_timeout" not in ctor.call_args.kwargs
+        assert "keepalives_idle" not in ctor.call_args.kwargs
+        assert ctor.call_args.kwargs["tcp_user_timeout"] == db._SILENCE_PARAMS["tcp_user_timeout"]
+
+    def test_an_unpooled_connection_bounds_only_its_connect(self):
+        """It holds a lease: probed or timed out, a short outage would drop it on
+        this side only, and the server would later free the lock under a
+        running owner."""
+        with patch("psycopg2.connect") as connect:
+            db._connect_unpooled(DSN)
+
+        connect.assert_called_once_with(DSN, **db._CONNECT_PARAMS)
+
+
+class TestBoundedStatements:
+    @staticmethod
+    def _recording_conn(executed: list) -> MagicMock:
+        conn = MagicMock()
+        conn.closed = 0
+        cursor = conn.cursor.return_value
+        cursor.__enter__.return_value = cursor
+        cursor.execute.side_effect = lambda sql, params=None: executed.append((sql, params))
+        return conn
+
+    def test_the_bounds_are_set_first_in_each_transaction(self):
+        executed: list = []
+        conn = self._recording_conn(executed)
+        with (
+            patch("psycopg2.pool.SimpleConnectionPool", return_value=_mock_pool(conn)),
+            db._bounded_statements(),
+            db.get_conn(DSN) as c,
+        ):
+            c.cursor().execute("SELECT 1")
+
+        assert executed == [(db._BOUND_TRANSACTION, None), ("SELECT 1", None)]
+
+    def test_outside_the_block_no_bound_is_set(self):
+        executed: list = []
+        conn = self._recording_conn(executed)
+        with patch("psycopg2.pool.SimpleConnectionPool", return_value=_mock_pool(conn)):
+            with db._bounded_statements():
+                pass
+            with db.get_conn(DSN) as c:
+                c.cursor().execute("SELECT 1")
+
+        assert executed == [("SELECT 1", None)]
