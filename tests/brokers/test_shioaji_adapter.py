@@ -284,7 +284,15 @@ class TestFetchOhlcv:
 
         df = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)
 
-        assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
+        assert list(df.columns) == [
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "available_at",
+        ]
         assert len(df) == 3
         assert pd.api.types.is_datetime64_any_dtype(df["ts"])
 
@@ -311,7 +319,15 @@ class TestFetchOhlcv:
         df = adapter.fetch_ohlcv("TXFR1", "1m", continuous_alias=True)
 
         assert df.empty
-        assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
+        assert list(df.columns) == [
+            "ts",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "available_at",
+        ]
 
     def test_limit_trims_tail(self):
         adapter = _make_adapter()
@@ -710,9 +726,11 @@ class TestDateWindow:
         raw = _raw_kbars(_trading_day_stamps(), untraded=untraded)
         adapter._api.kbars.side_effect = _kbars_by_date(raw)
         adapter._resolve_contract = MagicMock(return_value=_rolling_contract())
-        bars = adapter.fetch_ohlcv(
-            "TXFR1", timeframe, start=start, end=end, continuous_alias=True
-        ).set_index("ts")
+        bars = (
+            adapter.fetch_ohlcv("TXFR1", timeframe, start=start, end=end, continuous_alias=True)
+            .set_index("ts")
+            .drop(columns="available_at")
+        )
         queries = [(c.kwargs["start"], c.kwargs["end"]) for c in adapter._api.kbars.call_args_list]
         return bars, queries
 

@@ -306,8 +306,8 @@ def test_independent_pending_intents_keep_their_emission_frontiers() -> None:
     opens = [event for event in result.position_events if event.event_type == "open"]
 
     assert [(event.symbol, event.ts) for event in opens] == [
-        ("A", pd.Timestamp("2026-01-03 02:00Z")),
-        ("B", pd.Timestamp("2026-01-03 05:00Z")),
+        ("A", pd.Timestamp("2026-01-03 01:00Z")),
+        ("B", pd.Timestamp("2026-01-03 04:00Z")),
     ]
 
 
@@ -347,7 +347,7 @@ def test_pending_group_id_cannot_be_reused_across_emissions() -> None:
 
 
 @pytest.mark.parametrize("portfolio", [False, True])
-def test_group_and_portfolio_emissions_require_strictly_later_bar_start(
+def test_group_and_portfolio_emissions_fill_on_the_first_bar_from_their_frontier(
     portfolio: bool,
 ) -> None:
     timestamps = pd.date_range("2026-01-03 00:00", periods=5, freq="h", tz="UTC")
@@ -369,7 +369,7 @@ def test_group_and_portfolio_emissions_require_strictly_later_bar_start(
     result = _mixed_backtest(primary, EmitOnce(), {auxiliary_subscription: auxiliary}).run()
     opens = [event for event in result.position_events if event.event_type == "open"]
 
-    assert {event.ts for event in opens} == {pd.Timestamp("2026-01-03 02:00Z")}
+    assert {event.ts for event in opens} == {pd.Timestamp("2026-01-03 01:00Z")}
 
 
 def test_activated_rebalance_residual_is_not_regated_by_later_frontier() -> None:
@@ -408,8 +408,8 @@ def test_activated_rebalance_residual_is_not_regated_by_later_frontier() -> None
     additions = [event for event in result.position_events if event.event_type in ("open", "add")]
 
     assert [event.ts for event in additions] == [
+        pd.Timestamp("2026-01-03 01:00Z"),
         pd.Timestamp("2026-01-03 02:00Z"),
-        pd.Timestamp("2026-01-03 03:00Z"),
     ]
 
 
@@ -499,7 +499,88 @@ def test_drawdown_exit_uses_breach_frontier_then_remains_activated() -> None:
     exits = [event for event in result.position_events if event.reason == REASON_DRAWDOWN_BREACH]
 
     assert len(exits) == 1
-    assert exits[0].ts == pd.Timestamp("2026-01-03 11:00Z")
+    assert exits[0].ts == pd.Timestamp("2026-01-03 10:00Z")
+
+
+def _enter_once_opens(primary: pd.DataFrame, *, replay: bool) -> list[pd.Timestamp]:
+    class EnterOnce(Strategy):
+        def on_bar(self, ctx: Context) -> list[OrderIntent]:
+            if ctx.period_index == 0:
+                return [OrderIntent("long", symbol="PRIMARY", quantity=1.0)]
+            return []
+
+    result = Backtest(
+        primary,
+        EnterOnce(),
+        cost_model=CostModel.zero(),
+        primary_subscriptions=(_subscription("PRIMARY", "H1"),),
+        batch_feature_fn=(
+            (
+                lambda batch: {
+                    s: batch.market_data.history(s) for s in batch.active_primary_subscriptions
+                }
+            )
+            if replay
+            else None
+        ),
+    ).run()
+    return [event.ts for event in result.position_events if event.event_type == "open"]
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_a_decision_fills_on_the_first_bar_starting_once_it_was_made(replay: bool) -> None:
+    """The 00:00 bar is available at 01:00, the start of the next bar."""
+    timestamps = pd.date_range("2026-01-03 00:00", periods=5, freq="h", tz="UTC")
+
+    opens = _enter_once_opens(_frame("PRIMARY", timestamps), replay=replay)
+
+    assert opens == [pd.Timestamp("2026-01-03 01:00Z")]
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_a_decision_waits_for_its_bars_publication(replay: bool) -> None:
+    """The 00:00 bar is published at 02:30, so no bar before 03:00 follows
+    the decision on it."""
+    timestamps = pd.date_range("2026-01-03 00:00", periods=5, freq="h", tz="UTC")
+    available = timestamps + pd.Timedelta(hours=1)
+    available = available.to_series(index=range(len(timestamps)))
+    available.iloc[0] = pd.Timestamp("2026-01-03 02:30Z")
+    primary = _frame("PRIMARY", timestamps, available_at=pd.DatetimeIndex(available))
+
+    assert _enter_once_opens(primary, replay=replay) == [pd.Timestamp("2026-01-03 03:00Z")]
+
+
+def test_without_replay_a_drawdown_exit_waits_for_the_breach_bar() -> None:
+    timestamps = pd.date_range("2026-01-03 00:00", periods=8, freq="h", tz="UTC")
+    available = timestamps + pd.Timedelta(hours=1)
+    available = available.to_series(index=range(len(timestamps)))
+    available.iloc[2] = pd.Timestamp("2026-01-03 05:30Z")
+    primary = _frame("PRIMARY", timestamps, available_at=pd.DatetimeIndex(available))
+    primary.loc[("PRIMARY", timestamps[2]), ["low", "close"]] = [49.0, 50.0]
+    primary.loc[("PRIMARY", timestamps[3:]), ["open", "high", "low", "close"]] = [
+        50.0,
+        51.0,
+        49.0,
+        50.0,
+    ]
+
+    class EnterOnce(Strategy):
+        def on_bar(self, ctx: Context) -> list[OrderIntent]:
+            if ctx.period_index == 0:
+                return [OrderIntent("long", symbol="PRIMARY", quantity=900.0)]
+            return []
+
+    result = Backtest(
+        primary,
+        EnterOnce(),
+        initial_balance=1_100.0,
+        cost_model=CostModel.zero(),
+        primary_subscriptions=(_subscription("PRIMARY", "H1"),),
+        risk=RiskPolicy(max_drawdown_rate=0.1),
+    ).run()
+    exits = [event for event in result.position_events if event.reason == REASON_DRAWDOWN_BREACH]
+
+    assert [event.ts for event in exits] == [pd.Timestamp("2026-01-03 06:00Z")]
 
 
 def test_shuffled_inputs_and_mapping_order_have_identical_views() -> None:

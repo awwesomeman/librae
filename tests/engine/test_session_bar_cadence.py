@@ -224,7 +224,7 @@ def test_a_series_on_its_own_phase_is_accepted(feed: str, session_mode: str) -> 
 @pytest.mark.parametrize("session_mode", ("regular", "extended"))
 def test_out_of_session_bar_still_loads(session_mode: str) -> None:
     """The loader accepts bars outside every segment. The write path rejects
-    them through ``_completion_floor``; tightening the loader to match is a
+    them through ``completion_floor``; tightening the loader to match is a
     separate decision.
     """
     index = _resampled("XNYS", "H1").index.insert(0, pd.Timestamp("2024-06-03T00:00Z"))

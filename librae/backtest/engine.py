@@ -93,6 +93,7 @@ from librae.core.market_data import (
     _MarketDataSource,
     evaluate_batch_features,
     normalize_bar_times,
+    require_aligned_bar_grids,
     subscription_from_instrument,
     validate_bar_cadence,
     validate_ohlcv_values,
@@ -209,7 +210,8 @@ def _partition_enveloped_decisions(
     ready: list[_DecisionEnvelope] = []
     waiting: list[_DecisionEnvelope] = []
     for envelope in envelopes:
-        if envelope.decision_at is not None and ts <= envelope.decision_at:
+        # A decision fills on the first bar that starts once it was made.
+        if envelope.decision_at is not None and ts < envelope.decision_at:
             waiting.append(envelope)
             continue
         executable, data_waiting = partition_pending_decision(
@@ -1389,6 +1391,7 @@ class Backtest:
                 self._data_source = (
                     next(iter(resolved_sources)) if len(resolved_sources) == 1 else "multi"
                 )
+        require_aligned_bar_grids(resolved_subscriptions)
         self._primary_subscriptions = resolved_subscriptions
         if normalized_auxiliary_data and not resolved_subscriptions:
             raise ValueError(
@@ -1667,10 +1670,14 @@ class Backtest:
         drawdown_exit_origins: dict[str, pd.Timestamp] = {}
         roll_guard = _TaifexRollGuard(self._taifex_alias_session_labels())
 
+        available_by = self._availability_frontier() if market_data_replay is None else {}
         for ts in self._timeline:
             decision_at = (
                 market_data_replay.advance_frontier(ts) if market_data_replay is not None else None
             )
+            # When the decision at ts can be made: what its fills and the
+            # drawdown exit it may queue wait for, with or without replay.
+            decided_at = decision_at if decision_at is not None else available_by.get(ts)
             event_start_index = len(all_events)
             bars = all_bars[ts]
             roll_guard.before_fills(ts, bars, positions)
@@ -1755,7 +1762,8 @@ class Backtest:
                     stop_eligible_symbols={
                         symbol
                         for symbol in positions
-                        if symbol not in drawdown_exit_origins or ts > drawdown_exit_origins[symbol]
+                        if symbol not in drawdown_exit_origins
+                        or ts >= drawdown_exit_origins[symbol]
                     },
                 )
                 # WHY: only an executed target is the active one. Recording it
@@ -1915,8 +1923,8 @@ class Backtest:
                     positions,
                     reason=REASON_DRAWDOWN_BREACH,
                 )
-                if decision_at is not None:
-                    drawdown_exit_origins.update({symbol: decision_at for symbol in positions})
+                if decided_at is not None:
+                    drawdown_exit_origins.update({symbol: decided_at for symbol in positions})
                 halted = True
                 logger.warning(
                     "Backtest account %s halted at %s: drawdown %.2f%% breached "
@@ -2055,7 +2063,7 @@ class Backtest:
                 pending_envelopes = _merge_enveloped_decision(
                     pending_envelopes,
                     new_decision,
-                    decision_at=decision_at,
+                    decision_at=decided_at,
                     primary_symbol=primary_symbol,
                 )
                 decision_index += 1
@@ -2529,6 +2537,22 @@ class Backtest:
             labels = session_labels(timestamps, TAIFEX_INDEX_CALENDAR)
             result[symbol] = dict(zip(timestamps, labels, strict=True))
         return result
+
+    def _availability_frontier(self) -> dict[pd.Timestamp, pd.Timestamp]:
+        """The latest ``available_at`` seen by each event, as replay advances it.
+
+        Empty for data without bar identities, which carry no availability.
+        """
+        if AVAILABLE_AT_COLUMN not in self._data.columns:
+            return {}
+        latest = (
+            self._data[AVAILABLE_AT_COLUMN]
+            .groupby(level="datetime")
+            .max()
+            .reindex(self._timeline)
+            .cummax()
+        )
+        return dict(zip(self._timeline, latest, strict=True))
 
     def _precompute_session_labels(self) -> dict[pd.Timestamp, dict[str, object]]:
         """Map every bar to its instrument session for cumulative ADV usage."""

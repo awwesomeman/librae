@@ -68,8 +68,10 @@ from librae.core.market_data import (
     FeatureBatch,
     MarketDataSubscription,
     MarketDataView,
+    completion_floor,
     evaluate_batch_features,
     normalize_bar_times,
+    require_aligned_bar_grids,
     subscription_from_instrument,
     validate_feature_frame,
     validate_ohlcv_values,
@@ -88,6 +90,7 @@ from librae.core.strategy import (
 )
 from librae.core.trading_calendar import (
     execution_session_label,
+    period_start,
     session_label,
     session_labels,
     validate_calendar_id,
@@ -374,6 +377,24 @@ def _market_data_capability(source: object, name: str) -> str | None:
     if value != value.strip():
         raise ValueError(f"{name} must not contain leading or trailing whitespace")
     return value
+
+
+def _market_data_available_at(source: object) -> Callable[..., pd.Timestamp] | None:
+    """Read a source's declared ``market_data_available_at``, if it has one.
+
+    Called with a bar's start, timeframe, ``calendar_id`` and
+    ``session_mode``, it returns the ``available_at`` the source gives that
+    bar. A source without one is taken to give its completion floor.
+    """
+    declaration = getattr_static(
+        source, "market_data_available_at", _MISSING_MARKET_DATA_CAPABILITY
+    )
+    if declaration is _MISSING_MARKET_DATA_CAPABILITY:
+        return None
+    available_at = source.market_data_available_at
+    if not callable(available_at):
+        raise TypeError("market_data_available_at must be callable when supplied")
+    return available_at
 
 
 def _market_data_route_owner(source: object) -> str | None:
@@ -827,6 +848,9 @@ class LiveTrader:
         )
         self._optional_symbols = frozenset(config.optional_symbols)
         self._market_data_subscriptions = dict(snapshot.subscriptions)
+        require_aligned_bar_grids(
+            [self._market_data_subscriptions[symbol] for symbol in self._symbols]
+        )
         # Auxiliary inputs reuse their symbol's resolved instrument, calendar
         # and data route, so they need no separate resolution or source
         # binding — only a different timeframe through the same fetcher.
@@ -855,6 +879,11 @@ class LiveTrader:
                 calendar_id=self._market_data_subscriptions[symbol].calendar_id,
             )
             for symbol in self._symbols
+        }
+        self._declared_available_at = {
+            symbol: declared
+            for symbol in self._symbols
+            if (declared := _market_data_available_at(sources[symbol])) is not None
         }
 
         if config.mode == "live":
@@ -1565,13 +1594,14 @@ class LiveTrader:
     # than submitting decisions from obsolete market snapshots.
     STALE_DATA_TOLERANCE_BARS = 2
 
-    # How long past a bar's close the symbols that have it wait for a
-    # required symbol due the same bar. A venue starts each symbol's next
-    # candle at its own time, and an adapter releases a bar only then (58
-    # Binance perpetuals took 0.8 to 12.2 seconds after a close on 2026-11-05),
-    # so one poll can hold a bar for some symbols and not others. Deciding
-    # then would read the rest a bar stale, which a backtest never does. Past
-    # the hold the late symbols are decided on their own, a poll later.
+    # How long past a bar's availability the symbols that have it wait for a
+    # required symbol whose bar is available by then too (see _held_cohort).
+    # A venue starts each symbol's next candle at its own time, and an
+    # adapter releases a bar only then (58 Binance perpetuals took 0.8 to
+    # 12.2 seconds after a close on 2026-11-05), so one poll can hold a bar
+    # for some symbols and not others. Deciding then would read the rest a
+    # bar stale, which a backtest never does. Past the hold the late symbols
+    # are decided on their own, a poll later.
     COHORT_HOLD = timedelta(seconds=30)
 
     # The retry queue is in memory, one event per fill, so this sits far above
@@ -3431,11 +3461,6 @@ class LiveTrader:
         for cycle_ts in sorted(candidate_symbols_by_timestamp):
             if held_from is not None and cycle_ts >= held_from:
                 break
-            if self._last_cycle_ts is not None and cycle_ts < self._last_cycle_ts:
-                raise RuntimeError(
-                    "out-of-order completed bar cannot be applied after a newer event: "
-                    f"{cycle_ts} < {self._last_cycle_ts}"
-                )
 
             event_frames: dict[str, pd.DataFrame] = {}
             advanced_symbols: list[str] = []
@@ -3477,7 +3502,10 @@ class LiveTrader:
             # full feature/strategy/execution cycle succeeded.
             for symbol in advanced_symbols:
                 self._last_bar_ts[symbol] = cycle_ts
-            self._last_cycle_ts = cycle_ts
+            # Each symbol's watermark orders its own bars. On aligned grids a
+            # bar can still start before the last event when its source
+            # delivered past the hold; it is decided, not refused.
+            self._last_cycle_ts = max(cycle_ts, self._last_cycle_ts or cycle_ts)
             if committed_feature_as_of is not None:
                 self._last_feature_as_of = committed_feature_as_of
             self._persist_state()
@@ -3490,15 +3518,18 @@ class LiveTrader:
     ) -> datetime | None:
         """The first event to hold back for a required symbol due it too (``COHORT_HOLD``).
 
-        A symbol is due the event when the bar after its newest one closes
-        by the event's close on its own calendar, so a market that is shut
-        then does not hold the rest. Nothing is held when the next poll
-        comes after the following bar closes: live then keeps only each
-        symbol's newest bar and would skip the held one.
+        A symbol is due the event when the bar after its newest one is
+        available by the event's own availability: by the ``available_at`` its
+        source declares for that bar (``market_data_available_at``), or else by
+        its completion floor. A market that is shut then, or a source that
+        publishes later, does not hold the rest; the hold only absorbs the
+        jitter of a bar arriving after it is available. Nothing is held when
+        the next poll comes after the following bar closes: live then keeps
+        only each symbol's newest bar and would skip the held one.
         """
         now = self._utc_now()
         next_poll = now + timedelta(seconds=self._poll_seconds)
-        closes = {
+        available = {
             symbol: frame.set_index("ts")[AVAILABLE_AT_COLUMN] for symbol, frame in frames.items()
         }
 
@@ -3515,11 +3546,38 @@ class LiveTrader:
             except ValueError:  # outside the calendar: nothing to wait for
                 return None
 
+        def next_available(symbol: str, after: pd.Timestamp) -> pd.Timestamp | None:
+            due_close = next_close(symbol, after)
+            if due_close is None:
+                return None
+            subscription = self._market_data_subscriptions[symbol]
+            try:
+                due_start = period_start(
+                    due_close - pd.Timedelta(1, unit="ns"),
+                    subscription.timeframe,
+                    subscription.calendar_id,
+                )
+            except ValueError:  # no calendar geometry: the close is all there is
+                return due_close
+            declared = self._declared_available_at.get(symbol)
+            if declared is None:
+                return completion_floor(
+                    due_start, subscription, allow_extended_calendar_inference=True
+                )
+            return pd.Timestamp(
+                declared(
+                    due_start,
+                    subscription.timeframe,
+                    calendar_id=subscription.calendar_id,
+                    session_mode=subscription.session_mode,
+                )
+            )
+
         for event_ts in sorted(candidates):
             released = candidates[event_ts]
             event = pd.Timestamp(event_ts)
-            event_close = min(closes[symbol][event] for symbol in released)
-            if now >= event_close + self.COHORT_HOLD:
+            event_available = min(available[symbol][event] for symbol in released)
+            if now >= event_available + self.COHORT_HOLD:
                 continue
             following = [
                 close for symbol in released if (close := next_close(symbol, event)) is not None
@@ -3531,8 +3589,8 @@ class LiveTrader:
                 newest = pd.Timestamp(frames[symbol]["ts"].iloc[-1])
                 if symbol in self._optional_symbols or symbol in released or newest >= event:
                     continue
-                due = next_close(symbol, newest)
-                if due is not None and due <= event_close:
+                due = next_available(symbol, newest)
+                if due is not None and due <= event_available:
                     late.append(symbol)
             if late:
                 logger.info(
@@ -3540,7 +3598,7 @@ class LiveTrader:
                     event_ts,
                     sorted(released),
                     sorted(late),
-                    event_close + self.COHORT_HOLD,
+                    event_available + self.COHORT_HOLD,
                 )
                 return event_ts
         return None

@@ -220,6 +220,36 @@ Third-party data is joined point-in-time by the caller and returned as extra
 columns from the same adapter snapshot; see
 [External market data and factors](docs/guides/external-data.md).
 
+Every mode orders events by bar start, so the primaries must share their bar
+starts (`require_aligned_bar_grids`), read from the calendars' session
+boundaries rather than their names: intraday, every segment opens at one phase
+of the period's grid; a day, week or month bar never starts while another
+symbol's is open. Otherwise a decision on the earlier bar could fill on the
+later one before its data was available, so Backtest and `LiveTrader` refuse
+such primaries at construction.
+
+- A bar's `available_at` is when it is safe to observe. An adapter that holds a
+  bar ending its trading segment for `SEGMENT_END_SETTLE` stamps the settle
+  into it (`settled_available_at`), so that bar is available, and decided, a
+  settle after another grid's bar of the same start.
+- A decision is made when its event's bars are all available, the latest
+  `available_at` seen so far. A backtest fills its intents, and a drawdown exit
+  it queues, on the first bar that starts at or after that instant.
+- Sim/live decide a multi-symbol bar once with each required symbol whose next
+  bar is available by the event's availability: by the `available_at` its
+  source declares (`market_data_available_at`), else its completion floor. A
+  shut market or a later publication does not hold the rest. The event waits
+  `LiveTrader.COHORT_HOLD` for such a bar's arrival jitter; a bar arriving
+  later is decided at its own start when it arrives, ordered by its symbol's
+  watermark alone.
+- Known gap: where one symbol's segment-ending bar carries the settle, live
+  decides the others at their own availability without it and that bar in a
+  later event, while a backtest decides them together at the settled
+  availability and fills the others later. With 24/7 and XTAIFEX at M5, an
+  intent on the 05:40 bars fills the 24/7 symbol at 05:50 in a backtest when
+  the TAIFEX bar carries the settle, and at 05:45 when it carries only its
+  completion floor.
+
 Runtime health follows that polling contract rather than the strategy bar
 timeframe. `poll_seconds` is persisted with run metadata, and a heartbeat is
 stale after three missed poll cycles. The standalone watchdog and generated
