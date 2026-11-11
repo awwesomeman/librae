@@ -477,7 +477,11 @@ returns whole bars only:
 intraday bars that start on its dates and daily bars of its trading days, with
 the minutes fetched as far either side as those bars reach. Keeping the
 vendor's bar start avoids shifting shortened or session-ending bars to an
-invented duration.
+invented duration. A Shioaji poll without dates is served from the tick
+subscription, which is verified for futures only; a stock, index or option
+symbol needs a date window, and a poll of one raises `ValueError` before any
+query, because `kbars()` is capped at 270 queries a session and cannot be
+polled.
 
 `SymbolInfo.calendar_id` is the SSOT for mapping an observed timestamp to its
 trading-session label. The built-ins use `24/7`, `XNYS`, and `XTAIFEX`;
@@ -1032,16 +1036,32 @@ adapter at submission.
   bar open (subject to the normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
   confirmed broker fills; a close below the venue minimum is skipped as above.
+  The closes are sized from the book any working strategy order leaves, so
+  such an order is cancelled first, as for an operator flatten; while the
+  venue has not confirmed it ended, the account is halted owing that
+  cancellation, the breach alert names the order, and the closes go out once
+  the cancellation completes. The wait is checkpointed, so a restart resumes
+  it once startup reconciliation has read the venue's positions and open
+  orders and found them matching. The closes are sized only when sent, so any
+  halt while they wait, such as a startup read that fails, drops them.
+  Sending them alerts their outcome under the breach's title but records no
+  second `halted` event.
   An exit that ends rejected, cancelled, or cancelled after its timeout is
   skipped too, with a `decision_skipped` event (reason `close_rejected` or
   `close_cancelled`, carrying the venue's reason) and a **Close Rejected** or
   **Close Cancelled** alert, instead of halting and cancelling the other
   exits. That includes an `account_fault` refusal, since the flatten halts
-  the account anyway. An engine halt of the already-halted account, such as
-  one for an exit whose cancel or placement cannot be resolved, cancels the
-  other exits too; each it ends short of a fill is recorded the same way, its
-  cause saying it ended while a halt cancelled the account's orders, or after
-  a cancel the engine requested when it ends in a later cycle. A
+  the account anyway. An engine halt of the account a flatten has halted, or
+  is halting, leaves the other exits working, as `halt()` does: one for an
+  exit whose cancel or placement cannot be resolved cancels only that exit,
+  through the order poll, which does not halt again for it, while the exits
+  queued behind it stay unsent until it ends; one that names no order, such
+  as a failed read at a restart, cancels none. One finding the venue's
+  positions or open orders differ from the ledger the exits were sized from
+  cancels them all; a restart checks both even when a tracked order's status
+  cannot be read. An exit a halt ends short of a fill is recorded the same
+  way, its cause saying it ended after a cancel the engine requested, or
+  while a halt cancelled the account's orders. A
   strategy close that merely carries a recovery reason
   on a running account keeps the normal handling. The breach alert names what
   remains open. The halt persists across restart, emergency exits remain active while halted, and broker orders must
@@ -1092,6 +1112,8 @@ adapter at submission.
 - Audit trail: every halt alert records one `halted` runtime event, so one
   stop can record several: a flatten whose exit fails records the exit's halt
   and its own, and a halt repeated on an already-halted account records again.
+  The alert of closes a drawdown breach sends after waiting halts nothing new
+  and records none.
   An operator `halt()` of an already-halted account changes nothing and records
   none. Each `reset_halt()` that applies records `halt_reset`, with
   `persisted: false` when the reset's own checkpoint write failed, even if the

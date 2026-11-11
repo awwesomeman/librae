@@ -25,7 +25,9 @@ the code simpler and easier to maintain.
   than maintaining a historical version list.
 - Persisted development data and runtime checkpoints may require explicit
   external migration or removal. Never silently default a missing field from
-  an older shape.
+  an older shape. The one exception is a field no writer of the previous
+  checkpoint version could hold, which that version loads empty; `state.py`
+  names it beside `_STATE_SCHEMA_VERSION`.
 
 Breaking is allowed; leaving it unannounced is not. A change that makes
 previously accepted input fail — a config that ran, a public call, a persisted
@@ -263,7 +265,7 @@ Grafana dashboards consume the same multiplier.
 - The configured Shioaji engine account route is Taiwan futures.
   `prepare_order` rejects stock (`STK`) contracts outright — stock cash and
   reconciliation semantics are not supported; stock market data remains
-  available via `fetch_ohlcv`. Futures R1/R2 contracts require `continuous_alias=True`;
+  available via `fetch_ohlcv` with a date window. Futures R1/R2 contracts require `continuous_alias=True`;
   exact contracts use a non-alias `venue_symbol` and matching
   `contract_month`. Position reconciliation checks alias and target codes
   through `futopt_account`.
@@ -273,8 +275,10 @@ Grafana dashboards consume the same multiplier.
   subscription and settles minutes the stream may have missed, since
   Shioaji caps it at 270 queries a session and rules out polling it; a
   minute that may lack trades is not served as complete. The rules and
-  their evidence are in `librae/brokers/shioaji_stream.py`. Stocks, indexes
-  and dated fetches still read `kbars()`.
+  their evidence are in `librae/brokers/shioaji_stream.py`. That path is
+  verified on TAIFEX futures only: a `fetch_ohlcv` without dates of any other
+  contract (stock, index, option) raises `ValueError` rather than poll
+  `kbars()`, so those need `start`/`end`; dated fetches read `kbars()`.
 - `CryptoAdapter` keeps the CCXT unified symbol as `venue_symbol`. A delivery future must set `contract_month`, checked against CCXT market `expiry`; spot and perpetual markets cannot carry that field. Binance continuous klines remain a data/research API and are explicitly rejected by order/position paths instead of being mistaken for an orderable contract.
 - On a CCXT contract market, `CryptoAdapter` sends every `reduce`/`close` order (including a flip's reduction leg) with CCXT's unified `reduceOnly`, so a stale local book makes the venue refuse the exit instead of opening opposite exposure; spot and `open`/`add` orders never carry it. The derivatives account must be in one-way (net) position mode: the engine holds one net position per instrument and never sends `positionSide`, and Binance USD-M rejects `reduceOnly` in hedge mode while requiring `positionSide` there (source: Binance USD-M Futures REST API, New Order; ccxt `binance.create_order` docstring). `CryptoAdapter.verify_venue_setup` reads the mode through ccxt's `fetch_position_mode` for each configured contract market and refuses hedge mode or no answer; a venue whose ccxt class does not declare `fetchPositionMode` in `has` starts unverified with a warning, even if it implements the method, because that answer's semantics are unverified. The same check refuses a symbol whose declared `instrument_type` (spot versus `contract_*`) disagrees with the CCXT market, because decision preflight follows the declaration while `prepare_order` follows the market.
 

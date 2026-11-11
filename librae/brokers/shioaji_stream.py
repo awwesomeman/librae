@@ -301,8 +301,10 @@ class _MinuteBook:
             ),
             default=None,
         )
-        if late is not None and (newest is None or late >= newest):
-            trusted = late if newest is None else newest
+        # A late minute is a streamed one, so the empty-answer return above
+        # did not apply and the answer has a newest minute.
+        if late is not None and late >= newest:
+            trusted = newest
             logger.warning(
                 "Shioaji kbars() for %s runs behind the stream from %s; "
                 "its minutes from there wait for the next refill",

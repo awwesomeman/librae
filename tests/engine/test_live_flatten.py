@@ -1139,39 +1139,197 @@ def _held_everywhere(request) -> dict:
 
 
 class TestAnExitAHaltEnds:
-    """An exit a repeat halt ends leaves its position open, so it is recorded as any failed exit."""
+    """A halt of an account a flatten is closing cancels only the exit it is about.
 
-    def test_ones_the_halt_drops_unsent_are_recorded_naming_the_halt(self):
+    The other exits keep working, as for a manual halt, and the order poll
+    finishes that one cancel without halting again. An exit a halt ends
+    leaves its position open, so it is recorded as any failed exit.
+    """
+
+    @pytest.mark.parametrize("cancel", ["pending", "unanswered"])
+    def test_a_halt_for_one_exit_keeps_the_others_working(self, cancel):
         adapter = _adapter(below_minimum="")
         now = [TEST_CLOCK_NOW]
         trader, events, alerts = _working_exits(adapter, now)
         trader.request_flatten("desk asked to close")
         trader._poll_cycle()
-        aaa = trader._active_orders[0]
+        aaa, bbb, dust = trader._active_orders
 
-        def cancel(order_id, _symbol):
-            if order_id == aaa.order_id:
+        def cancel_order(order_id, _symbol):
+            if cancel == "unanswered":
                 raise RuntimeError("venue did not answer the cancel")
-            return {**_accepted(order_id), "status": "canceled"}
+            return {**_accepted(order_id), "status": "pending_cancel"}
 
-        adapter.cancel_order.side_effect = cancel
+        adapter.cancel_order.side_effect = cancel_order
         now[0] += timedelta(seconds=30)
         trader._poll_cycle()
 
-        assert len(_titled(alerts, "Order Timeout Cancellation Failed")) == 1
-        assert trader._active_orders == [aaa]
+        title = "Order Timeout Cancellation " + ("Unresolved" if cancel == "pending" else "Failed")
+        [halt] = _titled(alerts, title)
+        assert (
+            "cancelling that order only; other recovery exits: 0 working, 2 queued unsent"
+        ) in halt["message"]
+        assert trader._active_orders == [aaa, bbb, dust]
+        assert not bbb.cancel_requested and not dust.cancel_requested
+        assert _skips(events, "close_cancelled") == []
+
+        trader._poll_cycle()
+        adapter.get_order.side_effect = lambda order_id, _symbol: (
+            {**_accepted(order_id), "status": "canceled"}
+            if order_id == aaa.order_id
+            else _accepted(order_id)
+        )
+        trader._poll_cycle()
+
+        assert len(_titled(alerts, title)) == 1, "the unresolved exit halts once"
+        assert [event.detail["reason"] for event in events if event.event_type == "halted"] == [
+            "Operator Flatten",
+            title,
+        ]
+        assert trader._active_orders == [bbb, dust]
+        assert _submitted(adapter) == ["AAA", "BBB"]
+        [skip] = _skips(events, "close_cancelled")
+        assert skip.symbol == "AAA"
+        assert skip.detail["message"] == "ended cancelled after a cancel the engine requested"
+
+    def test_an_exit_placed_ambiguously_halts_once_and_the_rest_wait_for_it(self):
+        adapter = _adapter(below_minimum="")
+        now = [TEST_CLOCK_NOW]
+        trader, events, alerts = _working_exits(adapter, now)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        _, bbb, dust = trader._active_orders
+        adapter.get_order.side_effect = lambda order_id, _symbol: _broker_report(
+            order_id=order_id, quantity=1.0
+        )
+        adapter.place_order.side_effect = RuntimeError("connection reset")
+
+        for _ in range(3):
+            trader._poll_cycle()
+
+        assert len(_titled(alerts, "Ambiguous")) == 1
+        [halt] = _titled(alerts, "Ambiguous Order Placement")
+        assert (
+            "cancelling that order only; other recovery exits: 0 working, 1 queued unsent"
+        ) in halt["message"]
+        assert trader._active_orders == [bbb, dust]
+        assert bbb.cancel_requested and not dust.cancel_requested
+        assert _submitted(adapter) == ["AAA", "BBB"]
+
+        adapter.find_order.side_effect = lambda client_order_id, _symbol: _accepted(client_order_id)
+        adapter.cancel_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": "canceled",
+        }
+        adapter.place_order.side_effect = lambda signal: _accepted(signal["client_order_id"])
+        trader._poll_cycle()
+
+        assert trader._active_orders == [dust]
+        assert _submitted(adapter) == ["AAA", "BBB", "DUST"]
+        [skip] = _skips(events, "close_cancelled")
+        assert skip.symbol == "BBB"
+
+    def test_an_exit_placed_ambiguously_as_the_flatten_sends_them_keeps_the_rest(self):
+        adapter = _adapter(below_minimum="")
+        adapter.place_order.side_effect = RuntimeError("connection reset")
+        trader, events, alerts = _trader(adapter)
+
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+
+        aaa, bbb, dust = trader._active_orders
+        assert aaa.cancel_requested and not bbb.cancel_requested and not dust.cancel_requested
+        assert _submitted(adapter) == ["AAA"]
+        assert [alert["title"] for alert in alerts] == [
+            "[test] Ambiguous Order Placement",
+            "[test] Operator Flatten",
+        ]
+        assert "flattening in progress" in alerts[-1]["message"]
+        assert _skips(events, "close_cancelled") == []
+
+    def test_a_status_read_failing_at_a_restart_leaves_every_exit_working(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _adapter(below_minimum="")
+        adapter.get_position.side_effect = _held_everywhere
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _working_exits(adapter, now, store)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+        exits = [order.request.client_order_id for order in trader._active_orders]
+
+        trader, events, alerts = _working_exits(adapter, now, store)
+        adapter.get_order.side_effect = RuntimeError("venue did not answer")
+        trader._initialize_run()
+
+        adapter.cancel_order.assert_not_called()
+        assert [order.request.client_order_id for order in trader._active_orders] == exits
+        assert not any(order.cancel_requested for order in trader._active_orders)
+        [halt] = _titled(alerts, "Order Reconciliation Failed")
+        assert "venue did not answer" in halt["message"]
+        assert "recovery exits: 1 working, 2 queued unsent" in halt["message"]
+        assert _skips(events, "close_cancelled") == []
+
+        adapter.get_order.side_effect = lambda order_id, _symbol: _broker_report(
+            order_id=order_id, quantity=1.0
+        )
+        trader._poll_cycle()
+
+        assert _submitted(adapter) == ["AAA", "BBB"]
+        assert len(trader._active_orders) == 2
+
+    @pytest.mark.parametrize("head_read", ["answers", "fails"])
+    @pytest.mark.parametrize("book", ["positions", "open_orders"])
+    def test_a_book_that_differs_at_a_restart_still_cancels_every_exit(self, book, head_read):
+        """They were sized from the ledger the venue no longer agrees with.
+
+        The book is checked even when the working exit's status cannot be
+        read, so a close the operator sent at the venue during the downtime
+        is not sent a second time by the exits queued behind it.
+        """
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _adapter(below_minimum="")
+        adapter.get_position.side_effect = _held_everywhere
+        now = [TEST_CLOCK_NOW]
+        trader, _, _ = _working_exits(adapter, now, store)
+        trader.request_flatten("desk asked to close")
+        trader._poll_cycle()
+
+        trader, events, alerts = _working_exits(adapter, now, store)
+        if book == "positions":
+            adapter.get_position.side_effect = None
+            title = "Position Reconciliation Mismatch"
+        else:
+            adapter.list_open_orders.return_value = [{"id": "placed-at-the-venue"}]
+            title = "Orphan Broker Orders"
+        if head_read == "fails":
+            adapter.get_order.side_effect = RuntimeError("venue did not answer")
+        adapter.cancel_order.side_effect = lambda order_id, _symbol: {
+            **_accepted(order_id),
+            "status": "canceled",
+        }
+        trader._initialize_run()
+
+        assert len(_titled(alerts, title)) == 1
+        assert len(_titled(alerts, "Order Reconciliation Failed")) == (head_read == "fails")
+        assert trader._active_orders == []
         skips = _skips(events, "close_cancelled")
-        assert sorted(skip.symbol for skip in skips) == ["BBB", "DUST"]
+        assert sorted(skip.symbol for skip in skips) == SYMBOLS
         assert all(
-            skip.detail["message"] == "dropped unsent while a halt cancelled the account's orders"
+            skip.detail["message"].endswith("while a halt cancelled the account's orders")
             for skip in skips
         )
         closes = _titled(alerts, "Close Cancelled")
-        assert len(closes) == 2
+        assert len(closes) == len(SYMBOLS)
         assert all(
             "the halt cancels the account's other orders too" in a["message"] for a in closes
         )
-        assert not any("other orders remain eligible" in a["message"] for a in closes)
+
+        adapter.get_order.side_effect = lambda order_id, _symbol: _broker_report(
+            order_id=order_id, quantity=1.0
+        )
+        trader._poll_cycle()
+
+        assert _submitted(adapter) == ["AAA"], "no exit goes out after the restart"
 
     @pytest.mark.parametrize("read", ["applies", "cannot_apply"])
     def test_one_whose_cancel_ends_after_a_restart_is_recorded_whatever_its_age(self, read):
@@ -1183,12 +1341,10 @@ class TestAnExitAHaltEnds:
         trader, _, _ = _working_exits(adapter, now, store)
         trader.request_flatten("desk asked to close")
         trader._poll_cycle()
-        adapter.cancel_order.side_effect = lambda order_id, _symbol: {
-            **_accepted(order_id),
-            "status": "pending_cancel",
-        }
-        trader._halt_live(title="Ambiguous Restored Order", message="an exit cannot be found")
-        [aaa] = trader._active_orders
+        aaa = trader._active_orders[0]
+        trader._halt_live(
+            title="Ambiguous Restored Order", message="an exit cannot be found", order=aaa
+        )
         assert aaa.cancel_requested
 
         now[0] += timedelta(seconds=60)
@@ -1204,20 +1360,27 @@ class TestAnExitAHaltEnds:
             adapter.cancel_order.side_effect = cancelled
         trader._initialize_run()
 
-        assert trader._active_orders == []
+        assert [order.request.symbol for order in trader._active_orders] == ["BBB", "DUST"]
         [skip] = _skips(events, "close_cancelled")
         assert skip.symbol == "AAA"
         assert skip.detail["message"] == "ended cancelled after a cancel the engine requested"
         [close] = _titled(alerts, "Close Cancelled")
-        assert "still tracked: none" in close["message"]
+        assert "still tracked: BBB" in close["message"]
         assert _titled(alerts, "Order Timeout") == []
 
     def test_a_failing_event_sink_does_not_hold_back_the_halt_s_cancels(self):
+        """A halt of a running account ends a close carrying a recovery reason too."""
         adapter = _adapter(below_minimum="")
         now = [TEST_CLOCK_NOW]
         trader, _, alerts = _working_exits(adapter, now)
-        trader.request_flatten("desk asked to close")
-        trader._poll_cycle()
+        trader._execute_live_decision(
+            [
+                OrderIntent(action="close", symbol=symbol, reason=REASON_OPERATOR_FLATTEN)
+                for symbol in SYMBOLS
+            ],
+            _bars(),
+            TEST_CLOCK_NOW,
+        )
         [aaa, *_] = trader._active_orders
 
         def failing_sink(event):
@@ -1230,9 +1393,160 @@ class TestAnExitAHaltEnds:
             if order_id == aaa.order_id
             else {**_accepted(order_id), "status": "canceled"}
         )
-        now[0] += timedelta(seconds=30)
-        trader._poll_cycle()
+        trader.halt("desk asked to stop")
 
         assert trader._active_orders == [aaa], "BBB and DUST were dropped all the same"
-        [halt] = _titled(alerts, "Order Timeout Cancellation Failed")
+        [halt] = _titled(alerts, "Manual Halt")
         assert "custom sink down" not in halt["message"]
+
+
+BREACH_TS = datetime(2025, 1, 1, 9, tzinfo=UTC)
+
+
+def _breached_with_a_working_order(adapter, **kwargs):
+    """A trader past its drawdown limit while an AAA buy still works at the venue."""
+    trader, events, alerts = _trader(adapter, **kwargs)
+    trader._risk_policy = RiskPolicy(max_drawdown_rate=0.2)
+    trader._cash = 0.0
+    trader._equity_peak = 1_000.0
+    working = TrackedOrder(
+        request=OrderRequest(
+            client_order_id="rest-1",
+            symbol="AAA",
+            side="buy",
+            quantity=1.0,
+            order_type="limit",
+            limit_price=90.0,
+            submitted_at=TEST_CLOCK_NOW,
+            reference_price=100.0,
+        ),
+        placement_attempted=True,
+        placement_attempted_at=TEST_CLOCK_NOW,
+        order_id="rest-1",
+        status="accepted",
+    )
+    trader._active_orders = [working]
+    adapter.get_order.return_value = _accepted("rest-1")
+    return trader, events, alerts, working
+
+
+class TestDrawdownBreachWithAWorkingOrder:
+    """Exits are sized from the book a working order leaves, so it is cancelled first."""
+
+    def test_an_order_the_venue_cancels_at_once_is_followed_by_the_exits(self):
+        adapter = _adapter(below_minimum="")
+        adapter.cancel_order.return_value = {**_accepted("rest-1"), "status": "canceled"}
+        trader, _, alerts, _ = _breached_with_a_working_order(adapter)
+
+        trader._record_equity(BREACH_TS)
+
+        adapter.cancel_order.assert_called_once()
+        assert _submitted(adapter) == SYMBOLS
+        assert trader._active_orders == []
+        assert trader._positions == {}
+        assert trader._halted is True
+        [breach] = _titled(alerts, "Max Drawdown Breach")
+        assert "flattened account positions and halted" in breach["message"]
+
+    def test_exits_wait_until_the_venue_confirms_the_order_ended(self):
+        adapter = _adapter(below_minimum="")
+        pending = {**_accepted("rest-1"), "status": "pending_cancel"}
+        adapter.cancel_order.return_value = pending
+        trader, events, alerts, working = _breached_with_a_working_order(adapter)
+
+        trader._record_equity(BREACH_TS)
+
+        adapter.place_order.assert_not_called()
+        assert trader._halted is True
+        assert trader._active_orders == [working]
+        [breach] = _titled(alerts, "Max Drawdown Breach")
+        assert (
+            "exits wait on the working orders' cancellation and halted; "
+            "awaiting cancel confirmation for AAA order_id=rest-1 (cancel_pending)"
+        ) in breach["message"]
+
+        adapter.get_order.return_value = pending
+        trader._poll_cycle()
+
+        adapter.place_order.assert_not_called()
+        adapter.cancel_order.assert_called_once()
+
+        adapter.get_order.return_value = {**_accepted("rest-1"), "status": "canceled"}
+        trader._poll_cycle()
+
+        assert _submitted(adapter) == SYMBOLS
+        assert trader._active_orders == []
+        assert trader._positions == {}
+        assert trader._halted is True
+        [completed] = _titled(alerts, "Halt Cancellation Completed")
+        assert "the Max Drawdown Breach exits go out now" in completed["message"]
+        _, flattened = _titled(alerts, "Max Drawdown Breach")
+        assert (
+            "flattened account positions once the working orders ended; still halted"
+            in flattened["message"]
+        )
+        assert [event.detail["reason"] for event in events if event.event_type == "halted"] == [
+            "Max Drawdown Breach"
+        ], "one breach, one halt"
+
+    @pytest.mark.parametrize(
+        ("book", "halt"),
+        [
+            ("matches", None),
+            ("differs", "Position Reconciliation Mismatch"),
+            ("positions_unread", "Position Reconciliation Failed"),
+            ("open_orders_unread", "Order Reconciliation Failed"),
+        ],
+    )
+    def test_a_restart_during_the_wait_sends_the_exits_only_from_a_matched_book(self, book, halt):
+        """The exits are sized at the restart, so a book it could not read or match drops them.
+
+        During the downtime the operator may have closed BBB at the venue,
+        which a second close would reopen the other way.
+        """
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        adapter = _adapter(below_minimum="")
+        adapter.get_position.side_effect = _held_everywhere
+        adapter.cancel_order.return_value = {**_accepted("rest-1"), "status": "pending_cancel"}
+        trader, _, _, _ = _breached_with_a_working_order(adapter, state_store=store)
+        trader._record_equity(BREACH_TS)
+        assert trader._halted is True
+        adapter.place_order.assert_not_called()
+
+        trader, _, alerts = _trader(adapter, state_store=store)
+        adapter.get_order.return_value = {**_accepted("rest-1"), "status": "canceled"}
+        if book == "differs":
+            adapter.get_position.side_effect = lambda request: (
+                {"symbol": "BBB", "size": 0.0, "avg_price": None, "unrealized_pnl": 0.0}
+                if request.symbol == "BBB"
+                else _held_everywhere(request)
+            )
+        elif book == "positions_unread":
+            adapter.get_position.side_effect = RuntimeError("positions unavailable")
+        elif book == "open_orders_unread":
+            adapter.list_open_orders.side_effect = RuntimeError("open orders unavailable")
+        trader._initialize_run()
+        adapter.get_position.side_effect = _held_everywhere
+        adapter.list_open_orders.side_effect = None
+        trader._poll_cycle()
+
+        assert trader._halted is True
+        if halt is None:
+            restarted, sent = _titled(alerts, "Max Drawdown Breach")
+            assert (
+                "restarted halted with AAA, BBB, DUST open; its exits go out next cycle"
+                in restarted["message"]
+            )
+            assert "flattened account positions once the working orders ended" in sent["message"]
+            assert _submitted(adapter) == SYMBOLS
+            assert trader._positions == {}
+        else:
+            [halted] = _titled(alerts, halt)
+            assert "the Max Drawdown Breach exits not yet sent are dropped" in halted["message"]
+            [restarted] = _titled(alerts, "Max Drawdown Breach")
+            assert (
+                "restarted halted with AAA, BBB, DUST open; its exits are dropped, not sent"
+                in restarted["message"]
+            )
+            adapter.place_order.assert_not_called()
+            assert trader._pending_flatten is None
