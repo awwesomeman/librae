@@ -21,13 +21,16 @@ Install: ``pip install shioaji`` or ``pip install -e '.[tw-live]'``
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import logging
-from collections.abc import Iterable, Mapping
+import sys
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from math import isfinite
 from numbers import Real
+from typing import Concatenate
 
 import pandas as pd
 
@@ -55,7 +58,11 @@ from librae.core.utils import (
     validate_futures_selector,
 )
 from librae.live.execution_identity import ExecutionIdentity, account_fingerprint
-from librae.live.executor import OrderBelowVenueMinimumError, PositionRequest
+from librae.live.executor import (
+    BrokerUnavailableError,
+    OrderBelowVenueMinimumError,
+    PositionRequest,
+)
 
 from .base import (
     AdapterInfo,
@@ -92,6 +99,36 @@ def _require_shioaji():
             "From a repository clone run: uv sync --extra tw-live. "
             "For a direct install, include Librae's 'tw-live' extra."
         ) from e
+
+
+# The SDK's own types for a transport failure, a request timeout and server
+# maintenance (HTTP 503), per its type stub (shioaji 1.7.0, ``_core.pyi``).
+# Which one a network blip raises has not been observed live.
+_UNANSWERED_ERRORS = ("ShioajiConnectionError", "ShioajiTimeoutError", "SystemMaintenance")
+
+
+def _unanswered_reads_unavailable[**P, R](
+    read: Callable[Concatenate[ShioajiAdapter, P], R],
+) -> Callable[Concatenate[ShioajiAdapter, P], R]:
+    """Classify a reconciliation or order status read Shioaji left unanswered.
+
+    Every other SDK error, authentication and token errors included, keeps
+    its type and fails closed.
+    """
+
+    @functools.wraps(read)
+    def wrapper(self: ShioajiAdapter, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return read(self, *args, **kwargs)
+        except Exception as exc:
+            # An SDK error implies the SDK is imported; without it nothing classifies.
+            sdk = sys.modules.get("shioaji")
+            unanswered = tuple(getattr(sdk, name) for name in _UNANSWERED_ERRORS) if sdk else ()
+            if not isinstance(exc, unanswered):
+                raise
+            raise BrokerUnavailableError(str(exc)) from exc
+
+    return wrapper
 
 
 @dataclass
@@ -619,6 +656,7 @@ class ShioajiAdapter:
         trade = self._api.place_order(contract, order)
         return self._trade_to_order(trade, symbol=signal["symbol"])
 
+    @_unanswered_reads_unavailable
     def find_order(self, client_order_id: str, symbol: str) -> dict | None:
         """Find an order by its deterministic six-character custom field."""
         self._require_auth()
@@ -632,6 +670,7 @@ class ShioajiAdapter:
             raise ValueError(f"duplicate Shioaji custom_field digest: {tag}")
         return self._trade_to_order(matches[0], symbol=symbol) if matches else None
 
+    @_unanswered_reads_unavailable
     def get_order(self, order_id: str, symbol: str) -> dict:
         """Refresh and return one cumulative Shioaji Trade state."""
         self._require_auth()
@@ -642,6 +681,7 @@ class ShioajiAdapter:
                 return self._trade_to_order(trade, symbol=symbol)
         raise LookupError(f"Shioaji order not found: {order_id}")
 
+    @_unanswered_reads_unavailable
     def list_open_orders(self, symbol: str) -> list[dict]:
         """Return non-final orders after refreshing the account state."""
         open_statuses = {"PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"}
@@ -659,7 +699,11 @@ class ShioajiAdapter:
         ]
 
     def cancel_order(self, order_id: str, symbol: str) -> dict:
-        """Cancel a Shioaji Trade object and return its refreshed state."""
+        """Cancel a Shioaji Trade object and return its refreshed state.
+
+        Its reads stay unclassified: once the cancel went out, a refresh that
+        fails after it must not say the call had no effect.
+        """
         self._require_auth()
         for trade in self._trades(symbol):
             status_id = str(getattr(trade.status, "id", "") or "")
@@ -739,6 +783,7 @@ class ShioajiAdapter:
                 result["commission"] = sum(commissions)
         return result
 
+    @_unanswered_reads_unavailable
     def get_position(self, request: PositionRequest) -> dict:
         """Return the current position for one configured instrument."""
         self._require_auth()
@@ -781,6 +826,7 @@ class ShioajiAdapter:
             pnl=lambda p: getattr(p, "pnl", 0),
         )
 
+    @_unanswered_reads_unavailable
     def get_balance(self, currency: str) -> dict[str, float]:
         """Return futures account margin balance (TWD only — Shioaji futures
         accounts don't hold other currencies).

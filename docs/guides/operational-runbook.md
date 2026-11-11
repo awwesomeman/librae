@@ -70,10 +70,18 @@ title matches, and the operator would understand what to do from the
 message alone.
 
 Not covered by the script (exercise separately once a broker sandbox
-session is running): a broker-failure alert, which fires through the same
-"Poll Error" path when `order_adapter` calls raise — see
+session is running): a broker-failure alert, which fires through the
+poll-error path below when `order_adapter` calls raise — see
 [Kill-switch rehearsal](#kill-switch-rehearsal) for a session that exercises
 real broker calls.
+
+Poll cycle alerts (rules in
+[Engine usage → persistent poll errors](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)):
+
+| Alert title | Meaning | Action |
+|---|---|---|
+| Poll Error | Three cycles in a row failed, the message naming the last error: an outage (the venue or the state store gave no answer, such as an order status read that timed out), or any failure on a halted account. Each poll retries; not halted by this. While an order status read fails, the drawdown check waits with it | Restore the store or check the venue, and watch the book if it lasts; nothing to do once it recovers |
+| Persistent Poll Error | Three cycles failed with an error that is not an outage, with no clean cycle between, such as a decision preflight refuses, a strategy or feature that raises, or an order status read the venue refused. Halted, tracked orders cancelled; the message names the last error | Fix what the error names, then `reset_halt()` |
 
 Periodic reconciliation alerts (thresholds and rules in
 [Engine usage → Reconciliation](engine-usage.md#reconciliation-live-only)):

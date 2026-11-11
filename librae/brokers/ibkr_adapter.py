@@ -993,8 +993,16 @@ class IBKRAdapter:
         supply the quantity, average price, time, and commission required by
         the engine's cumulative report contract.
         """
-        trades = list(self._ib.reqCompletedOrders(apiOnly=True))
-        fills = list(self._ib.reqExecutions())
+        try:
+            trades = list(self._ib.reqCompletedOrders(apiOnly=True))
+            fills = list(self._ib.reqExecutions())
+        except ConnectionError as exc:
+            # ib_async raises the built-in ConnectionError("Not connected")
+            # before it sends a request on a dropped session (ib_async 2.1.0
+            # Client.send and Client.getReqId), so the read had no effect.
+            raise BrokerUnavailableError(
+                f"IBKR client is not connected to TWS/IB Gateway ({exc})"
+            ) from exc
         for trade in trades:
             order_id = trade.order.orderId
             perm_id = getattr(trade.order, "permId", 0)

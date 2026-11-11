@@ -1395,6 +1395,39 @@ def test_find_order_does_not_query_history_when_session_trade_exists():
     adapter._ib.reqExecutions.assert_not_called()
 
 
+_STATUS_READS = {
+    "get_order": lambda adapter: adapter.get_order("123", "MU"),
+    "find_order": lambda adapter: adapter.find_order("strategy-1", "MU"),
+}
+
+
+@pytest.mark.parametrize("read", sorted(_STATUS_READS))
+def test_order_history_on_a_dropped_session_is_unavailable(read):
+    """ib_async refuses to send the request at all, so the read had no effect."""
+    adapter = _make_adapter(trading_enabled=True)
+    adapter._ib.trades.return_value = []
+    original = ConnectionError("Not connected")
+    adapter._ib.reqCompletedOrders.side_effect = original
+
+    with pytest.raises(BrokerUnavailableError, match="not connected") as raised:
+        _STATUS_READS[read](adapter)
+
+    assert raised.value.__cause__ is original
+
+
+@pytest.mark.parametrize("read", sorted(_STATUS_READS))
+def test_order_history_failing_otherwise_keeps_its_error(read):
+    adapter = _make_adapter(trading_enabled=True)
+    adapter._ib.trades.return_value = []
+    original = RuntimeError("malformed completed order")
+    adapter._ib.reqCompletedOrders.side_effect = original
+
+    with pytest.raises(RuntimeError) as raised:
+        _STATUS_READS[read](adapter)
+
+    assert raised.value is original
+
+
 # ---------------------------------------------------------------------------
 # get_position
 # ---------------------------------------------------------------------------

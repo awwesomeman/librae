@@ -711,6 +711,15 @@ class _RecordingDurableSink(_DurableSink):
         self.bars.append((ts, dict(bar)))
 
 
+class _DurableBatches(list):
+    """The batch path of a durable sink, keeping each call's symbol and bar times."""
+
+    durable_ohlcv_delivery = True
+
+    def __call__(self, symbol, _timeframe, bars) -> None:
+        self.append((symbol, [ts for ts, _bar in bars]))
+
+
 class TestTheAuditRowSaysWhenTheBarWasReceived:
     """observed_at is when the engine received a version, not when it was stored.
 
@@ -994,15 +1003,13 @@ class TestTheAuditRowSaysWhenTheBarWasReceived:
         from tests.engine.live_factories import _test_cfg, make_live_runner
 
         sink = _RecordingDurableSink()
-        batches: list[tuple[str, list[datetime]]] = []
+        batches = _DurableBatches()
         runner = make_live_runner(
             config=_test_cfg(mode="sim", warmup_periods=5),
             state_store=MemoryLiveStateStore(),
             fetcher=lambda *a, **k: _frame(6),
             on_ohlcv=sink,
-            on_ohlcv_batch=lambda symbol, _tf, bars: batches.append(
-                (symbol, [ts for ts, _bar in bars])
-            ),
+            on_ohlcv_batch=batches,
             clock=lambda: self.RECEIVED,
         )
 
@@ -1033,13 +1040,13 @@ class TestTheAuditRowSaysWhenTheBarWasReceived:
 
         sink = _RecordingDurableSink()
         sink.fail = True
-        batches: list = []
+        batches = _DurableBatches()
         runner = make_live_runner(
             config=_test_cfg(mode="sim", warmup_periods=5),
             state_store=MemoryLiveStateStore(),
             fetcher=lambda *a, **k: _frame(6),
             on_ohlcv=sink,
-            on_ohlcv_batch=lambda *args: batches.append(args),
+            on_ohlcv_batch=batches,
             clock=lambda: self.RECEIVED,
         )
 
