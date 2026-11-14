@@ -454,7 +454,9 @@ resampling; `librae/core/liquidity.py` owns lagged completed-session ADV.
 Holidays come from `exchange_calendars`, which keeps ad-hoc closures too;
 Librae adds only an announced closure that no release has yet, citing the
 exchange's announcement, and drops it once a release has it. Missing closures
-are reported upstream rather than kept here.
+are reported upstream rather than kept here. XTAI also carries the Saturdays
+TWSE and TAIFEX traded, which no release has, citing the exchanges' daily
+records.
 Neither belongs in a broker adapter or strategy. `librae/config/symbols.py`
 owns each instrument's `calendar_id`. Package dependencies follow
 [Product position and system boundaries](#product-position-and-system-boundaries).
