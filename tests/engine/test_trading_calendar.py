@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from librae.core.trading_calendar import (
     _XTAI_CLOSURES_MISSING_UPSTREAM,
+    _XTAI_SATURDAY_SESSIONS,
     TAIFEX_INDEX_CALENDAR,
     TAIFEX_LATE_OPEN_CALENDAR,
     bar_close,
@@ -435,6 +436,48 @@ _ANNOUNCED_CLOSURES = ["2022-02-04 10:00", "2023-01-18 10:00", "2026-10-23 10:00
 def test_an_announced_closure_is_not_a_session(calendar_id: str, instant: str) -> None:
     with pytest.raises(ValueError):
         session_label(_taipei(instant), calendar_id)
+
+
+def test_upstream_xtai_still_has_no_saturday_session() -> None:
+    """Once an exchange_calendars release trades Saturdays, drop the override."""
+    from exchange_calendars.exchange_calendar_xtai import XTAIExchangeCalendar
+
+    upstream = XTAIExchangeCalendar(start="2000-01-01")
+    assert not any(session.weekday() == 5 for session in upstream.sessions)
+
+
+# Saturdays in TAIFEX's daily futures records.
+_KNOWN_SATURDAY_SESSIONS = ["2006-10-14", "2007-03-03", "2007-04-14", "2010-02-06", "2012-02-04"]
+
+
+@pytest.mark.parametrize("day", _KNOWN_SATURDAY_SESSIONS)
+@pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR])
+def test_a_traded_saturday_is_a_session(calendar_id: str, day: str) -> None:
+    assert date.fromisoformat(day) in _XTAI_SATURDAY_SESSIONS
+    assert session_label(_taipei(f"{day} 10:00"), calendar_id) == date.fromisoformat(day)
+
+
+def test_the_saturday_list_holds_only_saturdays() -> None:
+    assert all(day.weekday() == 5 for day in _XTAI_SATURDAY_SESSIONS)
+
+
+def test_every_listed_saturday_and_no_other_is_a_session() -> None:
+    from librae.core.trading_calendar import _exchange_calendar
+
+    sessions = _exchange_calendar("XTAI").sessions
+    saturdays = {session.date() for session in sessions if session.weekday() == 5}
+    assert saturdays == set(_XTAI_SATURDAY_SESSIONS)
+
+
+def test_the_night_before_a_traded_saturday_belongs_to_it() -> None:
+    assert session_label(_taipei("2017-06-02 16:00"), TAIFEX_INDEX_CALENDAR) == date(2017, 6, 3)
+    assert session_label(_taipei("2017-06-05 09:00"), TAIFEX_INDEX_CALENDAR) == date(2017, 6, 5)
+
+
+@pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR])
+def test_an_untraded_saturday_is_not_a_session(calendar_id: str) -> None:
+    with pytest.raises(ValueError, match="outside"):
+        session_label(_taipei("2010-03-06 10:00"), calendar_id)
 
 
 @pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR])

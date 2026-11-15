@@ -94,6 +94,70 @@ _XTAI_CLOSURES_MISSING_UPSTREAM = (
 )
 
 
+# Saturdays TWSE and TAIFEX traded: alternate Saturdays until 2001, then
+# Saturdays made workdays to bridge a holiday. exchange_calendars' XTAI trades
+# Monday to Friday only. Each date is in both exchanges' daily records, which
+# list every trading day, and no other weekend day is:
+#   TWSE   https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date=20100201&response=json
+#   TAIFEX https://www.taifex.com.tw/cht/3/futDataDown (TX, one month per query)
+# From 2004-10-15, the earliest TWSE serves, its minute index shows each of
+# these Saturdays trading the regular 09:00-13:30:
+#   https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX?date=20100206&response=json
+# The sessions take the calendar's regular hours; no hours before 2001 are
+# modelled, weekday or Saturday.
+_XTAI_SATURDAY_SESSIONS = (
+    date(2000, 1, 15),
+    date(2000, 1, 29),
+    date(2000, 2, 19),
+    date(2000, 3, 4),
+    date(2000, 4, 1),
+    date(2000, 4, 8),
+    date(2000, 4, 15),
+    date(2000, 4, 29),
+    date(2000, 5, 6),
+    date(2000, 5, 20),
+    date(2000, 6, 3),
+    date(2000, 6, 17),
+    date(2000, 7, 15),
+    date(2000, 7, 29),
+    date(2000, 8, 5),
+    date(2000, 8, 19),
+    date(2000, 9, 2),
+    date(2000, 9, 16),
+    date(2000, 9, 30),
+    date(2000, 10, 7),
+    date(2000, 10, 21),
+    date(2000, 11, 4),
+    date(2000, 11, 18),
+    date(2000, 12, 2),
+    date(2000, 12, 16),
+    date(2000, 12, 30),
+    date(2006, 10, 14),
+    date(2007, 3, 3),
+    date(2007, 4, 14),
+    date(2007, 6, 23),
+    date(2007, 9, 29),
+    date(2009, 1, 10),
+    date(2009, 1, 17),
+    date(2009, 6, 6),
+    date(2010, 2, 6),
+    date(2012, 2, 4),
+    date(2012, 3, 3),
+    date(2012, 12, 22),
+    date(2013, 2, 23),
+    date(2013, 9, 14),
+    date(2014, 12, 27),
+    date(2016, 1, 30),
+    date(2016, 6, 4),
+    date(2016, 9, 10),
+    date(2017, 2, 18),
+    date(2017, 6, 3),
+    date(2017, 9, 30),
+    date(2018, 3, 31),
+    date(2018, 12, 22),
+)
+
+
 @cache
 def _xtai_calendar() -> ExchangeCalendar:
     """One instance shared by XTAI and the TAIFEX calendars, which use its sessions."""
@@ -101,9 +165,18 @@ def _xtai_calendar() -> ExchangeCalendar:
 
     class _XTAI(XTAIExchangeCalendar):
         @property
+        def weekmask(self) -> str:
+            # Saturdays are sessions so that the traded ones can be; every
+            # other Saturday is an ad-hoc holiday below.
+            return "1111110"
+
+        @property
         def adhoc_holidays(self) -> list[pd.Timestamp]:
             missing = [pd.Timestamp(day) for day in _XTAI_CLOSURES_MISSING_UPSTREAM]
-            return [*super().adhoc_holidays, *missing]
+            traded = {pd.Timestamp(day) for day in _XTAI_SATURDAY_SESSIONS}
+            saturdays = pd.date_range(_CALENDAR_START, self.default_end(), freq="W-SAT")
+            idle = [day for day in saturdays if day not in traded]
+            return [*super().adhoc_holidays, *missing, *idle]
 
     return _XTAI(start=_CALENDAR_START)
 
