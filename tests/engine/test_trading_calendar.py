@@ -501,6 +501,47 @@ def test_the_night_before_a_traded_saturday_belongs_to_it() -> None:
     assert session_label(_taipei("2017-06-05 09:00"), TAIFEX_INDEX_CALENDAR) == date(2017, 6, 5)
 
 
+# Saturdays traded after the night session launched; TAIFEX's daily futures
+# report shows the night before each and none after it.
+_NIGHT_ERA_SATURDAYS = [
+    row.day
+    for row in _XTAI_OVERRIDES
+    if row.kind == "opened" and row.day.weekday() == 5 and row.day >= date(2017, 5, 15)
+]
+
+
+def test_the_night_era_saturdays_are_the_ones_checked_against_taifex() -> None:
+    assert [
+        date(2017, 6, 3),
+        date(2017, 9, 30),
+        date(2018, 3, 31),
+        date(2018, 12, 22),
+    ] == _NIGHT_ERA_SATURDAYS
+
+
+@pytest.mark.parametrize("saturday", _NIGHT_ERA_SATURDAYS, ids=str)
+@pytest.mark.parametrize(
+    ("calendar_id", "night_open"),
+    [(TAIFEX_INDEX_CALENDAR, "15:00"), (TAIFEX_LATE_OPEN_CALENDAR, "17:25")],
+)
+def test_no_night_opens_on_a_traded_saturday(
+    calendar_id: str, night_open: str, saturday: date
+) -> None:
+    friday = saturday - timedelta(days=1)
+    monday = saturday + timedelta(days=2)
+    assert session_bounds(saturday, calendar_id) == (
+        _taipei(f"{friday} {night_open}"),
+        _taipei(f"{saturday} 13:45"),
+    )
+    assert session_bounds(monday, calendar_id) == (
+        _taipei(f"{monday} 08:45"),
+        _taipei(f"{monday} 13:45"),
+    )
+    assert _session_table(calendar_id).loc[monday, "open"] == _taipei(f"{monday} 08:45")
+    with pytest.raises(ValueError, match="outside"):
+        session_label(_taipei(f"{saturday} 20:00"), calendar_id)
+
+
 @pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR])
 def test_an_untraded_saturday_is_not_a_session(calendar_id: str) -> None:
     with pytest.raises(ValueError, match="outside"):
@@ -582,7 +623,7 @@ def test_an_instant_outside_the_hours_then_in_force_is_out_of_session(
 @pytest.mark.parametrize("calendar_id", list(_SESSION_HOURS))
 def test_the_session_table_matches_each_sessions_segments(calendar_id: str) -> None:
     table = _session_table(calendar_id)
-    for start in ("2000-12-20", "2017-05-05"):
+    for start in ("2000-12-20", "2017-05-05", "2017-09-25"):
         for label in table.loc[date.fromisoformat(start) :].index[:15]:
             segments = _session_segments(calendar_id, label)
             row = table.loc[label]
