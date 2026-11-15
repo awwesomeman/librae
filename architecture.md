@@ -451,10 +451,14 @@ librae/
 
 `librae/core/trading_calendar.py` owns session labels and session-aligned
 resampling; `librae/core/liquidity.py` owns lagged completed-session ADV.
-Sessions come from `exchange_calendars`; the TAIFEX calendars' hours are
-defined by Librae. Where TWSE or TAIFEX departs from those sessions, a row in
-`_XTAI_OVERRIDES` in that module closes a day or opens one (a weekend day
-included) for XTAI and the TAIFEX calendars, which trade its sessions. A row
+Sessions come from `exchange_calendars`; the hours of XTAI and the TAIFEX
+calendars come from `_SESSION_HOURS` in that module, rows of segment hours by
+the date they took effect, each citing the exchange's record of the change. A
+segment keeps the hours in force on the day it opens, so a TAIFEX session has
+a night segment only once the venue ran one. Where TWSE or TAIFEX departs
+from those sessions, a row in `_XTAI_OVERRIDES` in that module closes a day or
+opens one (a weekend day included) for XTAI and the TAIFEX calendars, which
+trade its sessions. A row
 cites the exchange's announcement or the daily record that shows the day.
 Report it upstream, and delete it once a release includes it; a test fails
 until then.

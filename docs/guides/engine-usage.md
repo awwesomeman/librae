@@ -530,7 +530,9 @@ session, and Q11 publishes each session's prices separately. TradingView's
 (observed for 2026-11-02: the 08:45 bar was O/H/L/C
 45000/45265/44700/45057).
 
-Segments are half-open: `XTAIFEX`'s are `[15:00, 05:00)` and `[08:45, 13:45)`,
+Segments are half-open: `XTAIFEX`'s are `[15:00, 05:00)` and `[08:45, 13:45)`
+under its current hours (earlier hours, and no night segment before TAIFEX
+opened one, are in `_SESSION_HOURS` in `librae/core/trading_calendar.py`),
 so the last day minute starts at 13:44. A minute starting at a close or later
 belongs to no bar of that session: resampling drops it with a warning rather
 than opening a one-minute stub bar. An adapter whose vendor puts the closing

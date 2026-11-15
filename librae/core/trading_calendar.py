@@ -103,10 +103,11 @@ def _recorded(day: str, kind: Literal["closed", "opened"]) -> _Override:
 # leaves once an exchange_calendars release has it: a test fails then.
 #
 # The Saturdays are the alternate Saturdays TWSE traded until 2001, then
-# Saturdays made workdays to bridge a holiday. From 2004-10-15, the earliest
-# TWSE serves, its minute index shows each trading the regular 09:00-13:30
-# (https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX?date=20100206&response=json);
-# no hours before 2001 are modelled, weekday or Saturday.
+# Saturdays made workdays to bridge a holiday. Each trades the hours in
+# _SESSION_HOURS: until 2001 TWSE and TAIFEX kept Saturday to their weekday
+# hours, and from 2004-10-15, the earliest TWSE serves, its minute index shows
+# a bridging Saturday trading the regular 09:00-13:30
+# (https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX?date=20100206&response=json).
 _XTAI_OVERRIDES = (
     _recorded("2000-01-03", "closed"),
     _recorded("2000-01-15", "opened"),
@@ -221,6 +222,80 @@ _XTAI_OVERRIDES = (
 )
 
 
+@dataclass(frozen=True)
+class _Hours:
+    """A calendar's segment hours, local time, from ``start`` (None: from
+    before its first session) until its next row.
+
+    ``night`` opens on the trading day before the session it belongs to and
+    closes the next calendar day; None when there is no night segment. Each
+    segment keeps the hours in force on the day it opens.
+    """
+
+    start: date | None
+    day: tuple[time, time]
+    night: tuple[time, time] | None
+    sources: tuple[str, ...]
+
+
+_TWSE_HOURS_HISTORY = "https://www.twse.com.tw/staticFiles/product/publication/twse60/html/178/"
+_TWSE_2001_HOURS = "https://www.twse.com.tw/en/about/company/history.html"
+_TAIFEX_HOURS_HISTORY = "https://www.taifex.com.tw/cht/4/historyOfTrading"
+# Launch notice for 2017-05-15 and the launch page: index products closing
+# 13:45 open the night at 15:00, products closing 16:15 at 17:25, both to 05:00.
+_TAIFEX_NIGHT_LAUNCH = (
+    "https://www.taifex.com.tw/chinese/event/afterhourstrading/"
+    "1060418_%E7%9B%A4%E5%BE%8C%E4%B8%8A%E7%B7%9A%E6%97%A5%E6%9C%9F%E5%85%AC%E5%91%8A.pdf",
+    "https://www.taifex.com.tw/chinese/event/afterhourstrading/index.asp",
+)
+
+
+def _taifex_hours(night_open: time) -> tuple[_Hours, ...]:
+    return (
+        # Monday to Saturday, the stock market's 09:00-12:00 plus 15 minutes.
+        _Hours(None, (time(9, 0), time(12, 15)), None, (_TAIFEX_HOURS_HISTORY,)),
+        _Hours(date(2001, 1, 2), (time(8, 45), time(13, 45)), None, (_TAIFEX_HOURS_HISTORY,)),
+        _Hours(
+            date(2017, 5, 15),
+            (time(8, 45), time(13, 45)),
+            (night_open, time(5, 0)),
+            (_TAIFEX_HOURS_HISTORY, *_TAIFEX_NIGHT_LAUNCH),
+        ),
+    )
+
+
+# Hours of the calendars whose hours librae defines; other calendars take
+# exchange_calendars' own effective-dated hours. A row cites the exchange's
+# record of the change. XTAIFEX_1725's night opens when TAIFEX first opened
+# one at 17:25; a product that joined the night session later is not told
+# apart, since a calendar carries no product.
+_SESSION_HOURS: dict[str, tuple[_Hours, ...]] = {
+    # Saturdays traded to 12:00 from 1998-04-04, as weekdays did.
+    "XTAI": (
+        _Hours(None, (time(9, 0), time(12, 0)), None, (_TWSE_HOURS_HISTORY,)),
+        _Hours(
+            date(2001, 1, 2),
+            (time(9, 0), time(13, 30)),
+            None,
+            (_TWSE_HOURS_HISTORY, _TWSE_2001_HOURS),
+        ),
+    ),
+    TAIFEX_INDEX_CALENDAR: _taifex_hours(time(15, 0)),
+    TAIFEX_LATE_OPEN_CALENDAR: _taifex_hours(time(17, 25)),
+}
+
+
+def _hours_positions(calendar_id: str, days: pd.DatetimeIndex) -> np.ndarray:
+    """Position in ``_SESSION_HOURS[calendar_id]`` of the row in force on each day."""
+    starts = pd.DatetimeIndex([row.start for row in _SESSION_HOURS[calendar_id][1:]])
+    return np.searchsorted(starts, days, side="right")
+
+
+def _hours(calendar_id: str, day: date) -> _Hours:
+    rows = _SESSION_HOURS[calendar_id]
+    return rows[int(_hours_positions(calendar_id, pd.DatetimeIndex([day]))[0])]
+
+
 @cache
 def _xtai_calendar() -> ExchangeCalendar:
     """One instance shared by XTAI and the TAIFEX calendars, which use its sessions."""
@@ -233,8 +308,13 @@ def _xtai_calendar() -> ExchangeCalendar:
     # weekmasks give the same sessions at several times the build cost.
     weekend = {day.weekday() for day in opened if day.weekday() >= 5}
     weekmask = "".join("1" if day < 5 or day in weekend else "0" for day in range(7))
+    hours = _SESSION_HOURS["XTAI"]
+    starts = [None if row.start is None else pd.Timestamp(row.start) for row in hours]
 
     class _XTAI(XTAIExchangeCalendar):
+        open_times = tuple((start, row.day[0]) for start, row in zip(starts, hours, strict=True))
+        close_times = tuple((start, row.day[1]) for start, row in zip(starts, hours, strict=True))
+
         @property
         def weekmask(self) -> str:
             return weekmask
@@ -378,20 +458,32 @@ def _session_table(calendar_id: str) -> pd.DataFrame:
             index=pd.Index(opens.date, name="label"),
         )
     if calendar_id in _TAIFEX_CALENDARS:
-        labels = _exchange_calendar(calendar_id).sessions
-        night_open = time(15, 0) if calendar_id == TAIFEX_INDEX_CALENDAR else time(17, 25)
+        sessions = pd.DatetimeIndex(_exchange_calendar(calendar_id).sessions)
+        previous, labels = sessions[:-1], sessions[1:]
+        rows = _SESSION_HOURS[calendar_id]
+
+        def clocks(times: list[time | None]) -> pd.TimedeltaIndex:
+            return pd.TimedeltaIndex(
+                [
+                    pd.NaT if at is None else pd.Timedelta(hours=at.hour, minutes=at.minute)
+                    for at in times
+                ]
+            )
+
+        day = _hours_positions(calendar_id, labels)
+        night = _hours_positions(calendar_id, previous)
+        night_open = clocks([rows[i].night[0] if rows[i].night else None for i in night])
         # Fixed Taipei clocks, which keep one UTC offset all year.
-        local = pd.DatetimeIndex(labels).tz_localize(_TAIPEI)
-        previous = local[:-1]
-        current = local[1:]
-        clock = pd.Timedelta(hours=night_open.hour, minutes=night_open.minute)
+        local = labels.tz_localize(_TAIPEI)
+        day_open = (local + clocks([rows[i].day[0] for i in day])).tz_convert("UTC")
+        night_open = (previous.tz_localize(_TAIPEI) + night_open).tz_convert("UTC")
         return pd.DataFrame(
             {
-                "open": (previous + clock).tz_convert("UTC"),
-                "close": (current + pd.Timedelta(hours=13, minutes=45)).tz_convert("UTC"),
-                "later_open": (current + pd.Timedelta(hours=8, minutes=45)).tz_convert("UTC"),
+                "open": night_open.where(night_open.notna(), day_open),
+                "close": (local + clocks([rows[i].day[1] for i in day])).tz_convert("UTC"),
+                "later_open": day_open.where(night_open.notna()),
             },
-            index=pd.Index(current.date, name="label"),
+            index=pd.Index(labels.date, name="label"),
         )
     schedule = _exchange_calendar(calendar_id).schedule
     return pd.DataFrame(
@@ -554,21 +646,32 @@ def _session_segments(
     calendar = _exchange_calendar(calendar_id)
     session = _calendar_session(calendar, label)
     if calendar_id in _TAIFEX_CALENDARS:
+        hours = _hours(calendar_id, label)
+        day_open, day_close = hours.day
+        day = (
+            (
+                _local_timestamp(label, day_open, _TAIPEI),
+                _local_timestamp(label, day_close, _TAIPEI),
+            ),
+        )
+        # Hours rows only ever add a night segment, so a session whose own
+        # row has none has no night either, and needs no session before it.
+        if hours.night is None:
+            return day
         previous_session = calendar.previous_session(session).date()
-        night_open = time(15, 0) if calendar_id == TAIFEX_INDEX_CALENDAR else time(17, 25)
+        night = _hours(calendar_id, previous_session).night
+        if night is None:
+            return day
         # The physical after-hours window always closes the calendar day after
-        # night_open, regardless of how many holidays separate previous_session
+        # it opens, regardless of how many holidays separate previous_session
         # from label (e.g. a Friday night session closes Saturday 05:00 even
         # when the next regular session, label, is the following Monday).
         return (
             (
-                _local_timestamp(previous_session, night_open, _TAIPEI),
-                _local_timestamp(previous_session + timedelta(days=1), time(5, 0), _TAIPEI),
+                _local_timestamp(previous_session, night[0], _TAIPEI),
+                _local_timestamp(previous_session + timedelta(days=1), night[1], _TAIPEI),
             ),
-            (
-                _local_timestamp(label, time(8, 45), _TAIPEI),
-                _local_timestamp(label, time(13, 45), _TAIPEI),
-            ),
+            *day,
         )
 
     schedule = calendar.schedule.loc[session]

@@ -7,14 +7,18 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from librae.core.trading_calendar import (
+    _SESSION_HOURS,
     _XTAI_OVERRIDES,
     TAIFEX_INDEX_CALENDAR,
     TAIFEX_LATE_OPEN_CALENDAR,
     _exchange_calendar,
+    _session_segments,
+    _session_table,
     bar_close,
     execution_session_label,
     next_segment_open_after,
     resample_session_ohlcv,
+    session_bounds,
     session_label,
     session_lookback_days,
 )
@@ -532,3 +536,70 @@ def test_the_night_before_a_lunar_new_year_closure_belongs_to_the_session_after_
     calendar_id: str, night: str, next_session: date
 ) -> None:
     assert session_label(_taipei(night), calendar_id) == next_session
+
+
+@pytest.mark.parametrize(
+    ("calendar_id", "label", "first_open", "final_close"),
+    [
+        ("XTAI", "2000-12-29", "2000-12-29 09:00", "2000-12-29 12:00"),
+        ("XTAI", "2000-12-30", "2000-12-30 09:00", "2000-12-30 12:00"),
+        ("XTAI", "2001-01-02", "2001-01-02 09:00", "2001-01-02 13:30"),
+        (TAIFEX_INDEX_CALENDAR, "2000-12-29", "2000-12-29 09:00", "2000-12-29 12:15"),
+        (TAIFEX_INDEX_CALENDAR, "2000-12-30", "2000-12-30 09:00", "2000-12-30 12:15"),
+        (TAIFEX_INDEX_CALENDAR, "2001-01-02", "2001-01-02 08:45", "2001-01-02 13:45"),
+        # The night session first opened at 15:00 on 2017-05-15, for 05-16.
+        (TAIFEX_INDEX_CALENDAR, "2017-05-15", "2017-05-15 08:45", "2017-05-15 13:45"),
+        (TAIFEX_INDEX_CALENDAR, "2017-05-16", "2017-05-15 15:00", "2017-05-16 13:45"),
+        (TAIFEX_LATE_OPEN_CALENDAR, "2000-12-30", "2000-12-30 09:00", "2000-12-30 12:15"),
+        (TAIFEX_LATE_OPEN_CALENDAR, "2017-05-15", "2017-05-15 08:45", "2017-05-15 13:45"),
+        (TAIFEX_LATE_OPEN_CALENDAR, "2017-05-16", "2017-05-15 17:25", "2017-05-16 13:45"),
+    ],
+)
+def test_session_bounds_follow_the_hours_in_force(
+    calendar_id: str, label: str, first_open: str, final_close: str
+) -> None:
+    bounds = session_bounds(date.fromisoformat(label), calendar_id)
+    assert bounds == (_taipei(first_open), _taipei(final_close))
+
+
+@pytest.mark.parametrize(
+    ("calendar_id", "instant"),
+    [
+        ("XTAI", "2000-12-29 12:00"),
+        (TAIFEX_INDEX_CALENDAR, "2000-12-29 08:45"),
+        (TAIFEX_INDEX_CALENDAR, "2000-12-29 12:15"),
+        (TAIFEX_INDEX_CALENDAR, "2017-05-12 20:00"),
+        (TAIFEX_LATE_OPEN_CALENDAR, "2017-05-12 20:00"),
+    ],
+)
+def test_an_instant_outside_the_hours_then_in_force_is_out_of_session(
+    calendar_id: str, instant: str
+) -> None:
+    with pytest.raises(ValueError, match="outside"):
+        session_label(_taipei(instant), calendar_id)
+
+
+@pytest.mark.parametrize("calendar_id", list(_SESSION_HOURS))
+def test_the_session_table_matches_each_sessions_segments(calendar_id: str) -> None:
+    table = _session_table(calendar_id)
+    for start in ("2000-12-20", "2017-05-05"):
+        for label in table.loc[date.fromisoformat(start) :].index[:15]:
+            segments = _session_segments(calendar_id, label)
+            row = table.loc[label]
+            later_open = None if pd.isna(row["later_open"]) else row["later_open"]
+            assert (row["open"], row["close"]) == (segments[0][0], segments[-1][1]), label
+            assert later_open == (segments[1][0] if len(segments) > 1 else None), label
+
+
+@pytest.mark.parametrize("calendar_id", list(_SESSION_HOURS))
+def test_every_hours_row_is_sourced_and_in_order(calendar_id: str) -> None:
+    rows = _SESSION_HOURS[calendar_id]
+    assert rows[0].start is None
+    starts = [row.start for row in rows[1:]]
+    assert starts == sorted(set(starts))
+    # _session_segments relies on a row never dropping a night segment.
+    nights = [row.night is not None for row in rows]
+    assert nights == sorted(nights)
+    for row in rows:
+        assert row.sources, row
+        assert all(source.startswith("https://") for source in row.sources), row
