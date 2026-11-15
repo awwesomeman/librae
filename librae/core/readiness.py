@@ -20,20 +20,12 @@ from librae.core.trading_calendar import (
 from librae.core.utils import interval_to_timedelta
 
 
-def _period_close_at_or_after(
-    start: datetime,
-    *,
-    timeframe: str,
-    calendar_id: str,
-) -> datetime:
-    return period_close(start, timeframe, calendar_id).to_pydatetime()
-
-
 def next_expected_close(
     last_ts: datetime,
     *,
     timeframe: str,
     calendar_id: str,
+    session_mode: str = "extended",
 ) -> datetime:
     """When the observation after ``last_ts`` is expected to complete.
 
@@ -61,25 +53,34 @@ def next_expected_close(
     post-market bar to the next regular segment is deliberately lenient: it
     cannot make a healthy feed look dead.
     """
-    try:
-        current_close = period_close(last_ts, timeframe, calendar_id).to_pydatetime()
-    except ValueError:
-        start = next_segment_open_after(last_ts, calendar_id).to_pydatetime()
-        return _period_close_at_or_after(start, timeframe=timeframe, calendar_id=calendar_id)
+
+    def close(start: datetime) -> datetime:
+        return period_close(
+            start, timeframe, calendar_id, session_mode=session_mode
+        ).to_pydatetime()
+
+    def next_open(after: datetime) -> datetime:
+        return next_segment_open_after(
+            after, calendar_id, session_mode=session_mode
+        ).to_pydatetime()
 
     try:
-        candidate_start = period_start(current_close, timeframe, calendar_id).to_pydatetime()
+        current_close = close(last_ts)
+    except ValueError:
+        return close(next_open(last_ts))
+
+    try:
+        candidate_start = period_start(
+            current_close, timeframe, calendar_id, session_mode=session_mode
+        ).to_pydatetime()
     except ValueError:
         candidate_start = None
     if candidate_start is not None:
-        expected = _period_close_at_or_after(
-            candidate_start, timeframe=timeframe, calendar_id=calendar_id
-        )
+        expected = close(candidate_start)
         if expected > current_close:
             return expected
 
-    start = next_segment_open_after(current_close, calendar_id).to_pydatetime()
-    return _period_close_at_or_after(start, timeframe=timeframe, calendar_id=calendar_id)
+    return close(next_open(current_close))
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +108,7 @@ def evaluate_observation(
     timeframe: str,
     calendar_id: str,
     grace: timedelta,
+    session_mode: str = "extended",
 ) -> ObservationStatus:
     """Decide whether a subscription's latest observation is still current.
 
@@ -122,7 +124,9 @@ def evaluate_observation(
         return ObservationStatus(fresh=False, expected_close=None, due_at=None)
     calendar_anchored = True
     try:
-        expected_close = next_expected_close(last_ts, timeframe=timeframe, calendar_id=calendar_id)
+        expected_close = next_expected_close(
+            last_ts, timeframe=timeframe, calendar_id=calendar_id, session_mode=session_mode
+        )
     except ValueError:
         # The calendar has no session containing this observation — an
         # extended-session feed, or simply odd data. Degrade to the bare

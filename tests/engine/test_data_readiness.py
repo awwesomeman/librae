@@ -578,3 +578,25 @@ class TestOptionalSymbolAcrossWarmupCycles:
         assert any("ETHUSDT" in available for available in seen[len(under_warmed) :]), (
             "it must join once its warmup gap closes"
         )
+
+
+def _taipei(value: str) -> datetime:
+    return datetime.fromisoformat(f"{value}+08:00").astimezone(UTC)
+
+
+@pytest.mark.parametrize(
+    ("session_mode", "last_ts", "expected"),
+    [
+        # Friday's day bar is followed by Monday's.
+        ("regular", "2026-11-13 08:45", "2026-11-16 13:45"),
+        # Friday's night closes Saturday 05:00 and counts toward Monday.
+        ("overnight", "2026-11-12 15:00", "2026-11-14 05:00"),
+        ("extended", "2026-11-12 15:00", "2026-11-16 13:45"),
+    ],
+)
+def test_a_taifex_daily_feed_expects_its_next_bar_in_its_session_mode(
+    session_mode: str, last_ts: str, expected: str
+) -> None:
+    assert next_expected_close(
+        _taipei(last_ts), timeframe="D1", calendar_id="XTAIFEX", session_mode=session_mode
+    ) == _taipei(expected)

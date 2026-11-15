@@ -27,12 +27,12 @@ CREATE TABLE IF NOT EXISTS librae_schema_revision (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO librae_schema_revision (singleton, revision)
-VALUES (TRUE, 7)
+VALUES (TRUE, 8)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
-    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 7 THEN
-        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 7';
+    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 8 THEN
+        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 8';
     END IF;
 END
 $$;
@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
                 OR jsonb_array_length(primary_subscriptions) = jsonb_array_length(symbols)
             )
         ),
-    CONSTRAINT chk_session_mode CHECK (session_mode IN ('regular', 'extended')),
+    CONSTRAINT chk_session_mode CHECK (session_mode IN ('regular', 'extended', 'overnight')),
     CONSTRAINT chk_execution_identity_object
         CHECK (execution_identity IS NULL OR jsonb_typeof(execution_identity) = 'object')
 );
@@ -396,7 +396,7 @@ CREATE TABLE IF NOT EXISTS run_bars (
     low             DOUBLE PRECISION NOT NULL,
     close           DOUBLE PRECISION NOT NULL,
     volume          DOUBLE PRECISION NOT NULL,
-    CONSTRAINT chk_run_bars_session_mode CHECK (session_mode IN ('regular', 'extended')),
+    CONSTRAINT chk_run_bars_session_mode CHECK (session_mode IN ('regular', 'extended', 'overnight')),
     CONSTRAINT chk_run_bars_available_at CHECK (available_at >= ts)
 );
 SELECT create_hypertable('run_bars', 'ts', if_not_exists => TRUE);
@@ -451,7 +451,7 @@ BEGIN
              AND table_name = 'backtest_runs'
              AND column_name = 'execution_identity'
        ) THEN
-        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 7';
+        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 8';
     END IF;
 END
 $$;

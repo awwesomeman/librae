@@ -19,13 +19,16 @@ from dataclasses import asdict, dataclass, field
 from functools import cached_property
 from math import isfinite
 from numbers import Real
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from librae.core.utils import to_canonical
 
 RunMode = Literal["backtest", "sim", "live"]
 LiveMode = Literal["sim", "live"]
-MarketDataSessionMode = Literal["regular", "extended"]
+# Which of a venue's sessions a feed carries; validate_session_mode in
+# trading_calendar says which calendars define each.
+MarketDataSessionMode = Literal["regular", "extended", "overnight"]
+MARKET_DATA_SESSION_MODES: tuple[str, ...] = get_args(MarketDataSessionMode)
 RebalanceResidualPolicy = Literal["discard", "fail", "defer_all", "defer_symbols"]
 SimulatedFillPrice = Literal["open"]
 DEFAULT_POLL_SECONDS = 60
@@ -544,9 +547,10 @@ class RunConfig:
                 raise TypeError(f"{field_name} must be a string or None")
         if self.broker is not None and (not isinstance(self.broker, str) or not self.broker):
             raise ValueError("broker must be a non-empty string or None")
-        if self.session_mode not in ("regular", "extended"):
+        if self.session_mode not in MARKET_DATA_SESSION_MODES:
             raise ValueError(
-                f"session_mode must be 'regular' or 'extended', got {self.session_mode!r}"
+                f"session_mode must be one of {MARKET_DATA_SESSION_MODES}, "
+                f"got {self.session_mode!r}"
             )
         if self.calendar_id is not None and (
             not isinstance(self.calendar_id, str) or not self.calendar_id

@@ -12,6 +12,7 @@ import pandas as pd
 
 from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
+    ALWAYS_OPEN_CALENDAR,
     bar_start_problem,
     bucket_geometry_is_known,
     period_bars,
@@ -68,16 +69,13 @@ class MarketDataSubscription:
             if value != value.strip():
                 raise ValueError(f"{field_name} must not contain leading or trailing whitespace")
         object.__setattr__(self, "timeframe", to_canonical(self.timeframe))
-        if self.session_mode not in ("regular", "extended"):
-            raise ValueError(
-                f"session_mode must be 'regular' or 'extended', got {self.session_mode!r}"
-            )
         from librae.config.symbols import validate_instrument_type
 
         validate_instrument_type(self.instrument_type)
-        from librae.core.trading_calendar import validate_calendar_id
+        from librae.core.trading_calendar import validate_calendar_id, validate_session_mode
 
         validate_calendar_id(self.calendar_id)
+        validate_session_mode(self.calendar_id, self.session_mode)
 
     def to_dict(self) -> dict[str, str]:
         """Return the stable JSON/manifest representation of this identity."""
@@ -439,10 +437,9 @@ def require_aligned_bar_grids(subscriptions: Sequence[MarketDataSubscription]) -
         return
 
     def geometry(subscription: MarketDataSubscription) -> tuple[str, str]:
-        full_day = bucket_geometry_is_known(
-            calendar_id=subscription.calendar_id, session_mode="extended"
-        )
-        return subscription.calendar_id, "any" if full_day else subscription.session_mode
+        # Every mode of an always-open calendar reads the same whole day.
+        always_open = subscription.calendar_id == ALWAYS_OPEN_CALENDAR
+        return subscription.calendar_id, "any" if always_open else subscription.session_mode
 
     if len({geometry(subscription) for subscription in subscriptions}) == 1:
         return
@@ -466,7 +463,9 @@ def _grids_align(subscriptions: Sequence[MarketDataSubscription], canonical: str
         period_seconds = int(interval_to_timedelta(canonical).total_seconds())
         phases: set[int] = set()
         for subscription in subscriptions:
-            phases |= segment_open_phases(subscription.calendar_id, period_seconds)
+            phases |= segment_open_phases(
+                subscription.calendar_id, period_seconds, subscription.session_mode
+            )
             if not bucket_geometry_is_known(
                 calendar_id=subscription.calendar_id, session_mode=subscription.session_mode
             ):
@@ -475,8 +474,10 @@ def _grids_align(subscriptions: Sequence[MarketDataSubscription], canonical: str
     if canonical not in ("D1", "W1", "MN1"):
         return False
     bars = [
-        period_bars(calendar_id, canonical)
-        for calendar_id in {subscription.calendar_id for subscription in subscriptions}
+        period_bars(calendar_id, canonical, session_mode)
+        for calendar_id, session_mode in {
+            (subscription.calendar_id, subscription.session_mode) for subscription in subscriptions
+        }
     ]
     # Compare only where every calendar has sessions.
     first = max(int(starts[0]) for starts, _ in bars)
@@ -542,8 +543,12 @@ def completion_floor(
         # The nominal fixed duration is conservative for a shortened final bucket.
         return timestamp + interval_to_timedelta(timeframe)
     try:
-        expected_start = period_start(timestamp, timeframe, subscription.calendar_id)
-        floor = period_close(timestamp, timeframe, subscription.calendar_id)
+        expected_start = period_start(
+            timestamp, timeframe, subscription.calendar_id, session_mode=subscription.session_mode
+        )
+        floor = period_close(
+            timestamp, timeframe, subscription.calendar_id, session_mode=subscription.session_mode
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"cannot establish completion for {subscription.symbol!r} "
@@ -596,7 +601,7 @@ def validate_bar_cadence(
             return
         starts = timestamps.tz_convert("UTC").as_unit("ns").asi8
         nominal = starts + int(interval.as_unit("ns").value)
-        closes = segment_closes(timestamps, canonical, calendar_id).asi8
+        closes = segment_closes(timestamps, canonical, calendar_id, session_mode=session_mode).asi8
         placed = closes != pd.NaT.value
         bounds = np.where(placed, np.minimum(nominal, closes), nominal)
         if bool((starts[1:] < bounds[:-1]).any()):
@@ -606,7 +611,10 @@ def validate_bar_cadence(
         return
 
     expected_starts = pd.DatetimeIndex(
-        [period_start(timestamp, canonical, calendar_id) for timestamp in timestamps]
+        [
+            period_start(timestamp, canonical, calendar_id, session_mode=session_mode)
+            for timestamp in timestamps
+        ]
     )
     if np.any(timestamps != expected_starts):
         raise ValueError(

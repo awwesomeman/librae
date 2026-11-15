@@ -68,6 +68,7 @@ def evaluate_reset_readiness(
             timeframe=subscription.timeframe,
             calendar_id=subscription.calendar_id,
             grace=staleness_grace(subscription),
+            session_mode=subscription.session_mode,
         )
         if not status.fresh:
             stale.append(symbol)

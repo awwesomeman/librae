@@ -3678,6 +3678,7 @@ class LiveTrader:
                         after.to_pydatetime(),
                         timeframe=subscription.timeframe,
                         calendar_id=subscription.calendar_id,
+                        session_mode=subscription.session_mode,
                     )
                 )
             except ValueError:  # outside the calendar: nothing to wait for
@@ -3693,6 +3694,7 @@ class LiveTrader:
                     due_close - pd.Timedelta(1, unit="ns"),
                     subscription.timeframe,
                     subscription.calendar_id,
+                    session_mode=subscription.session_mode,
                 )
             except ValueError:  # no calendar geometry: the close is all there is
                 return due_close

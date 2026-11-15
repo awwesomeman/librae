@@ -24,7 +24,7 @@ from typing import Any
 from librae.core.executor import RuntimeEvent
 from librae.core.financing import FinancingKind
 from librae.core.market_data import MarketDataSubscription
-from librae.core.run_config import MarketDataSessionMode, RunMode
+from librae.core.run_config import MARKET_DATA_SESSION_MODES, MarketDataSessionMode, RunMode
 from librae.core.strategy import PositionEventType, PositionSide, TimeInForce
 from librae.core.utils import to_canonical
 
@@ -66,7 +66,7 @@ class RunMetadata:
         object.__setattr__(self, "auxiliary_subscriptions", tuple(sorted(raw_auxiliary)))
         if self.mode not in ("backtest", "sim", "live"):
             raise ValueError(f"invalid run mode: {self.mode!r}")
-        if self.session_mode not in ("regular", "extended"):
+        if self.session_mode not in MARKET_DATA_SESSION_MODES:
             raise ValueError(f"invalid market-data session mode: {self.session_mode!r}")
         subscriptions = self.primary_subscriptions
         if subscriptions:

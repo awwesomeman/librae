@@ -520,9 +520,13 @@ kbars are not covered: whether theirs do the same is unverified.
 Session bars follow the venue's attribution rule. Intraday buckets count from
 each segment's open (`XTAIFEX`: 15:00 night, 08:45 day), so a bucket the
 segment cannot fill stays as that segment's last, shorter bar. D1, W1 and MN
-bars are cut by trading-day label: a TAIFEX D1 bar is the previous night plus
-the day session, stamped at the night open and labelled with the day-session
-date. The basis is TAIFEX's
+bars are cut by trading-day label and hold the segments their `session_mode`
+reads (below): an `extended` TAIFEX D1 bar is the previous night plus the day
+session, stamped at the night open; a `regular` one is the day segment,
+stamped at the day open; an `overnight` one is the night alone, stamped at
+the night open and closing at the night close. Each is labelled with the
+day-session date, and a session with no night (before TAIFEX opened one, or
+after a traded Saturday) has no `overnight` bar. The basis is TAIFEX's
 [after-hours trading Q&A](https://www.taifex.com.tw/file/taifex/CHINESE/4/AHTradeQA_ch.pdf)
 (2025-06-23 edition): Q3 assigns night-session trades to the next regular
 session, and Q11 publishes each session's prices separately. TradingView's
@@ -552,14 +556,19 @@ and `instrument_type`. Primary/auxiliary role is intentionally not part of
 that identity. `RunConfig.session_mode` supplies its session dimension.
 `extended` (the compatibility default) means all sessions exposed by the data
 source, including regular hours; `regular` excludes prints outside the venue's
-regular session. It is part of `config_hash`, so backtest caches cannot reuse a
-run built from the other bar set. The implicit/default `extended` value retains
+regular session (on the TAIFEX calendars, the day segment); `overnight` is
+only the segment outside it, which only the TAIFEX calendars define (their
+night). `validate_session_mode` in `librae/core/trading_calendar.py` says which
+calendar takes which mode. It is part of `config_hash`, so backtest caches cannot reuse a
+run built from another bar set. The implicit/default `extended` value retains
 the legacy hash so an unchanged live run can recover its existing checkpoint.
 Market-data artifacts and stored run bars carry all six
 dimensions; run metadata stores the exact primary identities so readers never
 fall back to a broad run-level source/type match. Built-in IBKR wiring maps
 the generic session value to IBKR's `useRTH` request
-flag. Other concrete adapters reject `regular` until they can honor it; an
+flag, rejects `overnight`, and on the TAIFEX calendars also `regular`, since
+whether its RTH is the TAIFEX day segment is unverified. Other concrete adapters reject every mode but
+`extended` until they can honor it; an
 injected callable is caller-owned and must already return bars matching the
 configured mode.
 Direct `Backtest(...)` construction may declare the same identity with its

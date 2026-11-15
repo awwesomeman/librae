@@ -442,18 +442,41 @@ def execution_session_label(value: object, calendar_id: str) -> date:
     raise ValueError(f"{timestamp.isoformat()} precedes every {calendar_id} session")
 
 
+def validate_session_mode(calendar_id: str, session_mode: str) -> None:
+    """Check the calendar defines the segments ``session_mode`` reads.
+
+    A mode selects segments of each session, as IBKR's ``useRTH`` selects
+    regular trading hours: ``regular`` the venue's regular hours (the TAIFEX
+    day segment), ``extended`` every segment (a TAIFEX trading day, the night
+    before it included) and ``overnight`` only the segment outside regular
+    hours (the TAIFEX night). Only the TAIFEX calendars define that segment;
+    ``exchange_calendars`` knows regular hours alone.
+    """
+    from librae.core.run_config import MARKET_DATA_SESSION_MODES
+
+    if session_mode not in MARKET_DATA_SESSION_MODES:
+        raise ValueError(
+            f"session_mode must be one of {MARKET_DATA_SESSION_MODES}, got {session_mode!r}"
+        )
+    if session_mode == "overnight" and calendar_id not in _TAIFEX_CALENDARS:
+        raise ValueError(
+            f"session_mode='overnight' needs a calendar that defines an overnight "
+            f"segment; {calendar_id} does not"
+        )
+
+
 def bucket_geometry_is_known(*, calendar_id: str, session_mode: str) -> bool:
     """Whether this calendar describes bucket geometry for this session mode.
 
     A calendar whose segments already span the whole trading day describes
-    every bar a feed of it can carry, in either mode. The rest come from
+    every bar a feed of it can carry, in every mode. The rest come from
     ``exchange_calendars``, which exposes only open/break/close: no after-hours
     geometry exists there, so an extended feed carries hours the calendar says
     nothing about and the nominal interval is all there is.
 
     One place on purpose: this is what every consumer of that distinction asks.
     """
-    return session_mode == "regular" or calendar_id in _FULL_DAY_CALENDARS
+    return session_mode != "extended" or calendar_id in _FULL_DAY_CALENDARS
 
 
 # How far a 24/7 calendar is laid out for comparison with session calendars,
@@ -462,9 +485,12 @@ _ALWAYS_OPEN_RANGE = (pd.Timestamp("2000-01-01", tz="UTC"), pd.Timestamp("2040-0
 
 
 @cache
-def _session_table(calendar_id: str) -> pd.DataFrame:
-    """Every session of the calendar: label, first open, final close, and the
-    opens of its later segments (UTC), as ``_session_segments`` defines them."""
+def _session_table(calendar_id: str, session_mode: str = "extended") -> pd.DataFrame:
+    """Every session of the calendar in ``session_mode``: label, first open,
+    final close, and the opens of its later segments (UTC), as
+    ``_session_segments`` defines them. A session without a segment in the
+    mode has no row."""
+    validate_session_mode(calendar_id, session_mode)
     if calendar_id == ALWAYS_OPEN_CALENDAR:
         opens = pd.date_range(*_ALWAYS_OPEN_RANGE, freq="D", inclusive="left")
         return pd.DataFrame(
@@ -488,17 +514,32 @@ def _session_table(calendar_id: str) -> pd.DataFrame:
         night = _hours_positions(calendar_id, previous)
         nights = [_night_opening(rows[i], on) for i, on in zip(night, previous, strict=True)]
         night_open = clocks([None if hours is None else hours[0] for hours in nights])
+        night_close = clocks([None if hours is None else hours[1] for hours in nights])
         # Fixed Taipei clocks, which keep one UTC offset all year.
         local = labels.tz_localize(_TAIPEI)
         day_open = (local + clocks([rows[i].day[0] for i in day])).tz_convert("UTC")
-        night_open = (previous.tz_localize(_TAIPEI) + night_open).tz_convert("UTC")
+        day_close = (local + clocks([rows[i].day[1] for i in day])).tz_convert("UTC")
+        night_local = previous.tz_localize(_TAIPEI)
+        night_open = (night_local + night_open).tz_convert("UTC")
+        # A night closes the calendar day after it opens; see _session_segments.
+        night_close = (night_local + pd.Timedelta(days=1) + night_close).tz_convert("UTC")
+        index = pd.Index(labels.date, name="label")
+        if session_mode == "regular":
+            return pd.DataFrame(
+                {"open": day_open, "close": day_close, "later_open": pd.NaT}, index=index
+            )
+        if session_mode == "overnight":
+            nights_only = pd.DataFrame(
+                {"open": night_open, "close": night_close, "later_open": pd.NaT}, index=index
+            )
+            return nights_only[night_open.notna()]
         return pd.DataFrame(
             {
                 "open": night_open.where(night_open.notna(), day_open),
-                "close": (local + clocks([rows[i].day[1] for i in day])).tz_convert("UTC"),
+                "close": day_close,
                 "later_open": day_open.where(night_open.notna()),
             },
-            index=pd.Index(labels.date, name="label"),
+            index=index,
         )
     schedule = _exchange_calendar(calendar_id).schedule
     return pd.DataFrame(
@@ -512,7 +553,9 @@ def _session_table(calendar_id: str) -> pd.DataFrame:
 
 
 @cache
-def segment_open_phases(calendar_id: str, period_seconds: int) -> frozenset[int]:
+def segment_open_phases(
+    calendar_id: str, period_seconds: int, session_mode: str = "extended"
+) -> frozenset[int]:
     """Where the calendar's segments open on the period's grid, in nanoseconds.
 
     The grid is the period's multiples since the Unix epoch. An intraday bar
@@ -521,19 +564,21 @@ def segment_open_phases(calendar_id: str, period_seconds: int) -> frozenset[int]
     one grid. Every segment the calendar holds is read, across its range.
     """
     period_ns = period_seconds * 10**9
-    table = _session_table(calendar_id)
+    table = _session_table(calendar_id, session_mode)
     opens = pd.DatetimeIndex(pd.concat([table["open"], table["later_open"]]).dropna())
     return frozenset(np.unique(opens.as_unit("ns").asi8 % period_ns).tolist())
 
 
-def period_bars(calendar_id: str, timeframe: str) -> tuple[np.ndarray, np.ndarray]:
+def period_bars(
+    calendar_id: str, timeframe: str, session_mode: str = "extended"
+) -> tuple[np.ndarray, np.ndarray]:
     """Start and close, in UTC nanoseconds, of every one-period day, week or
     month bar the calendar holds: its first session's open to its last
     session's close, as ``period_start`` and ``period_close`` bound them."""
     from librae.core.utils import to_canonical
 
     canonical = to_canonical(timeframe)
-    table = _session_table(calendar_id)
+    table = _session_table(calendar_id, session_mode)
     if canonical == "D1":
         bars = table[["open", "close"]]
     elif canonical in ("W1", "MN1"):
@@ -652,8 +697,16 @@ def _local_timestamp(day: date, clock: time, timezone: str) -> pd.Timestamp:
 
 @cache
 def _session_segments(
-    calendar_id: str, label: date
+    calendar_id: str, label: date, session_mode: str = "extended"
 ) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
+    """The session's segments in ``session_mode``, in time order; empty when
+    the session has none in that mode (a TAIFEX session with no night).
+
+    ``extended`` on a calendar that knows only regular hours reads those
+    hours: their after-hours geometry is unknown, which callers ask
+    ``bucket_geometry_is_known`` about first.
+    """
+    validate_session_mode(calendar_id, session_mode)
     if calendar_id == ALWAYS_OPEN_CALENDAR:
         start = pd.Timestamp(label, tz="UTC")
         return ((start, start + pd.Timedelta(days=1)),)
@@ -669,25 +722,25 @@ def _session_segments(
                 _local_timestamp(label, day_close, _TAIPEI),
             ),
         )
+        if session_mode == "regular":
+            return day
         # Hours rows only ever add a night segment, so a session whose own
         # row has none has no night either, and needs no session before it.
         if hours.night is None:
-            return day
+            return () if session_mode == "overnight" else day
         previous_session = calendar.previous_session(session).date()
         night = _night_opening(_hours(calendar_id, previous_session), previous_session)
         if night is None:
-            return day
+            return () if session_mode == "overnight" else day
         # The physical after-hours window always closes the calendar day after
         # it opens, regardless of how many holidays separate previous_session
         # from label (e.g. a Friday night session closes Saturday 05:00 even
         # when the next regular session, label, is the following Monday).
-        return (
-            (
-                _local_timestamp(previous_session, night[0], _TAIPEI),
-                _local_timestamp(previous_session + timedelta(days=1), night[1], _TAIPEI),
-            ),
-            *day,
+        night_segment = (
+            _local_timestamp(previous_session, night[0], _TAIPEI),
+            _local_timestamp(previous_session + timedelta(days=1), night[1], _TAIPEI),
         )
+        return (night_segment,) if session_mode == "overnight" else (night_segment, *day)
 
     schedule = calendar.schedule.loc[session]
     open_at = pd.Timestamp(schedule["open"])
@@ -702,11 +755,25 @@ def _session_segments(
     return ((open_at, close_at),)
 
 
-def session_bounds(value: date, calendar_id: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+def _segments_in_mode(
+    calendar_id: str, label: date, session_mode: str
+) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
+    """``_session_segments``, raising when the session has none in the mode."""
+    segments = _session_segments(calendar_id, label, session_mode)
+    if not segments:
+        raise ValueError(
+            f"the {calendar_id} session {label.isoformat()} has no {session_mode} segment"
+        )
+    return segments
+
+
+def session_bounds(
+    value: date, calendar_id: str, *, session_mode: str = "extended"
+) -> tuple[pd.Timestamp, pd.Timestamp]:
     """Return the first open and final close for one trading-session date."""
     if type(value) is not date:
         raise TypeError("session date must be a date")
-    segments = _session_segments(calendar_id, value)
+    segments = _segments_in_mode(calendar_id, value, session_mode)
     return segments[0][0], segments[-1][1]
 
 
@@ -722,7 +789,9 @@ def next_session_open(value: date, calendar_id: str) -> pd.Timestamp:
     return _session_segments(calendar_id, next_label)[0][0]
 
 
-def next_segment_open_after(value: object, calendar_id: str) -> pd.Timestamp:
+def next_segment_open_after(
+    value: object, calendar_id: str, *, session_mode: str = "extended"
+) -> pd.Timestamp:
     """Open of the first trading segment that begins at or after ``value``.
 
     Answers "when can the next observation arrive" for an instant at a close,
@@ -743,7 +812,7 @@ def next_segment_open_after(value: object, calendar_id: str) -> pd.Timestamp:
         pd.Timestamp(timestamp.date() - timedelta(days=1)), direction="next"
     )
     while True:
-        for segment_open, _ in _session_segments(calendar_id, label.date()):
+        for segment_open, _ in _session_segments(calendar_id, label.date(), session_mode):
             if segment_open >= timestamp:
                 return segment_open
         label = calendar.next_session(label)
@@ -763,10 +832,12 @@ def _segment_containing(
     raise ValueError(f"{timestamp.isoformat()} is outside the {calendar_id} trading segments")
 
 
-def _bucket_start(value: object, target_seconds: int, calendar_id: str) -> pd.Timestamp:
+def _bucket_start(
+    value: object, target_seconds: int, calendar_id: str, session_mode: str = "extended"
+) -> pd.Timestamp:
     timestamp = _timestamp(value)
     label = session_label(timestamp, calendar_id)
-    segments = _session_segments(calendar_id, label)
+    segments = _segments_in_mode(calendar_id, label, session_mode)
     if target_seconds >= _DAY_SECONDS:
         return segments[0][0]
     segment_open, _ = _segment_containing(segments, timestamp, calendar_id)
@@ -774,31 +845,40 @@ def _bucket_start(value: object, target_seconds: int, calendar_id: str) -> pd.Ti
     return segment_open + pd.Timedelta(seconds=offset_seconds - offset_seconds % target_seconds)
 
 
-def bar_close(value: object, target_seconds: int, calendar_id: str) -> pd.Timestamp:
+def bar_close(
+    value: object, target_seconds: int, calendar_id: str, *, session_mode: str = "extended"
+) -> pd.Timestamp:
     """Return the actual close of a session-aligned bar-start timestamp."""
     if target_seconds <= 0:
         raise ValueError("target_seconds must be positive")
     timestamp = _timestamp(value)
-    segments = _session_segments(calendar_id, session_label(timestamp, calendar_id))
+    segments = _segments_in_mode(calendar_id, session_label(timestamp, calendar_id), session_mode)
     if target_seconds >= _DAY_SECONDS:
         return segments[-1][1]
     _, segment_close = _segment_containing(segments, timestamp, calendar_id)
     return min(timestamp + pd.Timedelta(seconds=target_seconds), segment_close)
 
 
-def period_start(value: object, timeframe: str, calendar_id: str) -> pd.Timestamp:
+def period_start(
+    value: object, timeframe: str, calendar_id: str, *, session_mode: str = "extended"
+) -> pd.Timestamp:
     """Return the canonical start of the calendar period containing ``value``.
 
     Multi-period bars deliberately use the start of their local day, week, or
     month rather than a global phase.  Their cadence is a per-series invariant
     and is validated separately by the consumer.
+
+    A period holds the segments ``session_mode`` reads of the sessions
+    labelled in it, so a TAIFEX D1 bar starts at the night open in
+    ``extended`` and ``overnight`` and at the day open in ``regular``; an
+    instant in another segment of the same session maps to that start.
     """
     from librae.core.utils import interval_to_timedelta, to_canonical
 
     canonical = to_canonical(timeframe)
     if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
         interval = interval_to_timedelta(canonical)
-        return _bucket_start(value, int(interval.total_seconds()), calendar_id)
+        return _bucket_start(value, int(interval.total_seconds()), calendar_id, session_mode)
 
     timestamp = _timestamp(value)
     label = session_label(timestamp, calendar_id)
@@ -813,7 +893,12 @@ def period_start(value: object, timeframe: str, calendar_id: str) -> pd.Timestam
     else:  # pragma: no cover - to_canonical owns supported prefixes
         raise ValueError(f"unsupported session-aligned timeframe={canonical!r}")
 
-    return _session_segments(calendar_id, first_label)[0][0]
+    # A session with no segment in the mode (a TAIFEX session without a
+    # night) adds nothing to the period, so the period opens at the first
+    # one that has one.
+    while not _session_segments(calendar_id, first_label, session_mode) and first_label < label:
+        first_label = _exchange_calendar(calendar_id).next_session(pd.Timestamp(first_label)).date()
+    return _segments_in_mode(calendar_id, first_label, session_mode)[0][0]
 
 
 def bar_start_problem(
@@ -826,8 +911,9 @@ def bar_start_problem(
     only regular hours has no such geometry (see ``bucket_geometry_is_known``),
     so all that can be checked is that the bar lies on a session day in the
     exchange's time zone and on the timeframe's wall-clock grid there; a
-    shifted stamp that stays inside such a day passes. Calendar-sized bars use
-    the regular sessions in either mode, as their completion does.
+    shifted stamp that stays inside such a day passes. Calendar-sized bars on
+    such a calendar use its regular sessions in either mode, as their
+    completion does.
     """
     from librae.core.utils import interval_to_timedelta, to_canonical
 
@@ -850,7 +936,7 @@ def bar_start_problem(
         return None
 
     try:
-        expected = period_start(timestamp, canonical, calendar_id)
+        expected = period_start(timestamp, canonical, calendar_id, session_mode=session_mode)
     except ValueError:
         return f"outside the {calendar_id} trading sessions"
     if expected != timestamp:
@@ -858,14 +944,19 @@ def bar_start_problem(
     return None
 
 
-def period_close(value: object, timeframe: str, calendar_id: str) -> pd.Timestamp:
-    """Return the real close boundary for one session-aligned bar period."""
+def period_close(
+    value: object, timeframe: str, calendar_id: str, *, session_mode: str = "extended"
+) -> pd.Timestamp:
+    """Return the real close boundary for one session-aligned bar period: the
+    final close, in ``session_mode``, of the sessions it holds."""
     from librae.core.utils import interval_to_timedelta, to_canonical
 
     canonical = to_canonical(timeframe)
     if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
         interval = interval_to_timedelta(canonical)
-        return bar_close(value, int(interval.total_seconds()), calendar_id)
+        return bar_close(
+            value, int(interval.total_seconds()), calendar_id, session_mode=session_mode
+        )
 
     timestamp = _timestamp(value)
     label = session_label(timestamp, calendar_id)
@@ -888,14 +979,20 @@ def period_close(value: object, timeframe: str, calendar_id: str) -> pd.Timestam
     else:  # pragma: no cover - to_canonical owns supported prefixes
         raise ValueError(f"unsupported session-aligned timeframe={canonical!r}")
 
-    return _session_segments(calendar_id, final_label)[-1][1]
+    while not _session_segments(calendar_id, final_label, session_mode) and final_label > label:
+        final_label = (
+            _exchange_calendar(calendar_id).previous_session(pd.Timestamp(final_label)).date()
+        )
+    return _segments_in_mode(calendar_id, final_label, session_mode)[-1][1]
 
 
 def _from_epoch_ns(values: np.ndarray) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(values.view("datetime64[ns]"), tz="UTC")
 
 
-def segment_closes(index: pd.DatetimeIndex, timeframe: str, calendar_id: str) -> pd.DatetimeIndex:
+def segment_closes(
+    index: pd.DatetimeIndex, timeframe: str, calendar_id: str, *, session_mode: str = "extended"
+) -> pd.DatetimeIndex:
     """Close of the trading segment each bar in ``index`` falls in.
 
     An intraday bar ends where its segment does when the segment ends first,
@@ -904,8 +1001,9 @@ def segment_closes(index: pd.DatetimeIndex, timeframe: str, calendar_id: str) ->
     with more than one segment per session. This is the whole-series form of
     the clamp ``bar_close`` applies to a single timestamp.
 
-    Bars outside every segment get ``NaT`` — an off-hours print belongs to no
-    segment — leaving the caller to decide what bound to use instead.
+    Bars outside every segment ``session_mode`` reads get ``NaT`` — an
+    off-hours print belongs to no segment — leaving the caller to decide what
+    bound to use instead.
 
     Intraday only: a calendar-sized period spans whole sessions and closes
     where ``period_close`` says, not where a segment does.
@@ -931,7 +1029,9 @@ def segment_closes(index: pd.DatetimeIndex, timeframe: str, calendar_id: str) ->
     while position < len(values):
         timestamp = utc[position]
         try:
-            segments = _session_segments(calendar_id, session_label(timestamp, calendar_id))
+            segments = _session_segments(
+                calendar_id, session_label(timestamp, calendar_id), session_mode
+            )
             _, segment_close = _segment_containing(segments, timestamp, calendar_id)
         except ValueError:
             position += 1
@@ -967,7 +1067,7 @@ _MAX_TOLERATED_OUTLIER_RATIO = 0.01
 
 
 def _bucket_starts_skipping_outliers(
-    index: pd.DatetimeIndex, target_seconds: int, calendar_id: str
+    index: pd.DatetimeIndex, target_seconds: int, calendar_id: str, session_mode: str
 ) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
     """Bucket-start for every bar that resolves to a session, dropping the rest.
 
@@ -999,7 +1099,7 @@ def _bucket_starts_skipping_outliers(
     skipped: list[pd.Timestamp] = []
     for timestamp in index:
         try:
-            bucket = _bucket_start(timestamp, target_seconds, calendar_id)
+            bucket = _bucket_start(timestamp, target_seconds, calendar_id, session_mode)
         except ValueError:
             skipped.append(timestamp)
             continue
@@ -1034,10 +1134,12 @@ def resample_session_ohlcv(
     frame: pd.DataFrame,
     target_seconds: int,
     calendar_id: str,
+    *,
+    session_mode: str = "extended",
 ) -> pd.DataFrame:
     """Aggregate 1-minute OHLCV on exchange-session bucket boundaries.
 
-    Bars that don't resolve to any session (see
+    Bars that don't resolve to any segment ``session_mode`` reads (see
     _bucket_starts_skipping_outliers) are dropped, not fatal.
     """
     if target_seconds <= 0:
@@ -1047,7 +1149,9 @@ def resample_session_ohlcv(
     if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.tz is None:
         raise ValueError("OHLCV must have a timezone-aware DatetimeIndex")
 
-    kept_index, buckets = _bucket_starts_skipping_outliers(frame.index, target_seconds, calendar_id)
+    kept_index, buckets = _bucket_starts_skipping_outliers(
+        frame.index, target_seconds, calendar_id, session_mode
+    )
     frame = frame.loc[kept_index]
     grouped = frame.groupby(buckets)
     result = pd.DataFrame(

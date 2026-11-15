@@ -98,7 +98,12 @@ from librae.core.market_data import (
     validate_bar_cadence,
     validate_ohlcv_values,
 )
-from librae.core.run_config import ExecutionPolicy, MarketDataSessionMode, RiskPolicy
+from librae.core.run_config import (
+    MARKET_DATA_SESSION_MODES,
+    ExecutionPolicy,
+    MarketDataSessionMode,
+    RiskPolicy,
+)
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -843,6 +848,7 @@ def _canonical_period_start_flags(
     period_ordinals: np.ndarray,
     timeframe: str,
     calendar_id: str,
+    session_mode: str,
 ) -> np.ndarray:
     """Map one calendar-owned period start back to every observation."""
     _, first_positions, inverse = np.unique(
@@ -851,7 +857,10 @@ def _canonical_period_start_flags(
         return_inverse=True,
     )
     canonical_by_period = pd.DatetimeIndex(
-        [period_start(index[position], timeframe, calendar_id) for position in first_positions]
+        [
+            period_start(index[position], timeframe, calendar_id, session_mode=session_mode)
+            for position in first_positions
+        ]
     )
     return np.asarray(index == canonical_by_period.take(inverse), dtype=np.bool_)
 
@@ -876,7 +885,9 @@ def _is_exact_weekly_prefix(
     )
 
 
-def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) -> str:
+def _infer_symbol_timeframe(
+    index: pd.DatetimeIndex, calendar_id: str | None, session_mode: str
+) -> str:
     """Infer cadence from the complete per-symbol index."""
     if len(index) < _MIN_SESSION_CADENCE_SAMPLES:
         return infer_timeframe(index)
@@ -898,6 +909,7 @@ def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) ->
         month_ordinals,
         "MN1",
         calendar_id,
+        session_mode,
     )
     week_ordinals = pd.PeriodIndex(pd.to_datetime(labels), freq="W-SUN").asi8
     week_start_flags = _canonical_period_start_flags(
@@ -905,6 +917,7 @@ def _infer_symbol_timeframe(index: pd.DatetimeIndex, calendar_id: str | None) ->
         week_ordinals,
         "W1",
         calendar_id,
+        session_mode,
     )
 
     month_transition_start = _terminal_canonical_cadence_start(
@@ -956,6 +969,7 @@ def _intra_segment_timeframe(
     index: pd.DatetimeIndex,
     timeframe: str,
     calendar_id: str,
+    session_mode: str,
 ) -> str | None:
     """Cadence read from gaps between bars that share a segment.
 
@@ -964,7 +978,7 @@ def _intra_segment_timeframe(
     M210 at any declared size. Gaps inside a segment are clean. ``None`` when
     no adjacent pair shares a segment, which leaves nothing to infer from.
     """
-    closes = segment_closes(index, timeframe, calendar_id).asi8
+    closes = segment_closes(index, timeframe, calendar_id, session_mode=session_mode).asi8
     shared = (closes[1:] == closes[:-1]) & (closes[1:] != pd.NaT.value)
     if not shared.any():
         return None
@@ -1011,6 +1025,7 @@ def _resolve_data_timeframe(
             inferred_by_symbol[symbol] = _infer_symbol_timeframe(
                 index,
                 calendar_ids.get(symbol),
+                session_mode,
             )
         except ValueError as exc:
             raise ValueError(f"data symbol {symbol!r} {exc}") from exc
@@ -1034,6 +1049,7 @@ def _resolve_data_timeframe(
                 indexes_by_symbol[symbol],
                 expected,
                 calendar_id,
+                session_mode,
             )
             if observed is not None and observed != expected:
                 mismatches[symbol] = observed
@@ -1311,9 +1327,10 @@ class Backtest:
             resolved_session_mode = supplied_session_mode
         if resolved_session_mode is None:
             resolved_session_mode = "extended"
-        if resolved_session_mode not in ("regular", "extended"):
+        if resolved_session_mode not in MARKET_DATA_SESSION_MODES:
             raise ValueError(
-                f"session_mode must be 'regular' or 'extended', got {resolved_session_mode!r}"
+                f"session_mode must be one of {MARKET_DATA_SESSION_MODES}, "
+                f"got {resolved_session_mode!r}"
             )
         if (
             isinstance(initial_balance, bool)

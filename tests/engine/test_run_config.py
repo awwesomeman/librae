@@ -152,7 +152,7 @@ def test_market_data_session_mode_is_validated_and_part_of_cache_identity() -> N
     assert extended.config_hash == "d084869e34febd7fd71bea8ecf6bf3a8"
     assert extended.config_hash != regular.config_hash
     with pytest.raises(ValueError, match="session_mode"):
-        _config(session_mode="overnight")
+        _config(session_mode="premarket")
 
 
 def test_run_config_normalizes_and_validates_timeframe() -> None:

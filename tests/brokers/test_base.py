@@ -261,3 +261,50 @@ def test_validate_order_signal_accepts_explicit_market_order():
             "position_effect": "open",
         }
     )
+
+
+@pytest.mark.parametrize(
+    ("session_mode", "start", "close"),
+    [
+        ("regular", "2026-11-13 08:45", "2026-11-13 13:45"),
+        ("overnight", "2026-11-12 15:00", "2026-11-13 05:00"),
+        ("extended", "2026-11-12 15:00", "2026-11-13 13:45"),
+    ],
+)
+def test_a_taifex_daily_bar_settles_after_the_close_of_its_session_mode(
+    session_mode: str, start: str, close: str
+) -> None:
+    bars = pd.DataFrame({"ts": [pd.Timestamp(start, tz="Asia/Taipei")]})
+    stamped = with_settled_available_at(bars, "1d", "XTAIFEX", session_mode=session_mode)
+
+    assert stamped["available_at"].tolist() == [
+        pd.Timestamp(close, tz="Asia/Taipei") + SEGMENT_END_SETTLE
+    ]
+
+
+@pytest.mark.parametrize("session_mode", ["regular", "overnight"])
+def test_the_shioaji_adapter_refuses_a_mode_its_fetches_do_not_serve(session_mode: str) -> None:
+    shioaji = ShioajiAdapter.__new__(ShioajiAdapter)
+
+    with pytest.raises(ValueError, match="not served"):
+        shioaji.market_data_available_at(
+            pd.Timestamp("2026-11-05 08:45", tz="Asia/Taipei"),
+            "D1",
+            calendar_id="XTAIFEX",
+            session_mode=session_mode,
+        )
+
+
+@pytest.mark.parametrize("calendar_id", ["XTAIFEX", "XTAIFEX_1725"])
+def test_the_ibkr_adapter_takes_only_extended_bars_on_taifex(calendar_id: str) -> None:
+    ibkr = IBKRAdapter.__new__(IBKRAdapter)
+
+    with pytest.raises(ValueError, match="extended' only"):
+        ibkr.market_data_available_at(
+            pd.Timestamp("2026-11-05 08:45", tz="Asia/Taipei"),
+            "D1",
+            calendar_id=calendar_id,
+            session_mode="regular",
+        )
+    with pytest.raises(ValueError, match="extended' only"):
+        ibkr.fetch_ohlcv("TXF", "1d", session_mode="regular", calendar_id=calendar_id)

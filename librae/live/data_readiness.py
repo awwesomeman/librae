@@ -63,6 +63,7 @@ def check_staleness(
         timeframe=subscription.timeframe,
         calendar_id=subscription.calendar_id,
         grace=grace,
+        session_mode=subscription.session_mode,
     )
     if not status.calendar_anchored and subscription not in unanchored_reported:
         unanchored_reported.add(subscription)
