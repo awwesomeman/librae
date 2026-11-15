@@ -446,7 +446,7 @@ def test_upstream_xtai_still_has_no_saturday_session() -> None:
     assert not any(session.weekday() == 5 for session in upstream.sessions)
 
 
-# Saturdays in TAIFEX's daily futures records that quant-data's writers refused.
+# Saturdays in TAIFEX's daily futures records.
 _KNOWN_SATURDAY_SESSIONS = ["2006-10-14", "2007-03-03", "2007-04-14", "2010-02-06", "2012-02-04"]
 
 
@@ -459,6 +459,14 @@ def test_a_traded_saturday_is_a_session(calendar_id: str, day: str) -> None:
 
 def test_the_saturday_list_holds_only_saturdays() -> None:
     assert all(day.weekday() == 5 for day in _XTAI_SATURDAY_SESSIONS)
+
+
+def test_every_listed_saturday_and_no_other_is_a_session() -> None:
+    from librae.core.trading_calendar import _exchange_calendar
+
+    sessions = _exchange_calendar("XTAI").sessions
+    saturdays = {session.date() for session in sessions if session.weekday() == 5}
+    assert saturdays == set(_XTAI_SATURDAY_SESSIONS)
 
 
 def test_the_night_before_a_traded_saturday_belongs_to_it() -> None:
