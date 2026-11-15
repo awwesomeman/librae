@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
+from functools import cache
+from pathlib import Path
 
 import pandas as pd
 import pytest
 from librae.core.trading_calendar import (
-    _XTAI_CLOSURES_MISSING_UPSTREAM,
-    _XTAI_SATURDAY_SESSIONS,
+    _XTAI_OVERRIDES,
     TAIFEX_INDEX_CALENDAR,
     TAIFEX_LATE_OPEN_CALENDAR,
+    _exchange_calendar,
     bar_close,
     execution_session_label,
     next_segment_open_after,
@@ -83,26 +85,23 @@ def test_unknown_calendar_fails_explicitly() -> None:
 @pytest.mark.parametrize(
     ("calendar_id", "instant"),
     [
-        ("XNYS", "2000-01-04 14:30Z"),
-        ("XTAI", "2000-01-04 02:00Z"),
-        (TAIFEX_INDEX_CALENDAR, "2000-01-04 02:00Z"),
+        ("XNYS", "2000-01-05 14:30Z"),
+        ("XTAI", "2000-01-05 02:00Z"),
+        # A TAIFEX session's night segment opens on the session before it.
+        (TAIFEX_INDEX_CALENDAR, "2000-01-05 02:00Z"),
     ],
 )
 def test_calendars_reach_back_past_the_library_default(calendar_id: str, instant: str) -> None:
     """exchange_calendars builds only the last 20 years unless given a start."""
-    assert session_label(pd.Timestamp(instant), calendar_id) == date(2000, 1, 4)
+    assert session_label(pd.Timestamp(instant), calendar_id) == date(2000, 1, 5)
 
 
 def test_a_calendar_that_cannot_reach_back_that_far_starts_at_its_own_bound() -> None:
-    from librae.core.trading_calendar import _exchange_calendar
-
     calendar = _exchange_calendar("XSAU")  # holidays recorded from 2021 only
     assert calendar.first_session == calendar.sessions[calendar.sessions >= calendar.bound_min()][0]
 
 
 def test_xtai_and_the_taifex_calendars_share_one_calendar() -> None:
-    from librae.core.trading_calendar import _exchange_calendar
-
     xtai = _exchange_calendar("XTAI")
     assert _exchange_calendar(TAIFEX_INDEX_CALENDAR) is xtai
     assert _exchange_calendar(TAIFEX_LATE_OPEN_CALENDAR) is xtai
@@ -420,12 +419,57 @@ def test_next_segment_open_is_never_before_its_input(calendar_id: str) -> None:
         assert next_segment_open_after(instant, calendar_id) >= instant
 
 
-@pytest.mark.parametrize("closure", _XTAI_CLOSURES_MISSING_UPSTREAM)
-def test_announced_closures_missing_upstream_are_still_missing(closure: date) -> None:
-    """Once an exchange_calendars release has the date, drop it from the list."""
+def _traded_days() -> tuple[date, list[date]]:
+    """Last day the fixture covers, and every day the exchanges traded until then."""
+    days = []
+    for line in Path(__file__).with_name("xtai_trading_days.txt").read_text().splitlines():
+        if line and not line.startswith("#"):
+            month, *dates = line.split()
+            days += [date.fromisoformat(f"{month}-{day}") for day in dates]
+    return days[-1], days
+
+
+@pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR])
+def test_sessions_are_the_days_the_exchanges_traded(calendar_id: str) -> None:
+    last, traded = _traded_days()
+    sessions = _exchange_calendar(calendar_id).sessions
+    assert [session.date() for session in sessions[sessions <= pd.Timestamp(last)]] == traded
+
+
+@cache
+def _upstream_xtai():
+    from exchange_calendars.exchange_calendar_xtai import XTAIExchangeCalendar
+
+    last = max(row.day for row in _XTAI_OVERRIDES)
+    return XTAIExchangeCalendar(start="2000-01-01", end=last + timedelta(days=14))
+
+
+@pytest.mark.parametrize("row", _XTAI_OVERRIDES, ids=lambda row: f"{row.day}-{row.kind}")
+def test_an_override_is_still_missing_upstream(row) -> None:
+    """Once an exchange_calendars release has the row, drop it from the table."""
+    is_session = pd.Timestamp(row.day) in _upstream_xtai().sessions
+    assert is_session == (row.kind == "closed")
+
+
+@pytest.mark.parametrize("row", _XTAI_OVERRIDES, ids=lambda row: f"{row.day}-{row.kind}")
+def test_an_override_takes_effect(row) -> None:
+    is_session = pd.Timestamp(row.day) in _exchange_calendar("XTAI").sessions
+    assert is_session == (row.kind == "opened")
+
+
+def test_every_override_is_sourced_and_unique() -> None:
+    assert len({row.day for row in _XTAI_OVERRIDES}) == len(_XTAI_OVERRIDES)
+    for row in _XTAI_OVERRIDES:
+        assert row.sources, row
+        assert all(source.startswith("https://") for source in row.sources), row
+
+
+@pytest.mark.parametrize("calendar_id", ["XNYS", "XHKG"])
+def test_a_calendar_without_overrides_is_upstreams(calendar_id: str) -> None:
     import exchange_calendars as xcals
 
-    assert xcals.get_calendar("XTAI").is_session(pd.Timestamp(closure))
+    upstream = xcals.get_calendar(calendar_id, start="2000-01-01")
+    assert _exchange_calendar(calendar_id).schedule.equals(upstream.schedule)
 
 
 _ANNOUNCED_CLOSURES = ["2022-02-04 10:00", "2023-01-18 10:00", "2026-10-23 10:00"]
@@ -438,14 +482,6 @@ def test_an_announced_closure_is_not_a_session(calendar_id: str, instant: str) -
         session_label(_taipei(instant), calendar_id)
 
 
-def test_upstream_xtai_still_has_no_saturday_session() -> None:
-    """Once an exchange_calendars release trades Saturdays, drop the override."""
-    from exchange_calendars.exchange_calendar_xtai import XTAIExchangeCalendar
-
-    upstream = XTAIExchangeCalendar(start="2000-01-01")
-    assert not any(session.weekday() == 5 for session in upstream.sessions)
-
-
 # Saturdays in TAIFEX's daily futures records.
 _KNOWN_SATURDAY_SESSIONS = ["2006-10-14", "2007-03-03", "2007-04-14", "2010-02-06", "2012-02-04"]
 
@@ -453,20 +489,7 @@ _KNOWN_SATURDAY_SESSIONS = ["2006-10-14", "2007-03-03", "2007-04-14", "2010-02-0
 @pytest.mark.parametrize("day", _KNOWN_SATURDAY_SESSIONS)
 @pytest.mark.parametrize("calendar_id", ["XTAI", TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR])
 def test_a_traded_saturday_is_a_session(calendar_id: str, day: str) -> None:
-    assert date.fromisoformat(day) in _XTAI_SATURDAY_SESSIONS
     assert session_label(_taipei(f"{day} 10:00"), calendar_id) == date.fromisoformat(day)
-
-
-def test_the_saturday_list_holds_only_saturdays() -> None:
-    assert all(day.weekday() == 5 for day in _XTAI_SATURDAY_SESSIONS)
-
-
-def test_every_listed_saturday_and_no_other_is_a_session() -> None:
-    from librae.core.trading_calendar import _exchange_calendar
-
-    sessions = _exchange_calendar("XTAI").sessions
-    saturdays = {session.date() for session in sessions if session.weekday() == 5}
-    assert saturdays == set(_XTAI_SATURDAY_SESSIONS)
 
 
 def test_the_night_before_a_traded_saturday_belongs_to_it() -> None:

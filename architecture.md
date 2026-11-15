@@ -451,12 +451,13 @@ librae/
 
 `librae/core/trading_calendar.py` owns session labels and session-aligned
 resampling; `librae/core/liquidity.py` owns lagged completed-session ADV.
-Holidays come from `exchange_calendars`, which keeps ad-hoc closures too;
-Librae adds only an announced closure that no release has yet, citing the
-exchange's announcement, and drops it once a release has it. Missing closures
-are reported upstream rather than kept here. XTAI also carries the Saturdays
-TWSE and TAIFEX traded, which the upstream weekday-only XTAI cannot express,
-citing the exchanges' daily records.
+Sessions come from `exchange_calendars`; the TAIFEX calendars' hours are
+defined by Librae. Where TWSE or TAIFEX departs from those sessions, a row in
+`_XTAI_OVERRIDES` in that module closes a day or opens one (a weekend day
+included) for XTAI and the TAIFEX calendars, which trade its sessions. A row
+cites the exchange's announcement or the daily record that shows the day.
+Report it upstream, and delete it once a release includes it; a test fails
+until then.
 Neither belongs in a broker adapter or strategy. `librae/config/symbols.py`
 owns each instrument's `calendar_id`. Package dependencies follow
 [Product position and system boundaries](#product-position-and-system-boundaries).
