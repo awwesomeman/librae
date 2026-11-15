@@ -199,7 +199,13 @@ class ShioajiAdapter:
         session_mode: str,
     ) -> pd.Timestamp:
         """When the bar at ``ts`` is safe to observe: the ``available_at`` a
-        fetch stamps on it (``settled_available_at``)."""
+        fetch stamps on it (``settled_available_at``).
+
+        A fetch serves every segment, so only ``extended`` bars are its."""
+        if session_mode != "extended":
+            raise ValueError(
+                f"Shioaji bars carry every session; session_mode={session_mode!r} is not served"
+            )
         return settled_available_at(ts, timeframe, calendar_id)
 
     def __init__(

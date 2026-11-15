@@ -42,6 +42,7 @@ from librae.core.market_data import (
     validate_bar_starts,
     validate_ohlcv_values,
 )
+from librae.core.run_config import MARKET_DATA_SESSION_MODES
 from librae.core.utils import to_canonical
 from librae.db import _bounded_statements, _storable_text, get_conn
 from librae.db.schema import require_current_schema
@@ -205,7 +206,7 @@ def write_run_metadata(
     if execution_identity is not None:
         execution_identity = ExecutionIdentity.from_dict(execution_identity).to_dict()
     timeframe = to_canonical(timeframe)
-    if session_mode not in ("regular", "extended"):
+    if session_mode not in MARKET_DATA_SESSION_MODES:
         raise ValueError(f"invalid market-data session mode: {session_mode!r}")
     subscriptions = _normalize_primary_subscriptions(
         symbols,

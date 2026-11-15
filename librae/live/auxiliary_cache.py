@@ -109,6 +109,7 @@ def _fetch_due(
             last_ts,
             timeframe=subscription.timeframe,
             calendar_id=subscription.calendar_id,
+            session_mode=subscription.session_mode,
         )
     except ValueError:
         return True
@@ -154,6 +155,7 @@ def _check_freshness(
         timeframe=subscription.timeframe,
         calendar_id=subscription.calendar_id,
         grace=staleness_grace(subscription),
+        session_mode=subscription.session_mode,
     )
     was_stale = stale_alerted.get(subscription, False)
     if not status.fresh and not was_stale:

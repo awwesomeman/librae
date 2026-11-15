@@ -353,19 +353,43 @@ def test_normalize_bars_derives_real_calendar_period_close(
     assert result["available_at"].tolist() == list(pd.to_datetime(expected, utc=True))
 
 
-@pytest.mark.parametrize("session_mode", ("regular", "extended"))
-def test_taifex_calendar_bar_derives_the_same_close_in_both_session_modes(
-    session_mode: str,
-) -> None:
-    """The shape ``ShioajiAdapter.fetch_ohlcv('TXFR1', '1d')`` returns.
+@pytest.mark.parametrize("calendar_id", ("XNYS", "24/7"))
+def test_an_overnight_subscription_needs_a_calendar_that_defines_them(calendar_id: str) -> None:
+    with pytest.raises(ValueError, match="overnight"):
+        _subscription(timeframe="D1", calendar_id=calendar_id, session_mode="overnight")
 
-    Librae writes the TAIFEX night and day segments itself, so the extended
-    day is the calendar. The second bar opens Friday night and closes at
-    Monday's day-session close, crossing the weekend.
-    """
-    data = _bars(
-        pd.DatetimeIndex(pd.to_datetime(["2026-09-17T07:00:00Z", "2026-09-18T07:00:00Z"], utc=True))
-    )
+
+@pytest.mark.parametrize(
+    ("session_mode", "starts", "closes"),
+    [
+        # Librae writes the TAIFEX night and day segments itself, so the
+        # extended day is the calendar. The second bar opens Friday night and
+        # closes at Monday's day-session close, crossing the weekend.
+        (
+            "extended",
+            ["2026-09-17T07:00:00Z", "2026-09-18T07:00:00Z"],
+            ["2026-09-18T05:45:00Z", "2026-09-21T05:45:00Z"],
+        ),
+        # The day segment alone: 08:45 to 13:45 Taipei.
+        (
+            "regular",
+            ["2026-09-18T00:45:00Z", "2026-09-21T00:45:00Z"],
+            ["2026-09-18T05:45:00Z", "2026-09-21T05:45:00Z"],
+        ),
+        # The night segment alone, closing 05:00 Taipei the next calendar day.
+        (
+            "overnight",
+            ["2026-09-17T07:00:00Z", "2026-09-18T07:00:00Z"],
+            ["2026-09-17T21:00:00Z", "2026-09-18T21:00:00Z"],
+        ),
+    ],
+)
+def test_taifex_calendar_bar_derives_the_close_of_its_session_mode(
+    session_mode: str, starts: list[str], closes: list[str]
+) -> None:
+    """The shape ``ShioajiAdapter.fetch_ohlcv('TXFR1', '1d')`` returns, and
+    the day and night series of a daily futures report."""
+    data = _bars(pd.DatetimeIndex(pd.to_datetime(starts, utc=True)))
 
     result = normalize_bars(
         data,
@@ -377,9 +401,22 @@ def test_taifex_calendar_bar_derives_the_same_close_in_both_session_modes(
         ),
     )
 
-    assert result["available_at"].tolist() == list(
-        pd.to_datetime(["2026-09-18T05:45:00Z", "2026-09-21T05:45:00Z"], utc=True)
+    assert result["available_at"].tolist() == list(pd.to_datetime(closes, utc=True))
+
+
+def test_a_regular_taifex_bar_stamped_at_the_night_open_is_refused() -> None:
+    data = _bars(
+        pd.DatetimeIndex(pd.to_datetime(["2026-09-17T07:00:00Z", "2026-09-18T07:00:00Z"], utc=True))
     )
+
+    with pytest.raises(ValueError, match="not the canonical timeframe=D1 period starts"):
+        normalize_bars(
+            data,
+            symbol="AAA",
+            subscription=_subscription(
+                timeframe="D1", calendar_id="XTAIFEX", session_mode="regular"
+            ),
+        )
 
 
 _REGULAR_ONLY_REFUSAL = "calendar_id='XNYS' describes only its regular sessions"

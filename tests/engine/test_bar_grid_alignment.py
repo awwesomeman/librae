@@ -74,6 +74,10 @@ def _subscription(symbol: str, timeframe: str, calendar_id: str, session_mode: s
             [("M5", "24/7", "extended"), ("M5", "XNYS", "extended")],
             id="extended XNYS opens on the five-minute clock grid",
         ),
+        pytest.param(
+            [("D1", "XTAIFEX", "regular"), ("D1", "XTAIFEX_1725", "regular")],
+            id="both TAIFEX calendars trade one day segment",
+        ),
     ],
 )
 def test_aligned_grids_are_accepted(grids: list[tuple[str, str, str]]) -> None:
@@ -106,6 +110,14 @@ def test_aligned_grids_are_accepted(grids: list[tuple[str, str, str]]) -> None:
         pytest.param(
             [("H1", "XTAIFEX", "extended"), ("H1", "XTAI", "extended")],
             id="TAIFEX hours start at a quarter to, TAIEX on the hour",
+        ),
+        pytest.param(
+            [("D1", "XTAIFEX", "overnight"), ("D1", "XTAIFEX_1725", "overnight")],
+            id="the TAIFEX nights open at 15:00 and 17:25",
+        ),
+        pytest.param(
+            [("D1", "XTAIFEX", "regular"), ("D1", "XTAI", "regular")],
+            id="the TAIFEX day segment opens before the TAIEX session",
         ),
     ],
 )

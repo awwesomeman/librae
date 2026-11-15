@@ -15,12 +15,16 @@ from librae.core.trading_calendar import (
     _session_segments,
     _session_table,
     bar_close,
+    bar_start_problem,
     execution_session_label,
     next_segment_open_after,
+    period_close,
+    period_start,
     resample_session_ohlcv,
     session_bounds,
     session_label,
     session_lookback_days,
+    validate_session_mode,
 )
 
 
@@ -620,12 +624,27 @@ def test_an_instant_outside_the_hours_then_in_force_is_out_of_session(
         session_label(_taipei(instant), calendar_id)
 
 
-@pytest.mark.parametrize("calendar_id", list(_SESSION_HOURS))
-def test_the_session_table_matches_each_sessions_segments(calendar_id: str) -> None:
-    table = _session_table(calendar_id)
-    for start in ("2000-12-20", "2017-05-05", "2017-09-25"):
-        for label in table.loc[date.fromisoformat(start) :].index[:15]:
-            segments = _session_segments(calendar_id, label)
+@pytest.mark.parametrize(
+    ("calendar_id", "session_mode"),
+    [
+        (calendar_id, session_mode)
+        for calendar_id in _SESSION_HOURS
+        for session_mode in ("regular", "extended", "overnight")
+        if session_mode != "overnight" or calendar_id.startswith("XTAIFEX")
+    ],
+)
+def test_the_session_table_matches_each_sessions_segments(
+    calendar_id: str, session_mode: str
+) -> None:
+    table = _session_table(calendar_id, session_mode)
+    sessions = _exchange_calendar(calendar_id).sessions
+    for start in ("2000-12-20", "2017-05-05", "2017-09-25", "2018-12-17"):
+        for session in sessions[sessions >= pd.Timestamp(start)][:15]:
+            label = session.date()
+            segments = _session_segments(calendar_id, label, session_mode)
+            if not segments:
+                assert label not in table.index, label
+                continue
             row = table.loc[label]
             later_open = None if pd.isna(row["later_open"]) else row["later_open"]
             assert (row["open"], row["close"]) == (segments[0][0], segments[-1][1]), label
@@ -644,3 +663,153 @@ def test_every_hours_row_is_sourced_and_in_order(calendar_id: str) -> None:
     for row in rows:
         assert row.sources, row
         assert all(source.startswith("https://") for source in row.sources), row
+
+
+# A TAIFEX daily bar in each session mode: an instant in the session, the bar
+# start and its close (Taipei). ``None`` when the session has no segment in the
+# mode, so no bar of that series holds it.
+_TAIFEX_DAILY_BARS = [
+    # Before 2001: 09:00-12:15, and no night.
+    ("regular", "2000-12-29 10:00", ("2000-12-29 09:00", "2000-12-29 12:15")),
+    ("extended", "2000-12-29 10:00", ("2000-12-29 09:00", "2000-12-29 12:15")),
+    ("overnight", "2000-12-29 10:00", None),
+    ("regular", "2001-01-02 10:00", ("2001-01-02 08:45", "2001-01-02 13:45")),
+    # The first night opened at 15:00 on 2017-05-15 and counts toward 05-16.
+    ("overnight", "2017-05-15 10:00", None),
+    ("overnight", "2017-05-15 15:30", ("2017-05-15 15:00", "2017-05-16 05:00")),
+    ("regular", "2017-05-15 15:30", ("2017-05-16 08:45", "2017-05-16 13:45")),
+    ("extended", "2017-05-15 15:30", ("2017-05-15 15:00", "2017-05-16 13:45")),
+    ("extended", "2017-05-16 09:00", ("2017-05-15 15:00", "2017-05-16 13:45")),
+    # A traded Saturday keeps the Friday night; no night opens on it, so the
+    # Monday after has a day segment only.
+    ("overnight", "2018-12-21 16:00", ("2018-12-21 15:00", "2018-12-22 05:00")),
+    ("regular", "2018-12-22 10:00", ("2018-12-22 08:45", "2018-12-22 13:45")),
+    ("overnight", "2018-12-24 09:00", None),
+    ("extended", "2018-12-24 09:00", ("2018-12-24 08:45", "2018-12-24 13:45")),
+    # Closed Friday 2026-07-10: the Thursday night counts toward Monday and
+    # still closes at 05:00 the next calendar day.
+    ("overnight", "2026-07-09 20:00", ("2026-07-09 15:00", "2026-07-10 05:00")),
+    ("regular", "2026-07-13 09:00", ("2026-07-13 08:45", "2026-07-13 13:45")),
+    ("extended", "2026-07-09 20:00", ("2026-07-09 15:00", "2026-07-13 13:45")),
+]
+
+
+@pytest.mark.parametrize(("session_mode", "instant", "bar"), _TAIFEX_DAILY_BARS)
+def test_a_taifex_daily_bar_holds_the_segments_of_its_session_mode(
+    session_mode: str, instant: str, bar: tuple[str, str] | None
+) -> None:
+    timestamp = _taipei(instant)
+    if bar is None:
+        with pytest.raises(ValueError, match=f"no {session_mode} segment"):
+            period_start(timestamp, "D1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode)
+        return
+    start, close = (_taipei(value) for value in bar)
+    assert period_start(timestamp, "D1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode) == start
+    assert period_close(start, "D1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode) == close
+    assert bar_start_problem(start, "D1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode) is None
+    # The bar is labelled with its trading day in every mode.
+    assert session_label(start, TAIFEX_INDEX_CALENDAR) == session_label(
+        timestamp, TAIFEX_INDEX_CALENDAR
+    )
+
+
+def test_the_late_open_calendar_has_its_own_night() -> None:
+    start = period_start(
+        _taipei("2017-05-15 18:00"), "D1", TAIFEX_LATE_OPEN_CALENDAR, session_mode="overnight"
+    )
+    assert start == _taipei("2017-05-15 17:25")
+    assert period_close(
+        start, "D1", TAIFEX_LATE_OPEN_CALENDAR, session_mode="overnight"
+    ) == _taipei("2017-05-16 05:00")
+
+
+@pytest.mark.parametrize(
+    ("session_mode", "stamp", "problem"),
+    [
+        ("regular", "2026-11-12 08:45", None),
+        ("regular", "2026-11-11 15:00", "its D1 bar starts at 2026-11-12T00:45:00+00:00"),
+        ("overnight", "2026-11-11 15:00", None),
+        ("overnight", "2026-11-12 08:45", "its D1 bar starts at 2026-11-11T07:00:00+00:00"),
+        ("extended", "2026-11-11 15:00", None),
+        ("extended", "2026-11-12 08:45", "its D1 bar starts at 2026-11-11T07:00:00+00:00"),
+    ],
+)
+def test_a_taifex_daily_bar_starts_where_its_session_mode_opens(
+    session_mode: str, stamp: str, problem: str | None
+) -> None:
+    assert (
+        bar_start_problem(_taipei(stamp), "D1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode)
+        == problem
+    )
+
+
+@pytest.mark.parametrize(
+    ("session_mode", "stamp"),
+    [("regular", "2026-11-11 20:00"), ("overnight", "2026-11-12 09:00")],
+)
+def test_an_intraday_bar_outside_the_modes_segments_is_refused(
+    session_mode: str, stamp: str
+) -> None:
+    timestamp = _taipei(stamp)
+    assert (
+        bar_start_problem(timestamp, "M1", TAIFEX_INDEX_CALENDAR, session_mode="extended") is None
+    )
+    assert (
+        bar_start_problem(timestamp, "M1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode)
+        == "outside the XTAIFEX trading sessions"
+    )
+
+
+def test_a_contracts_settlement_day_has_a_day_bar_and_the_night_before_it() -> None:
+    """The expiring contract stops trading in its settlement day's day
+    segment, so its last night is the one before; the night that opens on the
+    settlement day counts toward the next session. The calendar carries no
+    contract, so the expiring contract's earlier last-trade close is not here."""
+    from librae.core.taifex import taifex_final_settlement_day
+
+    settlement = taifex_final_settlement_day("202611")
+    assert settlement == date(2026, 11, 18)
+    day_bar = period_start(
+        _taipei("2026-11-18 10:00"), "D1", TAIFEX_INDEX_CALENDAR, session_mode="regular"
+    )
+    assert day_bar == _taipei("2026-11-18 08:45")
+    night_before = period_start(
+        _taipei("2026-11-18 10:00"), "D1", TAIFEX_INDEX_CALENDAR, session_mode="overnight"
+    )
+    assert night_before == _taipei("2026-11-17 15:00")
+    night_after = _taipei("2026-11-18 15:00")
+    assert session_label(night_after, TAIFEX_INDEX_CALENDAR) == date(2026, 11, 19)
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "instant", "start", "close"),
+    [
+        # The week of the 2018-12-22 Saturday: its first night is Monday's,
+        # which opens the Friday before, and its last is the Friday night the
+        # Saturday keeps.
+        ("W1", "2018-12-20 20:00", "2018-12-14 15:00", "2018-12-22 05:00"),
+        # May 2017's first night opened on 05-15. Its last session, 05-31,
+        # follows a holiday, so its night opened 05-26 and closed 05-27.
+        ("MN1", "2017-05-22 20:00", "2017-05-15 15:00", "2017-05-27 05:00"),
+    ],
+)
+def test_a_taifex_overnight_period_spans_the_nights_labelled_in_it(
+    timeframe: str, instant: str, start: str, close: str
+) -> None:
+    opened = period_start(
+        _taipei(instant), timeframe, TAIFEX_INDEX_CALENDAR, session_mode="overnight"
+    )
+    assert opened == _taipei(start)
+    assert period_close(
+        opened, timeframe, TAIFEX_INDEX_CALENDAR, session_mode="overnight"
+    ) == _taipei(close)
+
+
+@pytest.mark.parametrize("calendar_id", ["XNYS", "XTAI", "24/7"])
+def test_overnight_needs_a_calendar_that_defines_them(calendar_id: str) -> None:
+    with pytest.raises(ValueError, match="overnight"):
+        validate_session_mode(calendar_id, "overnight")
+    validate_session_mode(calendar_id, "regular")
+    validate_session_mode(TAIFEX_INDEX_CALENDAR, "overnight")
+    with pytest.raises(ValueError, match="session_mode must be one of"):
+        validate_session_mode(TAIFEX_INDEX_CALENDAR, "night")

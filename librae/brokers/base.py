@@ -91,22 +91,34 @@ def find_position(
 SEGMENT_END_SETTLE = pd.Timedelta(minutes=1)
 
 
-def _segment_end_settle(start: pd.Timestamp, canonical: str, calendar_id: str) -> pd.Timedelta:
+def _segment_end_settle(
+    start: pd.Timestamp, canonical: str, calendar_id: str, session_mode: str = "extended"
+) -> pd.Timedelta:
     """``SEGMENT_END_SETTLE`` for a bar that ends its trading segment, else zero."""
     from librae.core.readiness import next_expected_close
     from librae.core.trading_calendar import period_close, period_start
 
-    close_at = period_close(start, canonical, calendar_id)
+    close_at = period_close(start, canonical, calendar_id, session_mode=session_mode)
     following_close = pd.Timestamp(
-        next_expected_close(start.to_pydatetime(), timeframe=canonical, calendar_id=calendar_id)
+        next_expected_close(
+            start.to_pydatetime(),
+            timeframe=canonical,
+            calendar_id=calendar_id,
+            session_mode=session_mode,
+        )
     )
     following_start = period_start(
-        following_close - pd.Timedelta(1, unit="ns"), canonical, calendar_id
+        following_close - pd.Timedelta(1, unit="ns"),
+        canonical,
+        calendar_id,
+        session_mode=session_mode,
     )
     return SEGMENT_END_SETTLE if following_start > close_at else pd.Timedelta(0)
 
 
-def settled_available_at(ts: object, timeframe: str, calendar_id: str) -> pd.Timestamp:
+def settled_available_at(
+    ts: object, timeframe: str, calendar_id: str, *, session_mode: str = "extended"
+) -> pd.Timestamp:
     """When the bar at ``ts`` is safe to observe under ``drop_incomplete_ohlcv``'s rule.
 
     Its close, or ``SEGMENT_END_SETTLE`` past it when it ends its trading
@@ -118,12 +130,14 @@ def settled_available_at(ts: object, timeframe: str, calendar_id: str) -> pd.Tim
 
     start = pd.Timestamp(ts)
     canonical = to_canonical(timeframe)
-    return period_close(start, canonical, calendar_id) + _segment_end_settle(
-        start, canonical, calendar_id
+    return period_close(start, canonical, calendar_id, session_mode=session_mode) + (
+        _segment_end_settle(start, canonical, calendar_id, session_mode)
     )
 
 
-def with_settled_available_at(df: pd.DataFrame, timeframe: str, calendar_id: str) -> pd.DataFrame:
+def with_settled_available_at(
+    df: pd.DataFrame, timeframe: str, calendar_id: str, *, session_mode: str = "extended"
+) -> pd.DataFrame:
     """``df`` with each bar's ``available_at`` from ``settled_available_at``.
 
     Intraday bars are stamped from their segment closes at once, since a long
@@ -140,15 +154,20 @@ def with_settled_available_at(df: pd.DataFrame, timeframe: str, calendar_id: str
     canonical = to_canonical(timeframe)
     starts = pd.DatetimeIndex(pd.to_datetime(stamped["ts"], utc=True))
     if not canonical.startswith(("M", "H")) or canonical.startswith("MN"):
-        available = [settled_available_at(start, canonical, calendar_id) for start in starts]
+        available = [
+            settled_available_at(start, canonical, calendar_id, session_mode=session_mode)
+            for start in starts
+        ]
         stamped["available_at"] = pd.DatetimeIndex(available, tz="UTC")
         return stamped
     nominal = starts + interval_to_timedelta(canonical)
-    segment_ends = segment_closes(starts, canonical, calendar_id)
+    segment_ends = segment_closes(starts, canonical, calendar_id, session_mode=session_mode)
     closes = nominal.where(segment_ends.isna() | (nominal <= segment_ends), segment_ends)
     available = closes.to_series(index=range(len(closes)))
     for position in np.flatnonzero(closes == segment_ends):
-        available.iloc[position] += _segment_end_settle(starts[position], canonical, calendar_id)
+        available.iloc[position] += _segment_end_settle(
+            starts[position], canonical, calendar_id, session_mode
+        )
     stamped["available_at"] = available.to_numpy()
     return stamped
 

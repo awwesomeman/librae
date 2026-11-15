@@ -46,6 +46,8 @@ from librae.config.symbols import (
 )
 from librae.core.run_config import MarketDataSessionMode
 from librae.core.trading_calendar import (
+    TAIFEX_INDEX_CALENDAR,
+    TAIFEX_LATE_OPEN_CALENDAR,
     next_session_open,
     session_bounds,
     session_label,
@@ -152,6 +154,26 @@ def _resolve_session_mode(
     return session_mode or legacy_mode or "extended"
 
 
+def _require_session_on_calendar(
+    calendar_id: str | None, session_mode: MarketDataSessionMode
+) -> None:
+    """Refuse a session mode whose bars this adapter cannot bound on ``calendar_id``.
+
+    On the TAIFEX calendars ``regular`` is the day segment alone, and whether
+    IBKR's ``useRTH`` hours are that segment is unverified, so only
+    ``extended``, every hour IBKR serves, is taken there.
+    """
+    if session_mode != "extended" and calendar_id in (
+        TAIFEX_INDEX_CALENDAR,
+        TAIFEX_LATE_OPEN_CALENDAR,
+    ):
+        raise ValueError(
+            f"IBKR bars on {calendar_id} support session_mode='extended' only, "
+            f"got {session_mode!r}: whether IBKR's regular trading hours are the "
+            "TAIFEX day segment is unverified"
+        )
+
+
 def _ibkr_session_date(value: object) -> date:
     """Parse IBKR's date-only daily-bar label without treating it as UTC."""
     if isinstance(value, datetime):
@@ -177,7 +199,9 @@ def _normalize_daily_bars(
 ) -> pd.DataFrame:
     """Anchor IBKR date labels and attach a conservative usability bound."""
     session_dates = frame["date"].map(_ibkr_session_date)
-    bounds = [session_bounds(label, calendar_id) for label in session_dates]
+    bounds = [
+        session_bounds(label, calendar_id, session_mode=session_mode) for label in session_dates
+    ]
     frame = frame.copy()
     frame["session_date"] = session_dates
     frame["ts"] = pd.DatetimeIndex([opened_at for opened_at, _ in bounds])
@@ -192,7 +216,7 @@ def _daily_available_at(
 ) -> pd.Timestamp:
     """When a daily bar of session ``label`` may be used."""
     if session_mode == "regular":
-        return session_bounds(label, calendar_id)[1]
+        return session_bounds(label, calendar_id, session_mode=session_mode)[1]
     # The generic exchange calendar owns regular-session geometry, not
     # vendor-specific pre/post-market hours. Waiting until the following
     # session opens is conservative and prevents a partial extended-hours
@@ -318,11 +342,12 @@ class IBKRAdapter:
     ) -> pd.Timestamp:
         """When the bar at ``ts`` is safe to observe: the ``available_at`` a
         fetch stamps on it, or the nominal close of an extended intraday bar."""
+        _require_session_on_calendar(calendar_id, session_mode)
         canonical = to_canonical(timeframe)
         if canonical == "D1":
             return _daily_available_at(session_label(ts, calendar_id), calendar_id, session_mode)
         if session_mode == "regular":
-            return settled_available_at(ts, canonical, calendar_id)
+            return settled_available_at(ts, canonical, calendar_id, session_mode=session_mode)
         return pd.Timestamp(ts) + interval_to_timedelta(canonical)
 
     def __init__(
@@ -591,6 +616,7 @@ class IBKRAdapter:
         """
         bar_size = _to_bar_size(timeframe)
         resolved_session_mode = _resolve_session_mode(session_mode, use_rth)
+        _require_session_on_calendar(calendar_id, resolved_session_mode)
         if security_type == "FUT" and timeframe in _NATIVE_CALENDAR_TIMEFRAMES:
             raise NotImplementedError(
                 "IBKR native calendar-sized futures bars may use settlement values "
@@ -698,7 +724,9 @@ class IBKRAdapter:
                 calendar_id=completion_calendar,
             )
         if timeframe != "1d" and resolved_session_mode == "regular" and calendar_id is not None:
-            df = with_settled_available_at(df, timeframe, calendar_id)
+            df = with_settled_available_at(
+                df, timeframe, calendar_id, session_mode=resolved_session_mode
+            )
         return df.reset_index(drop=True)
 
     # ------------------------------------------------------------------
