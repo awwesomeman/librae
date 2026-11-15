@@ -600,8 +600,8 @@ bars with the calendar-aware period boundaries instead.
 Calendars own session labeling and resampling boundaries only. The engine
 still does not manufacture bars or infer suspensions, vendor outages,
 settlement days, or missing observations. The current TAIFEX implementation
-uses XTAI trading dates as its holiday-session source, including the announced
-closures Librae adds ahead of an `exchange_calendars` release (see
+uses XTAI trading dates as its holiday-session source, including the days
+Librae corrects ahead of an `exchange_calendars` release (see
 [Layout](../../architecture.md#layout)); users requiring a
 product-specific exceptional closure must provide already filtered data.
 Cross-market baskets must provide coherent event labels; broker submissions

@@ -8,10 +8,11 @@ cannot do that for markets whose trading day begins on a prior calendar day.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, time, timedelta
 from functools import cache
 from math import ceil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
@@ -72,89 +73,151 @@ def _exchange_calendar(calendar_id: str) -> ExchangeCalendar:
         return xcals.get_calendar(exchange_id, start=earliest)
 
 
-# Closures TWSE and TAIFEX announced that exchange_calendars' XTAI does not
-# have. A date leaves this list once a release has it; a test fails when that
-# happens. Sources, TWSE then TAIFEX where TAIFEX published its own notice:
-# 2022-02-04 https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20220101&response=json
-#            (adjusted holiday, no trading and no settlement)
-# 2023-01-18 https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20230101&response=json
-#            (no trading, settlement only)
-# 2024-10-31 https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69236c2e30192dd5179bc0327.pdf
-#            https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=15446
-# 2026-07-10 https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69ef76943019f46cb86ae0110.pdf
-#            https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=17137
-# 2026-10-23 https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d6a0fa351b01a1638507940202.pdf
-#            https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=17441
-_XTAI_CLOSURES_MISSING_UPSTREAM = (
-    date(2022, 2, 4),
-    date(2023, 1, 18),
-    date(2024, 10, 31),
-    date(2026, 7, 10),
-    date(2026, 10, 23),
-)
+@dataclass(frozen=True)
+class _Override:
+    """A day on which XTAI departs from ``exchange_calendars``: ``closed`` has
+    no session, ``opened`` is a session, a weekend day included."""
+
+    day: date
+    kind: Literal["closed", "opened"]
+    sources: tuple[str, ...]
 
 
-# Saturdays TWSE and TAIFEX traded: alternate Saturdays until 2001, then
-# Saturdays made workdays to bridge a holiday. exchange_calendars' XTAI trades
-# Monday to Friday only. Each date is in both exchanges' daily records, which
-# list every trading day, and no other weekend day is:
-#   TWSE   https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date=20100201&response=json
-#   TAIFEX https://www.taifex.com.tw/cht/3/futDataDown (TX, one month per query)
-# From 2004-10-15, the earliest TWSE serves, its minute index shows each of
-# these Saturdays trading the regular 09:00-13:30:
-#   https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX?date=20100206&response=json
-# The sessions take the calendar's regular hours; no hours before 2001 are
-# modelled, weekday or Saturday.
-_XTAI_SATURDAY_SESSIONS = (
-    date(2000, 1, 15),
-    date(2000, 1, 29),
-    date(2000, 2, 19),
-    date(2000, 3, 4),
-    date(2000, 4, 1),
-    date(2000, 4, 8),
-    date(2000, 4, 15),
-    date(2000, 4, 29),
-    date(2000, 5, 6),
-    date(2000, 5, 20),
-    date(2000, 6, 3),
-    date(2000, 6, 17),
-    date(2000, 7, 15),
-    date(2000, 7, 29),
-    date(2000, 8, 5),
-    date(2000, 8, 19),
-    date(2000, 9, 2),
-    date(2000, 9, 16),
-    date(2000, 9, 30),
-    date(2000, 10, 7),
-    date(2000, 10, 21),
-    date(2000, 11, 4),
-    date(2000, 11, 18),
-    date(2000, 12, 2),
-    date(2000, 12, 16),
-    date(2000, 12, 30),
-    date(2006, 10, 14),
-    date(2007, 3, 3),
-    date(2007, 4, 14),
-    date(2007, 6, 23),
-    date(2007, 9, 29),
-    date(2009, 1, 10),
-    date(2009, 1, 17),
-    date(2009, 6, 6),
-    date(2010, 2, 6),
-    date(2012, 2, 4),
-    date(2012, 3, 3),
-    date(2012, 12, 22),
-    date(2013, 2, 23),
-    date(2013, 9, 14),
-    date(2014, 12, 27),
-    date(2016, 1, 30),
-    date(2016, 6, 4),
-    date(2016, 9, 10),
-    date(2017, 2, 18),
-    date(2017, 6, 3),
-    date(2017, 9, 30),
-    date(2018, 3, 31),
-    date(2018, 12, 22),
+def _row(day: str, kind: Literal["closed", "opened"], *sources: str) -> _Override:
+    return _Override(date.fromisoformat(day), kind, sources)
+
+
+def _recorded(day: str, kind: Literal["closed", "opened"]) -> _Override:
+    """A row whose source is TWSE's daily market record for the day's month,
+    which lists every day it traded. TAIFEX's daily futures record
+    (https://www.taifex.com.tw/cht/3/futDataDown, TX, one month per query)
+    lists the same days."""
+    month = day[:7].replace("-", "")
+    record = f"https://www.twse.com.tw/rwd/zh/afterTrading/FMTQIK?date={month}01&response=json"
+    return _row(day, kind, record)
+
+
+# Every day on which XTAI departs from exchange_calendars; the TAIFEX calendars
+# trade XTAI's sessions, so they take these too. A row cites the exchange's
+# announcement, or the daily record that shows the day traded or not, and
+# leaves once an exchange_calendars release has it: a test fails then.
+#
+# The Saturdays are the alternate Saturdays TWSE traded until 2001, then
+# Saturdays made workdays to bridge a holiday. From 2004-10-15, the earliest
+# TWSE serves, its minute index shows each trading the regular 09:00-13:30
+# (https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX?date=20100206&response=json);
+# no hours before 2001 are modelled, weekday or Saturday.
+_XTAI_OVERRIDES = (
+    _recorded("2000-01-03", "closed"),
+    _recorded("2000-01-15", "opened"),
+    _recorded("2000-01-29", "opened"),
+    _recorded("2000-02-02", "closed"),
+    _recorded("2000-02-09", "opened"),
+    _recorded("2000-02-19", "opened"),
+    _recorded("2000-03-04", "opened"),
+    _recorded("2000-04-01", "opened"),
+    _recorded("2000-04-03", "closed"),
+    _recorded("2000-04-08", "opened"),
+    _recorded("2000-04-15", "opened"),
+    _recorded("2000-04-29", "opened"),
+    _recorded("2000-05-06", "opened"),
+    _recorded("2000-05-20", "opened"),
+    _recorded("2000-06-03", "opened"),
+    _recorded("2000-06-17", "opened"),
+    _recorded("2000-07-15", "opened"),
+    _recorded("2000-07-29", "opened"),
+    _recorded("2000-08-05", "opened"),
+    _recorded("2000-08-19", "opened"),
+    _recorded("2000-08-23", "closed"),
+    _recorded("2000-09-02", "opened"),
+    _recorded("2000-09-16", "opened"),
+    _recorded("2000-09-30", "opened"),
+    _recorded("2000-10-07", "opened"),
+    _recorded("2000-10-21", "opened"),
+    _recorded("2000-11-04", "opened"),
+    _recorded("2000-11-18", "opened"),
+    _recorded("2000-12-02", "opened"),
+    _recorded("2000-12-16", "opened"),
+    _recorded("2000-12-25", "closed"),
+    _recorded("2000-12-30", "opened"),
+    _recorded("2001-01-19", "closed"),
+    _recorded("2001-07-30", "closed"),
+    _recorded("2001-09-12", "closed"),
+    _recorded("2001-09-17", "closed"),
+    _recorded("2001-09-18", "closed"),
+    _recorded("2005-05-02", "closed"),
+    _recorded("2006-10-14", "opened"),
+    _recorded("2007-03-03", "opened"),
+    _recorded("2007-04-14", "opened"),
+    _recorded("2007-06-23", "opened"),
+    _recorded("2007-09-29", "opened"),
+    _recorded("2009-01-10", "opened"),
+    _recorded("2009-01-17", "opened"),
+    _recorded("2009-06-06", "opened"),
+    _recorded("2010-02-06", "opened"),
+    _recorded("2011-05-02", "closed"),
+    _recorded("2012-02-04", "opened"),
+    _recorded("2012-03-03", "opened"),
+    _recorded("2012-12-22", "opened"),
+    _recorded("2013-02-23", "opened"),
+    _recorded("2013-09-14", "opened"),
+    _recorded("2014-12-27", "opened"),
+    _recorded("2016-01-30", "opened"),
+    _recorded("2016-06-04", "opened"),
+    _recorded("2016-09-10", "opened"),
+    _recorded("2017-02-18", "opened"),
+    _recorded("2017-06-03", "opened"),
+    _recorded("2017-09-30", "opened"),
+    _recorded("2018-03-31", "opened"),
+    _recorded("2018-12-22", "opened"),
+    _row(
+        "2022-02-04",
+        "closed",
+        "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20220101&response=json",
+    ),
+    _row(
+        "2023-01-18",
+        "closed",
+        "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20230101&response=json",
+    ),
+    _row(
+        "2024-10-31",
+        "closed",
+        "https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69236c2e30192dd5179bc0327.pdf",
+        "https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=15446",
+    ),
+    _row(
+        "2026-07-10",
+        "closed",
+        "https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69ef76943019f46cb86ae0110.pdf",
+        "https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=17137",
+    ),
+    _row(
+        "2026-10-23",
+        "closed",
+        "https://www.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d6a0fa351b01a1638507940202.pdf",
+        "https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=17441",
+    ),
+    _row(
+        "2027-02-02",
+        "closed",
+        "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20270101&response=json",
+    ),
+    _row(
+        "2027-02-03",
+        "closed",
+        "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20270101&response=json",
+    ),
+    _row(
+        "2027-04-06",
+        "closed",
+        "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20270101&response=json",
+    ),
+    _row(
+        "2027-12-24",
+        "closed",
+        "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?date=20270101&response=json",
+    ),
 )
 
 
@@ -163,20 +226,28 @@ def _xtai_calendar() -> ExchangeCalendar:
     """One instance shared by XTAI and the TAIFEX calendars, which use its sessions."""
     from exchange_calendars.exchange_calendar_xtai import XTAIExchangeCalendar
 
+    closed = [pd.Timestamp(row.day) for row in _XTAI_OVERRIDES if row.kind == "closed"]
+    opened = {pd.Timestamp(row.day) for row in _XTAI_OVERRIDES if row.kind == "opened"}
+    # A day of the week with an opened weekend row trades every week, and
+    # each such day without a row is an ad-hoc holiday. exchange_calendars' special
+    # weekmasks give the same sessions at several times the build cost.
+    weekend = {day.weekday() for day in opened if day.weekday() >= 5}
+    weekmask = "".join("1" if day < 5 or day in weekend else "0" for day in range(7))
+
     class _XTAI(XTAIExchangeCalendar):
         @property
         def weekmask(self) -> str:
-            # Saturdays are sessions so that the traded ones can be; every
-            # other Saturday is an ad-hoc holiday below.
-            return "1111110"
+            return weekmask
 
         @property
         def adhoc_holidays(self) -> list[pd.Timestamp]:
-            missing = [pd.Timestamp(day) for day in _XTAI_CLOSURES_MISSING_UPSTREAM]
-            traded = {pd.Timestamp(day) for day in _XTAI_SATURDAY_SESSIONS}
-            saturdays = pd.date_range(_CALENDAR_START, self.default_end(), freq="W-SAT")
-            idle = [day for day in saturdays if day not in traded]
-            return [*super().adhoc_holidays, *missing, *idle]
+            idle = [
+                day
+                for day in pd.date_range(_CALENDAR_START, self.default_end())
+                if day.weekday() in weekend and day not in opened
+            ]
+            kept = [day for day in super().adhoc_holidays if day not in opened]
+            return [*kept, *closed, *idle]
 
     return _XTAI(start=_CALENDAR_START)
 
