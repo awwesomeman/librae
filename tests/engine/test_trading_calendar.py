@@ -7,11 +7,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from librae.core.trading_calendar import (
+    _CANCELLED_NIGHTS,
     _SESSION_HOURS,
     _XTAI_OVERRIDES,
     TAIFEX_INDEX_CALENDAR,
     TAIFEX_LATE_OPEN_CALENDAR,
     _exchange_calendar,
+    _hours,
     _session_segments,
     _session_table,
     bar_close,
@@ -638,7 +640,7 @@ def test_the_session_table_matches_each_sessions_segments(
 ) -> None:
     table = _session_table(calendar_id, session_mode)
     sessions = _exchange_calendar(calendar_id).sessions
-    for start in ("2000-12-20", "2017-05-05", "2017-09-25", "2018-12-17"):
+    for start in ("2000-12-20", "2017-05-05", "2017-09-25", "2018-07-05", "2018-12-17"):
         for session in sessions[sessions >= pd.Timestamp(start)][:15]:
             label = session.date()
             segments = _session_segments(calendar_id, label, session_mode)
@@ -694,23 +696,82 @@ _TAIFEX_DAILY_BARS = [
 ]
 
 
-@pytest.mark.parametrize(("session_mode", "instant", "bar"), _TAIFEX_DAILY_BARS)
-def test_a_taifex_daily_bar_holds_the_segments_of_its_session_mode(
-    session_mode: str, instant: str, bar: tuple[str, str] | None
+def _assert_daily_bar(
+    calendar_id: str, session_mode: str, instant: str, bar: tuple[str, str] | None
 ) -> None:
     timestamp = _taipei(instant)
     if bar is None:
         with pytest.raises(ValueError, match=f"no {session_mode} segment"):
-            period_start(timestamp, "D1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode)
+            period_start(timestamp, "D1", calendar_id, session_mode=session_mode)
         return
     start, close = (_taipei(value) for value in bar)
-    assert period_start(timestamp, "D1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode) == start
-    assert period_close(start, "D1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode) == close
-    assert bar_start_problem(start, "D1", TAIFEX_INDEX_CALENDAR, session_mode=session_mode) is None
+    assert period_start(timestamp, "D1", calendar_id, session_mode=session_mode) == start
+    assert period_close(start, "D1", calendar_id, session_mode=session_mode) == close
+    assert bar_start_problem(start, "D1", calendar_id, session_mode=session_mode) is None
     # The bar is labelled with its trading day in every mode.
-    assert session_label(start, TAIFEX_INDEX_CALENDAR) == session_label(
-        timestamp, TAIFEX_INDEX_CALENDAR
-    )
+    assert session_label(start, calendar_id) == session_label(timestamp, calendar_id)
+
+
+@pytest.mark.parametrize(("session_mode", "instant", "bar"), _TAIFEX_DAILY_BARS)
+def test_a_taifex_daily_bar_holds_the_segments_of_its_session_mode(
+    session_mode: str, instant: str, bar: tuple[str, str] | None
+) -> None:
+    _assert_daily_bar(TAIFEX_INDEX_CALENDAR, session_mode, instant, bar)
+
+
+# TAIFEX cancelled the night of 2018-07-10; the session of 07-11 traded its day
+# segment only, and the nights either side of it ran. ``{night}`` is the
+# calendar's night open.
+_CANCELLED_NIGHT_BARS = [
+    ("overnight", "2018-07-10 09:00", ("2018-07-09 {night}", "2018-07-10 05:00")),
+    ("overnight", "2018-07-11 09:00", None),
+    ("regular", "2018-07-11 09:00", ("2018-07-11 08:45", "2018-07-11 13:45")),
+    ("extended", "2018-07-11 09:00", ("2018-07-11 08:45", "2018-07-11 13:45")),
+    ("overnight", "2018-07-11 20:00", ("2018-07-11 {night}", "2018-07-12 05:00")),
+    ("extended", "2018-07-11 20:00", ("2018-07-11 {night}", "2018-07-12 13:45")),
+]
+
+
+@pytest.mark.parametrize(
+    ("calendar_id", "night_open"),
+    [(TAIFEX_INDEX_CALENDAR, "15:00"), (TAIFEX_LATE_OPEN_CALENDAR, "17:25")],
+)
+@pytest.mark.parametrize(("session_mode", "instant", "bar"), _CANCELLED_NIGHT_BARS)
+def test_a_cancelled_night_is_missing_from_its_sessions_daily_bars(
+    calendar_id: str,
+    night_open: str,
+    session_mode: str,
+    instant: str,
+    bar: tuple[str, str] | None,
+) -> None:
+    resolved = None if bar is None else tuple(value.format(night=night_open) for value in bar)
+    _assert_daily_bar(calendar_id, session_mode, instant, resolved)
+
+
+def test_every_cancelled_night_is_sourced_and_precedes_a_session_with_a_night() -> None:
+    for day, sources in _CANCELLED_NIGHTS.items():
+        assert sources, day
+        assert all(source.startswith("https://") for source in sources), day
+        for calendar_id in (TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR):
+            sessions = _exchange_calendar(calendar_id).sessions
+            assert pd.Timestamp(day) in sessions, day
+            following = sessions[sessions.get_loc(pd.Timestamp(day)) + 1].date()
+            assert _hours(calendar_id, following).night is not None, day
+            # A weekday on which a night would open anyway, else the row is idle.
+            assert day.weekday() in _hours(calendar_id, day).night_weekdays, day
+
+
+@pytest.mark.parametrize("calendar_id", [TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR])
+def test_a_cancelled_night_leaves_its_session_the_day_segment_only(calendar_id: str) -> None:
+    label = date(2018, 7, 11)
+    assert _session_segments(calendar_id, label, "overnight") == ()
+    assert label not in _session_table(calendar_id, "overnight").index
+    (day,) = _session_segments(calendar_id, label, "regular")
+    assert _session_segments(calendar_id, label, "extended") == (day,)
+    assert _session_table(calendar_id, "extended").loc[label, "open"] == day[0]
+    # Neighbouring sessions keep their nights.
+    for neighbour in (date(2018, 7, 10), date(2018, 7, 12)):
+        assert len(_session_segments(calendar_id, neighbour, "overnight")) == 1
 
 
 def test_the_late_open_calendar_has_its_own_night() -> None:

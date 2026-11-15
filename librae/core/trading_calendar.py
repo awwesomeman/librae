@@ -222,6 +222,20 @@ _XTAI_OVERRIDES = (
 )
 
 
+# Evenings on which TAIFEX cancelled the night its hours row has (a typhoon
+# warning) while the session it belongs to still traded; that session keeps
+# its day segment only. The key is the date the night would have opened on,
+# the trading day before that session. A row cites the exchange's
+# announcement, and TAIFEX's per-date list of sessions
+# (https://www.taifex.com.tw/cht/3/getFutTradingSessionList.do?queryDate=YYYY/MM/DD,
+# dated by the trading day) has no after-hours entry, COMMODITY_MARKET_CODE 1,
+# for that session. A night lost together with its day is no session at all,
+# and a traded Saturday's own night is covered by the night weekdays.
+_CANCELLED_NIGHTS: dict[date, tuple[str, ...]] = {
+    date(2018, 7, 10): ("https://www.taifex.com.tw/cht/11/newsDetail?newsType=1&idx=8805",),
+}
+
+
 @dataclass(frozen=True)
 class _Hours:
     """A calendar's segment hours, local time, from ``start`` (None: from
@@ -307,6 +321,8 @@ def _hours(calendar_id: str, day: date) -> _Hours:
 
 def _night_opening(row: _Hours, day: date) -> tuple[time, time] | None:
     """Hours of the night segment that opens on trading day ``day``, if any."""
+    if day in _CANCELLED_NIGHTS:
+        return None
     return row.night if day.weekday() in row.night_weekdays else None
 
 
@@ -512,7 +528,7 @@ def _session_table(calendar_id: str, session_mode: str = "extended") -> pd.DataF
 
         day = _hours_positions(calendar_id, labels)
         night = _hours_positions(calendar_id, previous)
-        nights = [_night_opening(rows[i], on) for i, on in zip(night, previous, strict=True)]
+        nights = [_night_opening(rows[i], on.date()) for i, on in zip(night, previous, strict=True)]
         night_open = clocks([None if hours is None else hours[0] for hours in nights])
         night_close = clocks([None if hours is None else hours[1] for hours in nights])
         # Fixed Taipei clocks, which keep one UTC offset all year.

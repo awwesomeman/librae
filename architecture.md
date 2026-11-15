@@ -455,7 +455,8 @@ Sessions come from `exchange_calendars`; the hours of XTAI and the TAIFEX
 calendars come from `_SESSION_HOURS` in that module, rows of segment hours by
 the date they took effect, each citing the exchange's record of the change. A
 segment keeps the hours in force on the day it opens, so a TAIFEX session has
-a night segment only once the venue ran one. Where TWSE or TAIFEX departs
+a night segment only once the venue ran one; a night the venue cancelled while
+its session traded is a row in `_CANCELLED_NIGHTS`. Where TWSE or TAIFEX departs
 from those sessions, a row in `_XTAI_OVERRIDES` in that module closes a day or
 opens one (a weekend day included) for XTAI and the TAIFEX calendars, which
 trade its sessions. A row
