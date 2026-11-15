@@ -228,14 +228,17 @@ class _Hours:
     before its first session) until its next row.
 
     ``night`` opens on the trading day before the session it belongs to and
-    closes the next calendar day; None when there is no night segment. Each
-    segment keeps the hours in force on the day it opens.
+    closes the next calendar day; None when there is no night segment. It
+    opens only on a trading day whose weekday (Monday 0) is in
+    ``night_weekdays``. Each segment keeps the hours in force on the day it
+    opens.
     """
 
     start: date | None
     day: tuple[time, time]
     night: tuple[time, time] | None
     sources: tuple[str, ...]
+    night_weekdays: frozenset[int] = frozenset()
 
 
 _TWSE_HOURS_HISTORY = "https://www.twse.com.tw/staticFiles/product/publication/twse60/html/178/"
@@ -248,6 +251,11 @@ _TAIFEX_NIGHT_LAUNCH = (
     "1060418_%E7%9B%A4%E5%BE%8C%E4%B8%8A%E7%B7%9A%E6%97%A5%E6%9C%9F%E5%85%AC%E5%91%8A.pdf",
     "https://www.taifex.com.tw/chinese/event/afterhourstrading/index.asp",
 )
+# TAIFEX's daily futures report, queried by the session a night counts toward:
+# the TX report of each Monday after a bridging Saturday shows no after-hours
+# volume, so no night opened on a traded Saturday, while the night before it
+# traded and counts toward the Saturday.
+_TAIFEX_DAILY_REPORT = "https://www.taifex.com.tw/cht/3/futDailyMarketReport"
 
 
 def _taifex_hours(night_open: time) -> tuple[_Hours, ...]:
@@ -259,7 +267,8 @@ def _taifex_hours(night_open: time) -> tuple[_Hours, ...]:
             date(2017, 5, 15),
             (time(8, 45), time(13, 45)),
             (night_open, time(5, 0)),
-            (_TAIFEX_HOURS_HISTORY, *_TAIFEX_NIGHT_LAUNCH),
+            (_TAIFEX_HOURS_HISTORY, *_TAIFEX_NIGHT_LAUNCH, _TAIFEX_DAILY_REPORT),
+            night_weekdays=frozenset(range(5)),
         ),
     )
 
@@ -294,6 +303,11 @@ def _hours_positions(calendar_id: str, days: pd.DatetimeIndex) -> np.ndarray:
 def _hours(calendar_id: str, day: date) -> _Hours:
     rows = _SESSION_HOURS[calendar_id]
     return rows[int(_hours_positions(calendar_id, pd.DatetimeIndex([day]))[0])]
+
+
+def _night_opening(row: _Hours, day: date) -> tuple[time, time] | None:
+    """Hours of the night segment that opens on trading day ``day``, if any."""
+    return row.night if day.weekday() in row.night_weekdays else None
 
 
 @cache
@@ -472,7 +486,8 @@ def _session_table(calendar_id: str) -> pd.DataFrame:
 
         day = _hours_positions(calendar_id, labels)
         night = _hours_positions(calendar_id, previous)
-        night_open = clocks([rows[i].night[0] if rows[i].night else None for i in night])
+        nights = [_night_opening(rows[i], on) for i, on in zip(night, previous, strict=True)]
+        night_open = clocks([None if hours is None else hours[0] for hours in nights])
         # Fixed Taipei clocks, which keep one UTC offset all year.
         local = labels.tz_localize(_TAIPEI)
         day_open = (local + clocks([rows[i].day[0] for i in day])).tz_convert("UTC")
@@ -659,7 +674,7 @@ def _session_segments(
         if hours.night is None:
             return day
         previous_session = calendar.previous_session(session).date()
-        night = _hours(calendar_id, previous_session).night
+        night = _night_opening(_hours(calendar_id, previous_session), previous_session)
         if night is None:
             return day
         # The physical after-hours window always closes the calendar day after
