@@ -525,8 +525,8 @@ reads (below): an `extended` TAIFEX D1 bar is the previous night plus the day
 session, stamped at the night open; a `regular` one is the day segment,
 stamped at the day open; an `overnight` one is the night alone, stamped at
 the night open and closing at the night close. Each is labelled with the
-day-session date, and a session with no night (before TAIFEX opened one, or
-after a traded Saturday) has no `overnight` bar. The basis is TAIFEX's
+day-session date, and a session with no night (before TAIFEX opened one,
+after a traded Saturday, or on an evening TAIFEX cancelled it) has no `overnight` bar. The basis is TAIFEX's
 [after-hours trading Q&A](https://www.taifex.com.tw/file/taifex/CHINESE/4/AHTradeQA_ch.pdf)
 (2025-06-23 edition): Q3 assigns night-session trades to the next regular
 session, and Q11 publishes each session's prices separately. TradingView's
