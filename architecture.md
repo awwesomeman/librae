@@ -191,11 +191,10 @@ bars a batch feature reads for a symbol the event does not advance are stored
 only once a decision of that symbol reads them. A backtest
 records the exact subscriptions and range it used in `backtest_runs`; it
 copies its input bars only when saved with `store_bars=True`, for charts.
-Collected market data — its table (`ohlcv` by convention), its revisions, and
-its naming rule (exchange-native id plus `data_source` plus `instrument_type`)
-— belongs to the caller. A run's `symbol` is the engine's code for the
-instrument within that run, an alias the caller maps to its own naming, never
-a market-data key.
+Collected market data belongs to the caller, which owns its store, its
+revisions and how it names instruments. A run's `symbol` is the engine's alias
+for the instrument within that run, which the caller maps to its own naming;
+it is never a market-data key.
 
 Database-backed backtest reuse is opt-in. `config_hash` identifies resolved
 engine configuration only; it does not identify caller-owned strategy code or
@@ -776,7 +775,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `on_runtime_event` | `on_runtime_event(event)` — a `RuntimeEvent`; operational audit trail (state restoration, skipped decisions, halts, halt resets, group failures), not a fill. A halt, reset or group failure is offered only after it has happened, stamped with the wall clock, and a failed call for one is logged, never raised. One recorded while the checkpoint is failing is held in memory and offered once a checkpoint lands, so a sink on the same database does not drop it; shutdown offers it or logs it as dropped, and a crash before then loses it, even from a run that restores halted |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — audit projection; `bar` includes OHLCV, `available_at`, and `observed_at`, when the engine first received that version. Best-effort by default: a failed call is logged and not retried. A sink that declares `durable_ohlcv_delivery = True` instead gets at-least-once delivery — the row is queued in the checkpoint before it is offered and dropped only once the call returns, so a failed write or a crash replays it. Sinks must be idempotent either way, and the queue is bounded: reaching the bound drops loudly — each dropped identity is recorded and `ohlcv_audit_degraded` reports it — rather than halting the book for data that is re-fetchable |
 | `on_ohlcv_batch` | `on_ohlcv_batch(symbol, timeframe, bars)` — optional many-bar path of the same sink, `bars` being `(ts, bar)` pairs in ts order; the engine uses it for a decision's unrecorded window and a restart's re-read, which can run to thousands of bars, and otherwise sends them through `on_ohlcv` one by one. Only valid with `on_ohlcv`. Best-effort: a failure is logged and the rest skipped. A durable sink's queued rows also go through it, a run of one symbol's rows per call, so it must raise on a failed write as `on_ohlcv` does, and must declare `durable_ohlcv_delivery` as well: the constructor refuses one that does not |
-| `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price)`; exits pass an extra `signal_type="exit"` kwarg |
+| `on_signal_outcome` | `on_signal_outcome(symbol, ts, signal, price, inputs=...)`; exits pass an extra `signal_type="exit"` kwarg; `inputs` is the bar's validated [signal inputs](#signal-inputs) or None |
 | `on_heartbeat` | `on_heartbeat(run_id)` |
 | `on_performance` | `on_performance(run_id, account_id)` after a close/reduce/funding event and the current equity callback |
 | `warmup_fetcher` | `warmup_fetcher(symbol, tf_ccxt, limit) -> pd.DataFrame` |
@@ -833,7 +832,7 @@ tables and nothing else, and
 when a table has no such reader or writer.
 
 Everything else is the caller's, however many of the caller's projects share
-it: collected market data (`ohlcv`), third-party factors, ingestion coverage
+it: collected market data, third-party factors, ingestion coverage
 bookkeeping, inventories of what has been collected, a persisted instrument
 master (the engine resolves
 instruments from `librae.config.symbols`, never from a table),
@@ -943,6 +942,22 @@ when saved with `store_bars=True`.
 Forward return, MFE, and MAE are derived on demand by
 `compute_signal_outcomes()`, one symbol at a time, for local callers and the
 console alike; no derived outcome table is maintained.
+
+#### Signal inputs
+
+A row is a nonzero `entry_signal` or `exit_signal` feature value, in a backtest
+save and in sim/live alike. To record why, a strategy sets the same bar's
+`signal_inputs` feature column to a dict of the values the signal was decided
+from, for example `df["signal_inputs"] = df[["zscore", "atr"]].to_dict("records")`.
+
+- It is stored as given in `signal_events.inputs` (JSONB); a bar with no dict
+  stores NULL, and `timescale_reader.load_signal_events()` reads it back.
+- Keep it to a handful of scalars, not windows or series: it is written with
+  every signal.
+- Values are numbers, strings, booleans or None, under string keys. NaN is
+  stored as null; an infinite number or any other value is refused. A
+  backtest save raises before writing; sim and live log a warning and store
+  that signal without inputs, since an explanation must not stop trading.
 
 ### Handling quantity ambiguity
 

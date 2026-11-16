@@ -43,6 +43,7 @@ from librae.core.market_data import (
     validate_ohlcv_values,
 )
 from librae.core.run_config import MARKET_DATA_SESSION_MODES
+from librae.core.strategy import SIGNAL_INPUTS_COLUMN, validate_signal_inputs
 from librae.core.utils import to_canonical
 from librae.db import _bounded_statements, _storable_text, get_conn
 from librae.db.schema import require_current_schema
@@ -73,7 +74,7 @@ def _to_dt(ts: Any) -> datetime | None:
 
 _SIGNAL_INSERT_SQL = """INSERT INTO signal_events
            (ts, run_id, strategy_name, symbol, mode, timeframe,
-            signal_value, price, signal_type)
+            signal_value, price, signal_type, inputs)
            VALUES %s
            ON CONFLICT (ts, run_id, strategy_name, symbol, mode, timeframe, signal_type)
            DO NOTHING"""
@@ -145,6 +146,45 @@ def _extract_exit_signals(df: pd.DataFrame, symbol: str) -> pd.Series:
         return pd.Series(dtype=float)
     _, series = _extract_signals(df, symbol, "exit_signal")
     return series
+
+
+def _extract_signal_inputs(symbol_df: pd.DataFrame) -> pd.Series | None:
+    """The strategy's ``signal_inputs`` column for one symbol, if it has one."""
+    if SIGNAL_INPUTS_COLUMN not in symbol_df.columns:
+        return None
+    return symbol_df[SIGNAL_INPUTS_COLUMN]
+
+
+def _signal_inputs_json(value: object) -> str | None:
+    """One signal's inputs as the JSON stored in ``signal_events.inputs``."""
+    inputs = validate_signal_inputs(value)
+    return None if inputs is None else json.dumps(_storable_json(inputs), allow_nan=False)
+
+
+def _stored_signal_inputs(
+    symbol: str,
+    inputs: pd.Series | None,
+    *signals: pd.Series | None,
+) -> dict[Any, str | None]:
+    """The JSON to store with each signal timestamp, keyed by that timestamp.
+
+    Only bars that carry a signal are checked: inputs elsewhere are never
+    stored. Raises before any write, naming the bar, when one is malformed.
+    """
+    if inputs is None:
+        return {}
+    stored: dict[Any, str | None] = {}
+    for series in signals:
+        if series is None:
+            continue
+        for ts in series.index:
+            if ts in stored:
+                continue
+            try:
+                stored[ts] = _signal_inputs_json(inputs.get(ts))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{symbol} signal at {ts}: {exc}") from exc
+    return stored
 
 
 def _extract_signals(
@@ -358,6 +398,7 @@ def save_backtest_output(
     *,
     signal_series_by_symbol: Mapping[str, pd.Series] | None = None,
     exit_signal_series_by_symbol: Mapping[str, pd.Series] | None = None,
+    signal_inputs_by_symbol: Mapping[str, pd.Series] | None = None,
     params: dict | None = None,
     execution_policy: dict | None = None,
     risk_policy: dict | None = None,
@@ -374,6 +415,9 @@ def save_backtest_output(
         output: BacktestOutput to write.
         signal_series_by_symbol: Optional entry-signal series keyed by symbol.
         exit_signal_series_by_symbol: Optional exit-signal series keyed by symbol.
+        signal_inputs_by_symbol: Optional ``signal_inputs`` column keyed by
+            symbol, indexed like the signal series; each signal stores the
+            inputs of its bar.
         params: Optional strategy_name parameters dict to store as JSONB.
         execution_policy: Resolved fill and liquidity assumptions to store.
         risk_policy: Resolved engine-level portfolio limits to store.
@@ -421,6 +465,18 @@ def save_backtest_output(
         empty = sorted(symbol for symbol, bars in bars_by_symbol.items() if bars.empty)
         if empty:
             raise ValueError(f"bars_by_symbol has no bars for {empty}")
+
+    entry_signals = dict(signal_series_by_symbol or {})
+    exit_signals = dict(exit_signal_series_by_symbol or {})
+    inputs_by_symbol = {
+        symbol: _stored_signal_inputs(
+            symbol,
+            (signal_inputs_by_symbol or {}).get(symbol),
+            entry_signals.get(symbol),
+            exit_signals.get(symbol),
+        )
+        for symbol in set(entry_signals) | set(exit_signals)
+    }
 
     # WHY: single transaction for atomicity — partial writes on failure
     # would leave DB in inconsistent state (e.g. trades without metadata).
@@ -615,14 +671,11 @@ def save_backtest_output(
             counts["financing_cash_flows"] = len(funding_rows)
 
         # signal_events (from feature-layer signal_series)
-        entry_signals = dict(signal_series_by_symbol or {})
-        exit_signals = dict(exit_signal_series_by_symbol or {})
-
         sig_count = 0
-        signal_symbols = set(entry_signals) | set(exit_signals)
-        for signal_symbol in sorted(signal_symbols):
+        for signal_symbol in sorted(inputs_by_symbol):
             entries = entry_signals.get(signal_symbol)
             exits = exit_signals.get(signal_symbol)
+            inputs = inputs_by_symbol[signal_symbol]
             cur.execute(
                 """DELETE FROM signal_events
                    WHERE run_id = %s AND strategy_name = %s AND symbol = %s AND mode = 'backtest'
@@ -649,6 +702,7 @@ def save_backtest_output(
                         float(val),
                         None,
                         "entry",
+                        inputs.get(ts),
                     )
                     for ts, val in entries.items()
                 ]
@@ -671,6 +725,7 @@ def save_backtest_output(
                         float(val),
                         None,
                         "exit",
+                        inputs.get(ts),
                     )
                     for ts, val in exits.items()
                 ]
@@ -823,17 +878,25 @@ def write_signal_event(
     price: float | None = None,
     signal_type: str = "entry",
     *,
+    inputs: Mapping[str, object] | None = None,
     cur: PgCursor | None = None,
     dsn: str | None = None,
 ) -> None:
     """Write a single signal event row (upsert, idempotent).
 
+    ``inputs`` are the values the signal was decided from; malformed ones
+    raise before anything is written (see ``validate_signal_inputs``).
     If ``cur`` is provided, executes on that cursor (caller owns the
     transaction).  Otherwise opens its own connection and commits.
     """
+    try:
+        inputs_json = _signal_inputs_json(inputs)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{symbol} signal at {ts}: {exc}") from exc
     sql = """INSERT INTO signal_events
-               (ts, run_id, strategy_name, symbol, mode, timeframe, signal_value, price, signal_type)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+               (ts, run_id, strategy_name, symbol, mode, timeframe, signal_value, price,
+                signal_type, inputs)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (ts, run_id, strategy_name, symbol, mode, timeframe, signal_type)
                DO NOTHING"""
     values = (
@@ -846,6 +909,7 @@ def write_signal_event(
         signal_value,
         price,
         signal_type,
+        inputs_json,
     )
     if cur is not None:
         cur.execute(sql, values)
@@ -1446,6 +1510,9 @@ def save_signal_results(
         )
     symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
     exit_signal_series = _extract_exit_signals(df, symbol)
+    inputs = _stored_signal_inputs(
+        symbol, _extract_signal_inputs(symbol_df), signal_series, exit_signal_series
+    )
     tf = to_canonical(timeframe)
     if config is not None:
         from librae.config.symbols import resolve_symbol
@@ -1542,14 +1609,36 @@ def save_signal_results(
             )
             if has_entry:
                 entry_rows = [
-                    (_to_dt(ts), run_id, strategy_name, symbol, mode, tf, float(val), None, "entry")
+                    (
+                        _to_dt(ts),
+                        run_id,
+                        strategy_name,
+                        symbol,
+                        mode,
+                        tf,
+                        float(val),
+                        None,
+                        "entry",
+                        inputs.get(ts),
+                    )
                     for ts, val in signal_series.items()
                 ]
                 psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, entry_rows, page_size=1000)
                 sig_count += len(entry_rows)
             if has_exit:
                 exit_rows = [
-                    (_to_dt(ts), run_id, strategy_name, symbol, mode, tf, float(val), None, "exit")
+                    (
+                        _to_dt(ts),
+                        run_id,
+                        strategy_name,
+                        symbol,
+                        mode,
+                        tf,
+                        float(val),
+                        None,
+                        "exit",
+                        inputs.get(ts),
+                    )
                     for ts, val in exit_signal_series.items()
                 ]
                 psycopg2.extras.execute_values(cur, _SIGNAL_INSERT_SQL, exit_rows, page_size=1000)
@@ -1605,17 +1694,22 @@ def save_strategy_results(
 
     signal_series_by_symbol: dict[str, pd.Series] = {}
     exit_signal_series_by_symbol: dict[str, pd.Series] = {}
+    signal_inputs_by_symbol: dict[str, pd.Series] = {}
     symbol_frames: dict[str, pd.DataFrame] = {}
     for symbol in config.symbols:
         symbol_df, signal_series = _extract_signals(df, symbol, signal_column)
         symbol_frames[symbol] = symbol_df
         signal_series_by_symbol[symbol] = signal_series
         exit_signal_series_by_symbol[symbol] = _extract_exit_signals(df, symbol)
+        inputs = _extract_signal_inputs(symbol_df)
+        if inputs is not None:
+            signal_inputs_by_symbol[symbol] = inputs
 
     return save_backtest_output(
         output,
         signal_series_by_symbol=signal_series_by_symbol,
         exit_signal_series_by_symbol=exit_signal_series_by_symbol,
+        signal_inputs_by_symbol=signal_inputs_by_symbol,
         params=config.params,
         execution_policy=asdict(config.execution),
         risk_policy=asdict(config.risk),

@@ -27,12 +27,12 @@ CREATE TABLE IF NOT EXISTS librae_schema_revision (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO librae_schema_revision (singleton, revision)
-VALUES (TRUE, 8)
+VALUES (TRUE, 9)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
-    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 8 THEN
-        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 8';
+    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 9 THEN
+        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 9';
     END IF;
 END
 $$;
@@ -452,6 +452,9 @@ CREATE TABLE IF NOT EXISTS signal_events (
     signal_value    DOUBLE PRECISION NOT NULL,
     price           DOUBLE PRECISION,
     signal_type     TEXT NOT NULL DEFAULT 'entry',
+    -- The values the strategy decided this signal from, as it gave them: a
+    -- handful of scalars, not windows. NULL when it gave none.
+    inputs          JSONB,
     CONSTRAINT chk_signal_mode CHECK (mode IN ('backtest', 'sim', 'live')),
     CONSTRAINT chk_signal_type CHECK (signal_type IN ('entry', 'exit'))
 );
@@ -481,8 +484,15 @@ BEGIN
            WHERE table_schema = current_schema()
              AND table_name = 'backtest_runs'
              AND column_name = 'execution_identity'
+       )
+       OR NOT EXISTS (
+           SELECT 1
+           FROM information_schema.columns
+           WHERE table_schema = current_schema()
+             AND table_name = 'signal_events'
+             AND column_name = 'inputs'
        ) THEN
-        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 8';
+        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 9';
     END IF;
 END
 $$;

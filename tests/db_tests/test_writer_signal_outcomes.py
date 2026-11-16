@@ -1241,3 +1241,203 @@ class TestSaveBacktestOutputBars:
         assert (run_id, subscription) == ("run-1", _config_subscriptions(config)[0])
         assert written is bars
         assert mock_run_bars.call_args.kwargs["cur"] is cursor
+
+
+class TestSignalInputs:
+    """A strategy's ``signal_inputs`` column is stored with each signal it explains."""
+
+    @staticmethod
+    def _featured(inputs: list[object]) -> pd.DataFrame:
+        timestamps = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")
+        frame = pd.DataFrame(
+            {
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "volume": 1_000.0,
+                "zscore": [-2.5, 0.1, 2.1, 0.0],
+                "entry_signal": [1.0, 0.0, 0.0, 0.0],
+                "exit_signal": [0.0, 0.0, -1.0, 0.0],
+            },
+            index=pd.MultiIndex.from_arrays(
+                [["BTCUSDT"] * 4, timestamps], names=["symbol", "datetime"]
+            ),
+        )
+        frame["signal_inputs"] = inputs
+        return frame
+
+    @staticmethod
+    def _connection() -> MagicMock:
+        connection = MagicMock()
+        connection.__enter__ = MagicMock(return_value=connection)
+        connection.__exit__ = MagicMock(return_value=False)
+        return connection
+
+    @staticmethod
+    def _stored(execute_values: MagicMock) -> set[tuple[str, str | None]]:
+        """(signal_type, inputs) of every signal_events row written."""
+        return {
+            (row[8], row[9])
+            for call in execute_values.call_args_list
+            if "INTO signal_events" in call.args[1]
+            for row in call.args[2]
+        }
+
+    @patch("librae.db.timescale_writer.write_strategy_performance")
+    @patch("librae.db.timescale_writer.write_run_metadata")
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
+    def test_a_backtest_stores_each_signals_inputs(
+        self, mock_conn_ctx, mock_exec_values, _metadata, _performance
+    ) -> None:
+        from librae import Backtest, Context, OrderIntent, Strategy
+
+        class Hold(Strategy):
+            def on_bar(self, ctx: Context) -> list[OrderIntent]:
+                return []
+
+        config = _test_cfg()
+        frame = self._featured([None] * 4)
+        frame["signal_inputs"] = frame[["zscore"]].to_dict("records")
+        backtest = Backtest(frame, Hold(), config=config)
+        backtest.run()
+        mock_conn_ctx.return_value = self._connection()
+
+        counts = save_strategy_results(backtest.build_output(), frame, config)
+
+        assert counts["signal_events"] == 2
+        assert self._stored(mock_exec_values) == {
+            ("entry", '{"zscore": -2.5}'),
+            ("exit", '{"zscore": 2.1}'),
+        }
+
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
+    def test_signal_results_store_nan_as_null_and_a_missing_cell_as_none(
+        self, mock_conn_ctx, mock_exec_values
+    ) -> None:
+        mock_conn_ctx.return_value = self._connection()
+        frame = self._featured([{"zscore": float("nan")}, None, float("nan"), None])
+
+        save_signal_results(
+            frame,
+            "BTCUSDT",
+            "H1",
+            "test_strategy",
+            "binance_spot",
+            primary_subscription=_subscription(data_source="binance_spot"),
+        )
+
+        assert self._stored(mock_exec_values) == {("entry", '{"zscore": null}'), ("exit", None)}
+
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
+    def test_a_frame_without_the_column_stores_null_inputs(
+        self, mock_conn_ctx, mock_exec_values
+    ) -> None:
+        mock_conn_ctx.return_value = self._connection()
+        frame = self._featured([None] * 4).drop(columns="signal_inputs")
+
+        save_signal_results(
+            frame,
+            "BTCUSDT",
+            "H1",
+            "test_strategy",
+            "binance_spot",
+            primary_subscription=_subscription(data_source="binance_spot"),
+        )
+
+        assert self._stored(mock_exec_values) == {("entry", None), ("exit", None)}
+
+    @patch("librae.db.timescale_writer.psycopg2.extras.execute_values")
+    @patch("librae.db.timescale_writer.get_conn")
+    def test_only_signal_bars_are_checked(self, mock_conn_ctx, mock_exec_values) -> None:
+        """Inputs on a bar without a signal are never stored, so they cannot
+        refuse the save."""
+        mock_conn_ctx.return_value = self._connection()
+        frame = self._featured([{"zscore": -2.5}, {"zscore": float("inf")}, None, None])
+
+        save_signal_results(
+            frame,
+            "BTCUSDT",
+            "H1",
+            "test_strategy",
+            "binance_spot",
+            primary_subscription=_subscription(data_source="binance_spot"),
+        )
+
+        assert self._stored(mock_exec_values) == {("entry", '{"zscore": -2.5}'), ("exit", None)}
+
+    @pytest.mark.parametrize(
+        ("inputs", "message"),
+        [
+            ({"zscore": float("inf")}, "only finite numbers"),
+            ({"window": [1.0, 2.0]}, "must be a number, string, bool or None"),
+        ],
+    )
+    def test_unstorable_inputs_are_refused_before_connecting(self, inputs, message) -> None:
+        config = _test_cfg()
+        frame = self._featured([inputs, None, None, None])
+
+        with (
+            patch("librae.db.timescale_writer.get_conn") as get_conn,
+            pytest.raises(
+                ValueError, match=rf"BTCUSDT signal at 2024-01-01 00:00:00\+00:00: .*{message}"
+            ),
+        ):
+            save_strategy_results(TestSaveBacktestOutputBars._output(config), frame, config)
+        get_conn.assert_not_called()
+
+    def test_write_signal_event_stores_inputs_as_json(self) -> None:
+        cursor = MagicMock()
+
+        write_signal_event(
+            ts=datetime(2024, 6, 1, tzinfo=UTC),
+            run_id="run-1",
+            strategy_name="s",
+            symbol="BTCUSDT",
+            mode="live",
+            timeframe="H1",
+            signal_value=1.0,
+            price=100.0,
+            inputs={"zscore": -2.5, "regime": "calm"},
+            cur=cursor,
+        )
+
+        sql, values = cursor.execute.call_args.args
+        assert "signal_type, inputs" in sql
+        assert json.loads(values[-1]) == {"zscore": -2.5, "regime": "calm"}
+
+    def test_write_signal_event_without_inputs_stores_null(self) -> None:
+        cursor = MagicMock()
+
+        write_signal_event(
+            ts=datetime(2024, 6, 1, tzinfo=UTC),
+            run_id="run-1",
+            strategy_name="s",
+            symbol="BTCUSDT",
+            mode="sim",
+            timeframe="H1",
+            signal_value=1.0,
+            cur=cursor,
+        )
+
+        assert cursor.execute.call_args.args[1][-1] is None
+
+    def test_write_signal_event_refuses_unstorable_inputs(self) -> None:
+        cursor = MagicMock()
+
+        with pytest.raises(ValueError, match=r"BTCUSDT signal at .*only finite numbers"):
+            write_signal_event(
+                ts=datetime(2024, 6, 1, tzinfo=UTC),
+                run_id="run-1",
+                strategy_name="s",
+                symbol="BTCUSDT",
+                mode="sim",
+                timeframe="H1",
+                signal_value=1.0,
+                inputs={"zscore": float("-inf")},
+                cur=cursor,
+            )
+        cursor.execute.assert_not_called()

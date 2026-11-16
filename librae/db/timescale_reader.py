@@ -216,6 +216,26 @@ def load_financing_cash_flows(
     return df
 
 
+def load_signal_events(run_id: str, dsn: str | None = None) -> pd.DataFrame:
+    """Load a run's signals, ordered by timestamp, with the inputs behind each.
+
+    ``inputs`` holds the dict the strategy gave in its ``signal_inputs``
+    column on that bar, or None when it gave none. ``price`` is the decision
+    price a sim or live engine saw; a backtest stores none.
+    """
+    sql = """
+        SELECT ts AS _time, symbol, signal_type, signal_value, price, inputs
+        FROM signal_events
+        WHERE run_id = %s
+        ORDER BY ts, symbol, signal_type
+    """
+    with get_conn(dsn) as conn:
+        df = pd.read_sql(sql, conn, params=[run_id])
+    if not df.empty:
+        df["_time"] = pd.to_datetime(df["_time"], utc=True)
+    return df
+
+
 def load_performance(
     run_id: str,
     *,
