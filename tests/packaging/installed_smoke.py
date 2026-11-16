@@ -11,7 +11,7 @@ from pathlib import Path
 
 import librae
 import pandas as pd
-from librae import Backtest, Context, OrderIntent, Strategy
+from librae import Backtest, Context, CostModel, OrderIntent, Strategy
 
 
 class BuyOnce(Strategy):
@@ -90,6 +90,7 @@ def _validate_minimal_backtest() -> None:
         data=data,
         strategy=BuyOnce(),
         initial_balance=10_000.0,
+        cost_model=CostModel.zero(),
         data_source="synthetic",
     )
     backtest.run()
