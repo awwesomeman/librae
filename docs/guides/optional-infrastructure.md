@@ -433,9 +433,14 @@ the stable `deployment_id` that identifies one running process.
 script publishes a Librae-revision candidate tag and prints
 `TRADE_IMAGE_REF=<repository>@sha256:<digest>`. Copy that exact value into the
 target's operator-managed environment before starting a registry deployment.
+`trade.sh start --image <repository>@sha256:<digest>` selects the image for that
+start instead. Precedence is `--image`, then `TRADE_IMAGE_REF` in the process
+environment, then `TRADE_IMAGE_REF` in `.env`.
 `trade.sh` rejects mutable tags and uses the same digest-qualified reference
-for pull, database preflight, and the running container. It does not edit the
-environment automatically. After selecting the
+for the database preflight and the running container. It pulls the image only
+when it is not already in the local Docker image store, so a caller that has
+pulled the digest itself needs no registry credentials for the user running
+`trade.sh`. It does not edit the environment automatically. After selecting the
 image, it reads that image's immutable Docker image ID, records it as a
 container label, and passes it to the runner as `--runtime-revision`.
 
@@ -528,6 +533,15 @@ TimescaleDB. Their run and account identifiers keep persisted facts distinct.
 The Docker label check rejects an obvious duplicate before replacement; the
 durable `live-account:<account_id>` database lease is authoritative across
 different strategies, configurations, and launch paths.
+
+Containers join the Docker network named by `TRADE_DOCKER_NETWORK`, default
+`quant_network`, from the process environment or else `.env`; the network must
+already exist and reach the database. Each container carries the label
+`io.librae.credentials`, the `--credentials` argument exactly as given (empty
+when none). It holds no secret content. A caller that manages the credentials
+file compares the label with the argument it passes and runs `trade.sh start`
+again on a difference. Read it with
+`docker inspect --format '{{ index .Config.Labels "io.librae.credentials" }}' quant_<deployment_id>`.
 
 `trade.sh start` reports success only after the runner publishes readiness.
 The repository's `build_live_trader()` wiring does this after state restore,

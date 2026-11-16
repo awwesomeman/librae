@@ -235,7 +235,7 @@ def test_registry_trade_deploy_uses_one_immutable_image_reference() -> None:
 
     database_preflight = trade_script.index('echo "Checking strategy account and TimescaleDB')
     container_replacement = trade_script.index('docker rm "${container}"')
-    assert trade_script.index('image="${TRADE_IMAGE_REF}"') < database_preflight
+    assert trade_script.index('image="${requested_image}"') < database_preflight
     assert database_preflight < container_replacement
     assert trade_script[database_preflight:].count('"${image}"') >= 2
 
@@ -243,7 +243,7 @@ def test_registry_trade_deploy_uses_one_immutable_image_reference() -> None:
 def _run_trade_script(
     tmp_path: Path,
     *,
-    image_reference: str,
+    image_reference: str | None,
     deployment_id: str = "smoke-main",
     account_id: str = "account-main",
     currency: str = "USD",
@@ -275,6 +275,9 @@ def _run_trade_script(
     ready_file: str = "/run/librae/ready",
     marker_at_signal: str | None = None,
     arguments: list[str] | None = None,
+    image_present: bool = False,
+    start_options: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bash = _find_bash()
 
@@ -306,7 +309,15 @@ if [[ "$1" == "run" ]]; then
     printf 'envnote %s\\n' "${note}" >> "${DOCKER_LOG}"
 fi
 printf '%s\\n' "$*" >> "${DOCKER_LOG}"
+if [[ "$1" == "pull" ]]; then
+    : > "${FAKE_DOCKER_STATE_FILE}.pulled"
+fi
 if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+    # A bare `image inspect` is the presence check; the --format calls read
+    # metadata of the image already selected.
+    if [[ "$*" != *"--format"* && "${FAKE_IMAGE_PRESENT}" != "1" && ! -e "${FAKE_DOCKER_STATE_FILE}.pulled" ]]; then
+        exit 1
+    fi
     if [[ "$*" == *"{{.Id}}"* ]]; then
         printf '%s\\n' "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     else
@@ -398,7 +409,6 @@ fi
             "DOCKER_LOG": docker_log.as_posix(),
             "FAKE_DOCKER_STATE_FILE": (tmp_path / "docker-state").as_posix(),
             "PATH": f"{tmp_path}{os.pathsep}{env['PATH']}",
-            "TRADE_IMAGE_REF": image_reference,
             "TRADE_TIMESCALE_DSN": ("postgresql://quant_app:secret@quant_timescaledb:5432/quant"),
             "TRADE_START_TIMEOUT_SECONDS": start_timeout_seconds,
             "TRADE_STOP_TIMEOUT_SECONDS": "2",
@@ -420,8 +430,14 @@ fi
             "FAKE_STATUS_AFTER_READY_READ": status_after_ready_read,
             "FAKE_STALE_READY_MARKER": stale_ready_marker,
             "FAKE_RESTART_COUNT": restart_count,
+            "FAKE_IMAGE_PRESENT": "1" if image_present else "0",
         }
     )
+    env.pop("TRADE_DOCKER_NETWORK", None)
+    env.pop("TRADE_IMAGE_REF", None)
+    if image_reference is not None:
+        env["TRADE_IMAGE_REF"] = image_reference
+    env.update(extra_env or {})
     if arguments is not None:
         command = [bash, str(isolated_trade_script), *arguments]
     else:
@@ -440,6 +456,7 @@ fi
             command.extend(("--config", str(config_file)))
         if credentials_file is not None:
             command.extend(("--credentials", str(credentials_file)))
+        command.extend(start_options or [])
     result = subprocess.run(
         command,
         cwd=ROOT,
@@ -476,6 +493,142 @@ def test_trade_script_reuses_exact_digest_reference(tmp_path: Path) -> None:
     assert any(call.startswith("run --rm ") and image_reference in call for call in docker_calls)
     assert any(call.startswith("run -d ") and image_reference in call for call in docker_calls)
     assert all(":latest" not in call for call in docker_calls)
+
+
+def test_trade_script_does_not_pull_an_image_that_is_already_present(tmp_path: Path) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'6' * 64}"
+
+    result, docker_calls = _run_trade_script(
+        tmp_path,
+        image_reference=image_reference,
+        image_present=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not any(call.startswith("pull ") for call in docker_calls)
+    assert any(call.startswith("run -d ") and image_reference in call for call in docker_calls)
+
+
+def test_trade_script_joins_the_default_network_unless_overridden(tmp_path: Path) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'7' * 64}"
+
+    default, default_calls = _run_trade_script(
+        tmp_path / "default", image_reference=image_reference
+    )
+    override, override_calls = _run_trade_script(
+        tmp_path / "override",
+        image_reference=image_reference,
+        extra_env={"TRADE_DOCKER_NETWORK": "other_net"},
+    )
+
+    assert default.returncode == 0, default.stderr
+    assert override.returncode == 0, override.stderr
+    for calls, network in ((default_calls, "quant_network"), (override_calls, "other_net")):
+        runs = [call for call in calls if call.startswith("run ")]
+        assert len(runs) == 2
+        assert all(f"--network {network} " in call for call in runs)
+
+
+def test_trade_script_labels_the_container_with_its_credentials_argument(
+    tmp_path: Path,
+) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'8' * 64}"
+    # A relative argument resolves against the project root, but the label keeps
+    # it as given so a caller can compare it with what it passes.
+    credentials = tmp_path / "with" / ".credentials" / "account-main.env"
+    credentials.parent.mkdir(parents=True)
+    credentials.write_text("SHIOAJI_API_KEY=\n", encoding="utf-8")
+
+    with_file, with_calls = _run_trade_script(
+        tmp_path / "with",
+        image_reference=image_reference,
+        start_options=["--credentials", ".credentials/account-main.env"],
+    )
+    without_file, without_calls = _run_trade_script(
+        tmp_path / "without", image_reference=image_reference
+    )
+
+    assert with_file.returncode == 0, with_file.stderr
+    assert without_file.returncode == 0, without_file.stderr
+    labeled = next(call for call in with_calls if call.startswith("run -d "))
+    assert "--label io.librae.credentials=.credentials/account-main.env " in labeled
+    unlabeled = next(call for call in without_calls if call.startswith("run -d "))
+    assert "--label io.librae.credentials= " in unlabeled
+
+
+def test_trade_script_reads_the_network_from_dotenv_and_the_process_env_wins(
+    tmp_path: Path,
+) -> None:
+    image_reference = f"registry.example/librae-trade@sha256:{'9' * 64}"
+    (tmp_path / "dotenv").mkdir()
+    (tmp_path / "dotenv" / ".env").write_text("TRADE_DOCKER_NETWORK=dotenv_net\n", encoding="utf-8")
+    (tmp_path / "both").mkdir()
+    (tmp_path / "both" / ".env").write_text("TRADE_DOCKER_NETWORK=dotenv_net\n", encoding="utf-8")
+
+    from_dotenv, dotenv_calls = _run_trade_script(
+        tmp_path / "dotenv", image_reference=image_reference
+    )
+    both, both_calls = _run_trade_script(
+        tmp_path / "both",
+        image_reference=image_reference,
+        extra_env={"TRADE_DOCKER_NETWORK": "process_net"},
+    )
+
+    assert from_dotenv.returncode == 0, from_dotenv.stderr
+    assert both.returncode == 0, both.stderr
+    for calls, network in ((dotenv_calls, "dotenv_net"), (both_calls, "process_net")):
+        runs = [call for call in calls if call.startswith("run ")]
+        assert len(runs) == 2
+        assert all(f"--network {network} " in call for call in runs)
+
+
+def test_trade_script_image_flag_beats_process_env_beats_dotenv(tmp_path: Path) -> None:
+    flag_ref = f"registry.example/flag@sha256:{'1' * 64}"
+    process_ref = f"registry.example/process@sha256:{'2' * 64}"
+    dotenv_ref = f"registry.example/dotenv@sha256:{'3' * 64}"
+    cases = {
+        "flag": (process_ref, ["--image", flag_ref], flag_ref),
+        "process": (process_ref, [], process_ref),
+        "dotenv": (None, [], dotenv_ref),
+    }
+    for name, (environment_ref, options, expected) in cases.items():
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        (case_dir / ".env").write_text(f"TRADE_IMAGE_REF={dotenv_ref}\n", encoding="utf-8")
+
+        result, calls = _run_trade_script(
+            case_dir,
+            image_reference=environment_ref,
+            image_present=True,
+            start_options=options,
+        )
+
+        assert result.returncode == 0, f"{name}: {result.stderr}"
+        runs = [call for call in calls if call.startswith("run ")]
+        assert len(runs) == 2
+        assert all(f" {expected} " in f"{call} " for call in runs), name
+        assert not any(call.startswith("pull ") for call in calls), name
+
+
+def test_trade_script_image_flag_is_pulled_only_when_missing_and_must_be_a_digest(
+    tmp_path: Path,
+) -> None:
+    flag_ref = f"registry.example/flag@sha256:{'4' * 64}"
+
+    pulled, pulled_calls = _run_trade_script(
+        tmp_path / "pulled", image_reference=None, start_options=["--image", flag_ref]
+    )
+    mutable, mutable_calls = _run_trade_script(
+        tmp_path / "mutable",
+        image_reference=flag_ref,
+        start_options=["--image", "registry.example/flag:latest"],
+    )
+
+    assert pulled.returncode == 0, pulled.stderr
+    assert any(call.startswith(f"pull -q {flag_ref}") for call in pulled_calls)
+    assert mutable.returncode != 0
+    assert "--image must be digest-qualified" in mutable.stderr
+    assert mutable_calls == []
 
 
 def test_trade_script_does_not_accept_an_unrelated_ready_marker(tmp_path: Path) -> None:

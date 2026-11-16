@@ -3,7 +3,8 @@
 #
 # Usage:
 #   ./deploy/trade.sh start <deployment_id> <account_id> <currency> <strategy> \
-#       [mode] [poll_seconds] [--config <path>] [--credentials <path>]
+#       [mode] [poll_seconds] [--config <path>] [--credentials <path>] \
+#       [--image <repository>@sha256:<digest>]
 #   ./deploy/trade.sh inspect <deployment_id>
 #   ./deploy/trade.sh restart <deployment_id>
 #   ./deploy/trade.sh halt <deployment_id>
@@ -23,9 +24,17 @@
 #   ./deploy/trade.sh reset momentum-live
 #   ./deploy/trade.sh stop momentum-live
 #
-# Strategy code comes from the immutable image selected by TRADE_IMAGE_REF
-# (see build_push.sh). An optional host config is mounted read-only and passed
-# to the strategy's existing --config option.
+# Strategy code comes from the immutable image selected by --image, else the
+# TRADE_IMAGE_REF in the process environment, else TRADE_IMAGE_REF in .env (see
+# build_push.sh); it is pulled only when not already present locally. An
+# optional host config is mounted read-only and passed to the strategy's
+# existing --config option.
+#
+# Containers join the Docker network named by TRADE_DOCKER_NETWORK (default
+# quant_network; the process environment wins over .env). Each carries the
+# label io.librae.credentials, the --credentials argument exactly as given
+# (empty when none), so a caller can compare it with the argument it intends
+# and restart on a difference.
 #
 # Live mode requires one explicitly selected Docker env file; sim mode
 # accepts the same --credentials flag optionally, for brokers that require
@@ -38,7 +47,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-NETWORK="quant_network"
 READY_FILE="/tmp/librae-ready"
 # The ready marker lives on a tmpfs, which Docker mounts empty at every
 # container start, restart-policy restarts included, so a previous runner's
@@ -265,7 +273,7 @@ validate_existing_binding() {
 }
 
 cmd_start() {
-    local usage="Usage: trade.sh start <deployment_id> <account_id> <currency> <strategy> [mode] [poll_seconds] [--config <path>] [--credentials <path>]"
+    local usage="Usage: trade.sh start <deployment_id> <account_id> <currency> <strategy> [mode] [poll_seconds] [--config <path>] [--credentials <path>] [--image <repository>@sha256:<digest>]"
     local deployment_id="${1:?${usage}}"
     local account_id="${2:?${usage}}"
     local currency="${3:?${usage}}"
@@ -285,6 +293,7 @@ cmd_start() {
 
     local config_file=""
     local credentials_file=""
+    local image_flag=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --config)
@@ -295,6 +304,11 @@ cmd_start() {
             --credentials)
                 [[ $# -ge 2 ]] || { echo "${usage}" >&2; exit 1; }
                 credentials_file="$2"
+                shift 2
+                ;;
+            --image)
+                [[ $# -ge 2 ]] || { echo "${usage}" >&2; exit 1; }
+                image_flag="$2"
                 shift 2
                 ;;
             *)
@@ -323,6 +337,11 @@ cmd_start() {
     local trade_timescale_dsn="${TRADE_TIMESCALE_DSN:?Set TRADE_TIMESCALE_DSN in .env.secrets}"
 
     local credential_args=()
+    # The argument as given, never content: lets a caller compare it with the
+    # file it intends and recreate the container when the selection changes.
+    local credentials_label="${credentials_file}"
+    # Docker network the containers join; it must already exist.
+    local network="${TRADE_DOCKER_NETWORK:-quant_network}"
     local secret_mount_args=()
     local host_args=()
     if [[ "${mode}" == "live" && -z "${credentials_file}" ]]; then
@@ -384,15 +403,26 @@ cmd_start() {
         runner_config_args+=(--config "${container_config}")
     fi
 
-    local image=""
-    if [[ -n "${TRADE_IMAGE_REF:-}" ]]; then
-        if [[ ! "${TRADE_IMAGE_REF}" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
-            echo "TRADE_IMAGE_REF must be digest-qualified: <repository>@sha256:<64 hex>" >&2
+    local image="" image_source="TRADE_IMAGE_REF"
+    local requested_image="${TRADE_IMAGE_REF:-}"
+    if [[ -n "${image_flag}" ]]; then
+        requested_image="${image_flag}"
+        image_source="--image"
+    fi
+    if [[ -n "${requested_image}" ]]; then
+        if [[ ! "${requested_image}" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "${image_source} must be digest-qualified: <repository>@sha256:<64 hex>" >&2
             exit 1
         fi
-        image="${TRADE_IMAGE_REF}"
-        echo "Pulling immutable trade image ${image}..."
-        docker pull -q "${image}" >/dev/null
+        image="${requested_image}"
+        # A digest names exact bytes, so a local copy is the selected image and
+        # needs no registry access; only a missing one is pulled.
+        if docker image inspect "${image}" >/dev/null 2>&1; then
+            echo "Using local trade image ${image}"
+        else
+            echo "Pulling immutable trade image ${image}..."
+            docker pull -q "${image}" >/dev/null
+        fi
     else
         if [[ -n "${TRADE_IMAGE:-}" ]]; then
             echo "TRADE_IMAGE is a publish repository, not a deployable reference." >&2
@@ -422,7 +452,7 @@ cmd_start() {
         echo "Librae revision: ${selected_revision}"
     fi
 
-    echo "Checking strategy account and TimescaleDB schema revision from ${image} on ${NETWORK}..."
+    echo "Checking strategy account and TimescaleDB schema revision from ${image} on ${network}..."
     # WHY the DSN is passed by name only: the assignment in front of the
     # command puts it in this script's environment for Docker to read, so it
     # never reaches /proc/<pid>/cmdline, which every local user can read. The
@@ -432,7 +462,7 @@ cmd_start() {
     # so would --env-file -- so do not fold it back into the argument list.
     TIMESCALE_DSN="${trade_timescale_dsn}" \
     docker run --rm \
-        --network "${NETWORK}" \
+        --network "${network}" \
         "${credential_args[@]+"${credential_args[@]}"}" \
         "${config_mount_args[@]+"${config_mount_args[@]}"}" \
         "${secret_mount_args[@]+"${secret_mount_args[@]}"}" \
@@ -566,7 +596,7 @@ finally:
     TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" \
     docker run -d \
         --name "${container}" \
-        --network "${NETWORK}" \
+        --network "${network}" \
         --restart unless-stopped \
         --tmpfs "${READY_MOUNT}" \
         --label "io.librae.managed=true" \
@@ -578,6 +608,7 @@ finally:
         --label "io.librae.runtime_revision=${runtime_revision}" \
         --label "io.librae.ready_file=${ready_file}" \
         --label "io.librae.ready_token=${ready_token}" \
+        --label "io.librae.credentials=${credentials_label}" \
         "${credential_args[@]+"${credential_args[@]}"}" \
         "${env_args[@]}" \
         "${config_mount_args[@]+"${config_mount_args[@]}"}" \
@@ -808,6 +839,10 @@ shift
 # Docker with --env-file. .env.secrets carries TRADE_TIMESCALE_DSN (and other
 # infra secrets); it is not the trading-credential file the previous
 # paragraph refers to.
+# The process environment wins over .env for the settings a caller selects per
+# invocation, so remember them across the source.
+process_image_ref="${TRADE_IMAGE_REF:-}"
+process_docker_network="${TRADE_DOCKER_NETWORK:-}"
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     set -a
     # shellcheck source=/dev/null
@@ -820,6 +855,8 @@ if [[ -f "${PROJECT_ROOT}/.env.secrets" ]]; then
     source "${PROJECT_ROOT}/.env.secrets"
     set +a
 fi
+[[ -z "${process_image_ref}" ]] || export TRADE_IMAGE_REF="${process_image_ref}"
+[[ -z "${process_docker_network}" ]] || export TRADE_DOCKER_NETWORK="${process_docker_network}"
 
 case "${SUBCOMMAND}" in
     start) cmd_start "$@" ;;
