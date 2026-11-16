@@ -237,13 +237,29 @@ Third-party data is joined point-in-time by the caller and returned as extra
 columns from the same adapter snapshot; see
 [External market data and factors](docs/guides/external-data.md).
 
-Every mode orders events by bar start, so the primaries must share their bar
-starts (`require_aligned_bar_grids`), read from the calendars' session
-boundaries rather than their names: intraday, every segment opens at one phase
-of the period's grid; a day, week or month bar never starts while another
-symbol's is open. Otherwise a decision on the earlier bar could fill on the
-later one before its data was available, so Backtest and `LiveTrader` refuse
-such primaries at construction.
+Events follow the bars' availability. When the primaries share one bar grid
+(`bar_grids_align`, read from the calendars' session boundaries rather than
+their names: intraday, every segment opens at one phase of the period's grid;
+a day, week or month bar never starts while another symbol's is open), bar
+starts already order the bars by completion, and every mode runs one event per
+bar start, keyed by it. Off one grid a later-starting bar can complete first:
+
+- A backtest runs one event per instant at which primary bars become
+  available, keyed by that instant: the `ts` of its equity and snapshot rows
+  and of its `Context`, which is then not a bar start. Calendar logic keyed on
+  bar starts reads each bar's own start from `Context.market_data`, which such
+  a run always carries. A bar counts as available no earlier than its
+  symbol's previous bar, so a late bar holds only its own symbol, and a
+  warning names the symbols it delayed.
+- Each leg fills on its own bar, so `PortfolioWeights` and `group_id` orders,
+  which execute on one event, are refused when their legs' bars are not in
+  the deciding event. At the end of the run each position closes on its own
+  last bar.
+- `LiveTrader` still orders events by bar start, so it refuses such primaries
+  at construction (`require_aligned_bar_grids`): it would meet the bars out of
+  order and could fill a decision before its data was available.
+
+Within those events:
 
 - A bar's `available_at` is when it is safe to observe. An adapter that holds a
   bar ending its trading segment for `SEGMENT_END_SETTLE` stamps the settle
