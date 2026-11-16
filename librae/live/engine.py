@@ -4479,9 +4479,12 @@ class LiveTrader:
             return revised
         before = prior.loc[known["ts"]].reset_index()
         after = known.reset_index(drop=True)
+        old_values = before[list(OHLCV_COLUMNS)]
+        new_values = after[list(OHLCV_COLUMNS)]
+        # A volume missing in both versions is unchanged, though NaN != NaN.
+        differs = old_values.ne(new_values) & ~(old_values.isna() & new_values.isna())
         changed = (
-            before[AVAILABLE_AT_COLUMN].eq(after[AVAILABLE_AT_COLUMN])
-            & before[list(OHLCV_COLUMNS)].ne(after[list(OHLCV_COLUMNS)]).any(axis=1)
+            before[AVAILABLE_AT_COLUMN].eq(after[AVAILABLE_AT_COLUMN]) & differs.any(axis=1)
         ).to_numpy()
         revised.loc[known.index[changed]] = True
         received = self._bar_observed_at.get(symbol, {})

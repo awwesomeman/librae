@@ -17,11 +17,14 @@ def calculate_lagged_adv(
     With no labels, every row is one session (the D1 case).  Intraday callers
     provide one label per bar; volumes are summed by session before the lagged
     rolling mean is mapped back to every bar in the current session.
+
+    Missing (NaN) volume leaves its session's volume unknown, so every window
+    that includes that session has no ADV rather than an understated one.
     """
     numeric_volume = volume.astype("float64")
     values = numeric_volume.to_numpy()
-    if not np.isfinite(values).all() or (values < 0).any():
-        raise ValueError("volume history must be finite and non-negative")
+    if np.isinf(values).any() or (values < 0).any():
+        raise ValueError("volume history must be finite or missing, and non-negative")
     if session_labels is None:
         return (
             numeric_volume.shift(1)
@@ -38,6 +41,7 @@ def calculate_lagged_adv(
     if labels.isna().any():
         raise ValueError("session_labels must not contain missing values")
     session_volume = numeric_volume.groupby(labels, sort=False).sum()
+    session_volume = session_volume.mask(numeric_volume.isna().groupby(labels, sort=False).any())
     lagged_session_adv = (
         session_volume.shift(1)
         .rolling(

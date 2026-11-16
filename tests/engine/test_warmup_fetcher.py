@@ -162,8 +162,8 @@ class TestWarmupFetcher:
                 "open": [1.0, 2.0],
                 "high": [1.0, 2.0],
                 "low": [1.0, 2.0],
-                "close": [1.0, 2.0],
-                "volume": [100.0, float("nan")],
+                "close": [1.0, float("nan")],
+                "volume": [100.0, 100.0],
             }
         )
         mock_fetcher = MagicMock(return_value=invalid_df)
@@ -188,7 +188,7 @@ class TestWarmupFetcher:
 
         assert trader._fetch_with_cache("BTCUSDT") is None
         assert "BTCUSDT" not in trader._ohlcv_cache
-        assert "runtime data OHLCV values must be finite" in caplog.text
+        assert "runtime data OHLC prices must be finite" in caplog.text
 
     def test_partial_warmup_is_retained_when_later_retry_fails(self):
         from librae.live.engine import LiveTrader

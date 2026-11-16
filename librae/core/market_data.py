@@ -737,7 +737,11 @@ def normalize_bar_times(
 
 
 def validate_ohlcv_values(data: pd.DataFrame, *, context: str = "data") -> None:
-    """Fail fast on OHLCV values that cannot safely drive fills or accounting."""
+    """Fail fast on OHLCV values that cannot safely drive fills or accounting.
+
+    A missing (NaN) volume means the source reports none, as for an index; a
+    fill or ADV that needs it is rejected instead of reading it as zero.
+    """
     missing = sorted(set(OHLCV_COLUMNS) - set(data.columns))
     if missing:
         raise ValueError(f"{context} missing required OHLCV columns: {', '.join(missing)}")
@@ -751,10 +755,11 @@ def validate_ohlcv_values(data: pd.DataFrame, *, context: str = "data") -> None:
         raise ValueError(f"{context} OHLCV columns must be numeric: {', '.join(non_numeric)}")
 
     values = data.loc[:, list(OHLCV_COLUMNS)].to_numpy(dtype=np.float64, na_value=np.nan)
-    if not np.isfinite(values).all():
-        raise ValueError(f"{context} OHLCV values must be finite")
-
     open_price, high, low, close, volume = values.T
+    if not np.isfinite(values[:, :4]).all():
+        raise ValueError(f"{context} OHLC prices must be finite")
+    if np.isinf(volume).any():
+        raise ValueError(f"{context} volume must be finite or missing")
     if np.any(open_price <= 0) or np.any(high <= 0) or np.any(low <= 0) or np.any(close <= 0):
         raise ValueError(f"{context} OHLC prices must be positive")
     if np.any(high < np.maximum.reduce([open_price, low, close])) or np.any(

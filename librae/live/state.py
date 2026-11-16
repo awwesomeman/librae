@@ -223,7 +223,11 @@ class LiveRebalance:
         return {
             "targets": {"weights": dict(self.targets.weights), "reason": self.targets.reason},
             "reference_prices": self.reference_prices,
-            "reference_volumes": self.reference_volumes,
+            # A NaN volume is missing, as None is, and JSON has no NaN.
+            "reference_volumes": {
+                symbol: (volume if volume is not None and isfinite(volume) else None)
+                for symbol, volume in self.reference_volumes.items()
+            },
             "lagged_adv_by_symbol": self.lagged_adv_by_symbol,
             "decided_at": self.decided_at.isoformat(),
             "next_sequence": self.next_sequence,
@@ -616,7 +620,10 @@ class PendingOhlcvDelivery:
             "ts": self.ts.isoformat(),
             "available_at": self.available_at.isoformat(),
             "observed_at": self.observed_at.isoformat(),
-            "bar": {key: float(value) for key, value in self.bar.items()},
+            # JSON has no NaN, so a missing value (unreported volume) is null.
+            "bar": {
+                key: (float(value) if isfinite(value) else None) for key, value in self.bar.items()
+            },
         }
 
     @classmethod
@@ -631,7 +638,10 @@ class PendingOhlcvDelivery:
             ts=ts,
             available_at=available_at,
             observed_at=observed_at,
-            bar={str(key): float(value) for key, value in raw["bar"].items()},
+            bar={
+                str(key): float(value) if value is not None else float("nan")
+                for key, value in raw["bar"].items()
+            },
         )
 
 

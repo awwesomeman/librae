@@ -97,15 +97,16 @@ class ExecutionPolicy:
 
     ``max_bar_volume_participation_rate`` caps the cumulative filled quantity for
     one symbol in one bar. ``None`` disables the cap. With a cap enabled,
-    missing volume rejects the fill and insufficient volume produces a partial
-    fill. Open, limit, and protective fills use the previous completed bar's
+    missing (NaN) volume rejects the fill and insufficient volume produces a
+    partial fill. Open, limit, and protective fills use the previous completed bar's
     volume so later information cannot change an earlier fill.
     Forced end-of-run exits fill at the completed final close and use its volume.
 
     ``adv_lookback_sessions`` and ``max_adv_participation_rate`` form one
     optional session-level capacity limit. ADV uses exactly N completed
     sessions, excluding the execution session. Intraday data therefore needs
-    a calendar_id for every configured symbol.
+    a calendar_id for every configured symbol. A session with missing volume
+    leaves its windows without ADV, which rejects the fill.
 
     ``max_rebalance_delay_bars`` bounds how many otherwise eligible backtest
     or live events a ``PortfolioWeights`` decision may wait for every required
