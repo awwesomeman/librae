@@ -430,9 +430,9 @@ later-starting event was decided is decided at its own start; how events are
 ordered and held is in
 [architecture.md](../../architecture.md#data-acquisition-and-ownership-boundary).
 If a backtest still holds a symbol
-without a real bar at the final
-timestamp, forced liquidation fails explicitly rather than fabricating a fill
-from its last mark.
+without a real bar in the final
+event, forced liquidation fails explicitly rather than fabricating a fill
+from its last mark; off one bar grid each position closes on its own last bar.
 
 This is a **data-driven event clock**, not a calendar-driven event generator.
 Input timestamps must be timezone-aware and every adapter/ETL path must use
@@ -529,7 +529,8 @@ injected callable is caller-owned and must already return bars matching the
 configured mode.
 Direct `Backtest(...)` construction declares the same identity with its
 `primary_subscriptions` keyword, which a multi-symbol frame requires: whether
-the symbols' bars start on one grid is read from their calendars. When
+the symbols' bars start on one grid, which decides how events are ordered, is
+read from their calendars. When
 `config` is supplied, the resolved instrument routes are authoritative and a competing supplied identity is
 rejected. The present event loop accepts one primary timeframe only; auxiliary
 frontier ordering is intentionally outside this foundation.

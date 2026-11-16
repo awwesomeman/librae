@@ -381,11 +381,15 @@ def evaluate_batch_features(
     validated: dict[MarketDataSubscription, pd.DataFrame] = {}
     for subscription in batch.active_primary_subscriptions:
         visible_index = batch.market_data.history(subscription).index
+        if visible_index.empty:
+            raise ValueError(f"active primary {subscription!r} has no visible bar")
+        # Each frame ends at its own newest bar: off one bar grid, the bars
+        # decided together start at different times.
         validated[subscription] = _detach_object_features(
             validate_feature_frame(
                 output[subscription],
                 label=repr(subscription),
-                event_ts=batch.event_ts,
+                event_ts=visible_index[-1].to_pydatetime(),
                 visible_index=visible_index,
             )
         )
@@ -415,14 +419,12 @@ def subscription_from_instrument(
     )
 
 
-def require_aligned_bar_grids(subscriptions: Sequence[MarketDataSubscription]) -> None:
-    """Refuse primary subscriptions whose bars do not start on one shared grid.
+def bar_grids_align(subscriptions: Sequence[MarketDataSubscription]) -> bool:
+    """Whether the primaries' bars start on one shared grid.
 
-    Every mode orders events by bar start and fills a decision on a later
-    bar. When a symbol's bar starts while another symbol's bar is still
-    open, the bar read at the earlier start closes after the other symbol's
-    next bar opens, so a decision on it could fill before its data was
-    available, and live meets the bars out of start order.
+    On one grid no symbol's bar starts while another symbol's bar is still
+    open, so ordering bars by start also orders them by completion. Off it,
+    a bar that starts later can complete first.
 
     Alignment is read from the calendars' session boundaries, not their
     names. Primaries are aligned when they share one bar geometry, or when:
@@ -434,7 +436,7 @@ def require_aligned_bar_grids(subscriptions: Sequence[MarketDataSubscription]) -
     - one day, week or month, no symbol's bar starts while another's is open.
     """
     if len(subscriptions) < 2:
-        return
+        return True
 
     def geometry(subscription: MarketDataSubscription) -> tuple[str, str]:
         # Every mode of an always-open calendar reads the same whole day.
@@ -442,10 +444,23 @@ def require_aligned_bar_grids(subscriptions: Sequence[MarketDataSubscription]) -
         return subscription.calendar_id, "any" if always_open else subscription.session_mode
 
     if len({geometry(subscription) for subscription in subscriptions}) == 1:
+        return True
+    timeframes = {subscription.timeframe for subscription in subscriptions}
+    return len(timeframes) == 1 and _grids_align(
+        subscriptions, to_canonical(next(iter(timeframes)))
+    )
+
+
+def require_aligned_bar_grids(subscriptions: Sequence[MarketDataSubscription]) -> None:
+    """Refuse primaries off one shared grid, for a runtime that orders events by bar start.
+
+    Off one grid the bar read at the earlier start closes after another
+    symbol's next bar opens, so such a runtime meets the bars out of
+    completion order and could fill a decision before its data was available.
+    """
+    if bar_grids_align(subscriptions):
         return
     timeframes = {subscription.timeframe for subscription in subscriptions}
-    if len(timeframes) == 1 and _grids_align(subscriptions, to_canonical(next(iter(timeframes)))):
-        return
     described = ", ".join(
         f"{subscription.symbol}={subscription.calendar_id}/{subscription.session_mode}"
         for subscription in subscriptions
