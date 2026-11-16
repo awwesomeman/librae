@@ -18,7 +18,11 @@ import pandas as pd
 import pytest
 from librae.backtest.engine import _resolve_data_timeframe
 from librae.core.market_data import validate_bar_cadence
-from librae.core.trading_calendar import _session_segments, resample_session_ohlcv
+from librae.core.trading_calendar import (
+    _session_segments,
+    period_start,
+    resample_session_ohlcv,
+)
 from librae.core.utils import interval_to_timedelta
 
 CALENDARS = ("XTAIFEX", "XTAIFEX_1725", "XTKS", "XHKG", "XSHG", "XNYS", "24/7")
@@ -53,7 +57,9 @@ MISLABELLED_UNDER_EXTENDED = frozenset(
 )
 
 
-def _session_minutes(calendar_id: str, session_mode: str, sessions: int = 12) -> pd.DatetimeIndex:
+def _session_minutes(
+    calendar_id: str, sessions: int = 12, session_mode: str = "extended"
+) -> pd.DatetimeIndex:
     """One-minute bars covering the segments a feed in the mode carries."""
     if calendar_id == "24/7":
         return pd.date_range("2024-06-03", periods=sessions * 1440, freq="1min", tz="UTC")
@@ -86,13 +92,12 @@ def _ohlcv(index: pd.DatetimeIndex) -> pd.DataFrame:
     )
 
 
-def _resampled(calendar_id: str, timeframe: str, session_mode: str = "extended") -> pd.DataFrame:
+def _resampled(calendar_id: str, timeframe: str) -> pd.DataFrame:
     target_seconds = int(interval_to_timedelta(timeframe).total_seconds())
     return resample_session_ohlcv(
-        _ohlcv(_session_minutes(calendar_id, session_mode)),
+        _ohlcv(_session_minutes(calendar_id)),
         target_seconds,
         calendar_id,
-        session_mode=session_mode,
     )
 
 
@@ -113,22 +118,29 @@ def _load(index: pd.DatetimeIndex, timeframe: str, calendar_id: str, session_mod
     )
 
 
+def _regular_bar_starts(calendar_id: str, timeframe: str) -> pd.DatetimeIndex:
+    """Starts of the bars a feed of the regular segments only carries."""
+    minutes = _session_minutes(calendar_id, session_mode="regular")
+    starts = {
+        period_start(minute, timeframe, calendar_id, session_mode="regular") for minute in minutes
+    }
+    return pd.DatetimeIndex(sorted(starts))
+
+
 @pytest.mark.parametrize("calendar_id", CALENDARS)
 @pytest.mark.parametrize("timeframe", TIMEFRAMES)
-def test_resampled_bars_pass_both_cadence_gates_under_regular_sessions(
-    calendar_id: str, timeframe: str
-) -> None:
-    resampled = _resampled(calendar_id, timeframe, "regular")
+def test_regular_session_bars_pass_both_cadence_gates(calendar_id: str, timeframe: str) -> None:
+    index = _regular_bar_starts(calendar_id, timeframe)
 
-    validate_bar_cadence(resampled.index, timeframe, calendar_id, session_mode="regular")
+    validate_bar_cadence(index, timeframe, calendar_id, session_mode="regular")
 
     if calendar_id.startswith("XTAIFEX") and timeframe == "H6":
         # The five-hour TAIFEX day segment holds one H6 bar, the very bar D1
         # is, so the loader reads the series as D1.
         with pytest.raises(ValueError, match=r"data timeframes=.*D1"):
-            _load(resampled.index, timeframe, calendar_id, "regular")
+            _load(index, timeframe, calendar_id, "regular")
         return
-    assert _load(resampled.index, timeframe, calendar_id, "regular") == timeframe
+    assert _load(index, timeframe, calendar_id, "regular") == timeframe
 
 
 @pytest.mark.parametrize("calendar_id", CALENDARS)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from functools import cache
 from pathlib import Path
 
@@ -13,6 +13,7 @@ from librae.core.trading_calendar import (
     TAIFEX_INDEX_CALENDAR,
     TAIFEX_LATE_OPEN_CALENDAR,
     _exchange_calendar,
+    _Hours,
     _hours,
     _session_segments,
     _session_table,
@@ -874,3 +875,17 @@ def test_overnight_needs_a_calendar_that_defines_them(calendar_id: str) -> None:
     validate_session_mode(TAIFEX_INDEX_CALENDAR, "overnight")
     with pytest.raises(ValueError, match="session_mode must be one of"):
         validate_session_mode(TAIFEX_INDEX_CALENDAR, "night")
+
+
+@pytest.mark.parametrize(
+    ("night", "night_weekdays"),
+    [
+        ((time(15, 0), time(5, 0)), frozenset()),
+        (None, frozenset({0})),
+    ],
+)
+def test_hours_row_rejects_a_night_without_weekdays_or_the_reverse(
+    night: tuple[time, time] | None, night_weekdays: frozenset[int]
+) -> None:
+    with pytest.raises(ValueError, match="night and night_weekdays"):
+        _Hours(None, (time(8, 45), time(13, 45)), night, (), night_weekdays)
