@@ -156,6 +156,7 @@ Librae owns the current schema, not the upgrade of an existing database:
 - Both look only in the connection's current schema, the first existing
   schema on `search_path`; same-named tables further down the path are
   ignored, so the bootstrap and the check cannot settle on different copies.
+  The bootstrap's role grants name that same schema.
 - Bringing an existing database to the required revision is the deployment's
   job, run as the role that owns the tables. The spec for a revision bump is
   the diff of `timescale_init.sql` between the two Librae versions.

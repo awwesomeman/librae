@@ -1357,12 +1357,13 @@ def test_database_roles_match_runtime_boundaries() -> None:
     schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
 
     assert DSN_ROLES["LIBRAE_CONSOLE_DSN"][0] == "grafana_reader"
-    assert "GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_reader;" in schema
-    assert (
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO quant_app;"
-        in schema
+    # Grants name the schema the tables are created in, never a fixed one.
+    assert "SCHEMA public" not in schema
+    assert "'GRANT SELECT ON ALL TABLES IN SCHEMA %s TO grafana_reader'" in schema
+    assert "'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %s TO quant_app'" in (
+        schema
     )
-    assert "INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO grafana_reader" not in schema
+    assert "INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %s TO grafana_reader" not in schema
 
 
 def test_persisted_order_statuses_match_the_broker_orders_constraint() -> None:

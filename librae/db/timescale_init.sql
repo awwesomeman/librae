@@ -56,26 +56,57 @@ ALTER ROLE grafana_reader WITH
     LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
     PASSWORD :'grafana_reader_password';
 
-REVOKE ALL PRIVILEGES ON SCHEMA public FROM quant_app, grafana_reader;
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM quant_app, grafana_reader;
-REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM quant_app, grafana_reader;
-GRANT USAGE ON SCHEMA public TO quant_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO quant_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO quant_app;
-GRANT USAGE ON SCHEMA public TO grafana_reader;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_reader;
-REVOKE INSERT, UPDATE, DELETE ON librae_schema_revision FROM quant_app, grafana_reader;
+-- Grants follow current_schema(), where the tables below are created.
+DO $$
+DECLARE
+    target text := quote_ident(current_schema());
+BEGIN
+    EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %s FROM quant_app, grafana_reader', target);
+    EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %s FROM quant_app, grafana_reader', target
+    );
+    EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %s FROM quant_app, grafana_reader',
+        target
+    );
+    EXECUTE format('GRANT USAGE ON SCHEMA %s TO quant_app, grafana_reader', target);
+    EXECUTE format(
+        'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %s TO quant_app', target
+    );
+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %s TO quant_app', target);
+    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %s TO grafana_reader', target);
+    EXECUTE format(
+        'REVOKE INSERT, UPDATE, DELETE ON %s.librae_schema_revision FROM quant_app, grafana_reader',
+        target
+    );
 
-ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
-    REVOKE ALL PRIVILEGES ON TABLES FROM quant_app, grafana_reader;
-ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
-    REVOKE ALL PRIVILEGES ON SEQUENCES FROM quant_app, grafana_reader;
-ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO quant_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
-    GRANT USAGE, SELECT ON SEQUENCES TO quant_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA public
-    GRANT SELECT ON TABLES TO grafana_reader;
+    EXECUTE format(
+        'ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA %s '
+        'REVOKE ALL PRIVILEGES ON TABLES FROM quant_app, grafana_reader',
+        target
+    );
+    EXECUTE format(
+        'ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA %s '
+        'REVOKE ALL PRIVILEGES ON SEQUENCES FROM quant_app, grafana_reader',
+        target
+    );
+    EXECUTE format(
+        'ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA %s '
+        'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO quant_app',
+        target
+    );
+    EXECUTE format(
+        'ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA %s '
+        'GRANT USAGE, SELECT ON SEQUENCES TO quant_app',
+        target
+    );
+    EXECUTE format(
+        'ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA %s '
+        'GRANT SELECT ON TABLES TO grafana_reader',
+        target
+    );
+END
+$$;
 
 -- ============================================================
 -- backtest_runs — Run 中樞 (1 row / run)
