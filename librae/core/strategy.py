@@ -15,11 +15,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from math import isfinite
+from math import isfinite, isnan
 from numbers import Real
 from types import MappingProxyType
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 
 from librae.core.market_data import MarketDataView
@@ -32,6 +33,10 @@ TimeInForce = Literal["day", "gtc", "ioc", "fok"]
 # these on the engine's pending decision until they fill or expire; every other
 # value resolves on its first eligible event.
 RESTING_TIME_IN_FORCE: tuple[TimeInForce, ...] = ("day", "gtc")
+# Feature column whose cell, on a bar with an entry or exit signal, holds the
+# values that signal was decided from; stored with it in signal_events.
+SIGNAL_INPUTS_COLUMN = "signal_inputs"
+SignalInputs = dict[str, float | int | bool | str | None]
 
 
 @dataclass(frozen=True)
@@ -378,6 +383,56 @@ class Strategy(ABC):
         group_id), weights, or ``[]``.
         """
         ...
+
+
+def validate_signal_inputs(value: object) -> SignalInputs | None:
+    """Return one signal's inputs as plain JSON scalars, or None if it has none.
+
+    A missing cell (None or NaN) has none. Otherwise the value must map string
+    keys to numbers, strings, booleans or None; NaN becomes None, as a missing
+    value is stored as NULL, and an infinite number is refused because JSON
+    cannot hold it.
+    """
+    if value is None or value is pd.NA or (isinstance(value, float) and isnan(value)):
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            f"{SIGNAL_INPUTS_COLUMN} must be a dict of scalar values, got {type(value).__name__}"
+        )
+    inputs: SignalInputs = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{SIGNAL_INPUTS_COLUMN} keys must be strings, got {key!r}")
+        if isinstance(item, np.generic):
+            item = item.item()
+        if item is None or item is pd.NA:
+            inputs[key] = None
+        elif isinstance(item, bool | int | str):
+            # An int is stored exactly: it is always finite, and turning a
+            # large one into a float would overflow.
+            inputs[key] = item
+        elif isinstance(item, Real):
+            try:
+                number = float(item)
+            except OverflowError as exc:
+                raise ValueError(
+                    f"{SIGNAL_INPUTS_COLUMN}[{key!r}] does not fit a float; "
+                    "only finite numbers are stored"
+                ) from exc
+            if isnan(number):
+                inputs[key] = None
+            elif not isfinite(number):
+                raise ValueError(
+                    f"{SIGNAL_INPUTS_COLUMN}[{key!r}] is {number}; only finite numbers are stored"
+                )
+            else:
+                inputs[key] = number
+        else:
+            raise TypeError(
+                f"{SIGNAL_INPUTS_COLUMN}[{key!r}] must be a number, string, bool or None, "
+                f"got {type(item).__name__}"
+            )
+    return inputs
 
 
 def _validate_positive_finite_number(value: object, field_name: str) -> None:

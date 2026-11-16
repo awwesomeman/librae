@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from numbers import Real
 
 import numpy as np
 import pandas as pd
@@ -107,5 +108,37 @@ def _differs(actual: pd.Series, expected: pd.Series, *, rtol: float, atol: float
             atol=atol,
             equal_nan=True,
         )
-    same = actual.eq(expected) | (actual.isna() & expected.isna())
-    return ~same.fillna(False).to_numpy(dtype=bool)
+    same = [
+        _same_cell(left, right, rtol=rtol, atol=atol)
+        for left, right in zip(actual.to_numpy(), expected.to_numpy(), strict=True)
+    ]
+    return ~np.array(same, dtype=bool)
+
+
+def _same_cell(left: object, right: object, *, rtol: float, atol: float) -> bool:
+    """Compare object cells as numeric columns are: numbers within tolerance,
+    missing equal to missing, recursing into dicts such as ``signal_inputs``,
+    whose warm-up NaN must not read as look-ahead."""
+    left_missing, right_missing = _is_missing(left), _is_missing(right)
+    if left_missing or right_missing:
+        return left_missing and right_missing
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return left.keys() == right.keys() and all(
+            _same_cell(left[key], right[key], rtol=rtol, atol=atol) for key in left
+        )
+    if _is_number(left) and _is_number(right):
+        return bool(np.isclose(float(left), float(right), rtol=rtol, atol=atol))
+    try:
+        return bool(left == right)
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_missing(value: object) -> bool:
+    if value is None or value is pd.NA or value is pd.NaT:
+        return True
+    return isinstance(value, float | np.floating) and bool(np.isnan(value))
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, Real) and not isinstance(value, bool | np.bool_)
