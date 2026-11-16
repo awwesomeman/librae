@@ -81,6 +81,12 @@ from librae.core.market_data import (
     validate_ohlcv_values,
 )
 from librae.core.readiness import next_expected_close
+from librae.core.resting_orders import (
+    expire_day_intents,
+    replace_resting_intents,
+    require_resting_sessions,
+    resting_session_of,
+)
 from librae.core.strategy import (
     AccountSnapshot,
     Context,
@@ -107,7 +113,6 @@ from . import (
     data_readiness,
     halt_recovery,
     ohlcv_audit,
-    resting_orders,
 )
 from .execution_identity import (
     ExecutionIdentity,
@@ -202,6 +207,24 @@ def _validate_feature_output(
     return validate_feature_frame(output, label=symbol, event_ts=event_ts)
 
 
+def _funding_history(
+    source: object,
+    instrument: SymbolInfo,
+    route_owner: str | None,
+) -> Callable[..., pd.DataFrame] | None:
+    """The settlement history a perpetual's bars are funded from, if bound.
+
+    Only the generic adapter route binds one; a bare callable source has no
+    settlement history.
+    """
+    if instrument.instrument_type != "contract_perpetual" or route_owner in ("ibkr", "shioaji"):
+        return None
+    if not callable(getattr(source, "fetch_ohlcv", None)):
+        return None
+    fetch = getattr(source, "fetch_funding_rate_history", None)
+    return fetch if callable(fetch) else None
+
+
 def _bind_market_data_source(
     source: object,
     instrument: SymbolInfo,
@@ -210,7 +233,12 @@ def _bind_market_data_source(
     route_owner: str | None = None,
     calendar_id: str | None = None,
 ) -> BarDataFetcher:
-    """Bind a callable fetcher or a concrete adapter to one resolved symbol."""
+    """Bind a callable fetcher or a concrete adapter to one resolved symbol.
+
+    A perpetual's bars carry the per-bar sum of the funding settlements
+    fetched with them, for the strategy to read; sim pays the settlements
+    themselves (see ``LiveTrader._refresh_funding_settlements``).
+    """
     resolved_calendar_id = calendar_id if calendar_id is not None else instrument.calendar_id
     fetch_ohlcv = getattr(source, "fetch_ohlcv", None)
     if not callable(fetch_ohlcv):
@@ -262,7 +290,7 @@ def _bind_market_data_source(
         )
 
     is_perpetual = instrument.instrument_type == "contract_perpetual"
-    fetch_funding_rate_history = getattr(source, "fetch_funding_rate_history", None)
+    fetch_funding_rate_history = _funding_history(source, instrument, route_owner)
     fetch_borrow_rate_history = getattr(source, "fetch_borrow_rate_history", None)
     reported_rate_failures: set[str] = set()
 
@@ -295,7 +323,7 @@ def _bind_market_data_source(
     # A perpetual's holding cost is funding; anything else that can be sold
     # short is borrowed and pays interest. Never both, or the position is
     # charged twice (see librae.core.financing).
-    if is_perpetual and callable(fetch_funding_rate_history):
+    if fetch_funding_rate_history is not None:
 
         def _with_funding(_symbol, tf, limit, *, drop_incomplete=False):
             bars = base_fetcher(_symbol, tf, limit, drop_incomplete=drop_incomplete)
@@ -864,6 +892,24 @@ class LiveTrader:
         if config.execution.adv_lookback_sessions is not None and self._interval_delta.days < 1:
             for subscription in self._market_data_subscriptions.values():
                 validate_calendar_id(subscription.calendar_id)
+        # Sim pays each funding settlement once, from the source's settlement
+        # history; the per-bar sum on the bars is for the strategy to read.
+        # Live pays nothing itself: the venue's own records are authoritative.
+        self._funding_histories: dict[str, Callable[..., pd.DataFrame]] = {
+            symbol: history
+            for symbol in self._symbols
+            if config.mode != "live"
+            and (
+                history := _funding_history(
+                    sources[symbol], self._instruments[symbol], snapshot.route_owners[symbol]
+                )
+            )
+            is not None
+        }
+        self._funding_settlements: dict[str, dict[datetime, float]] = {
+            symbol: {} for symbol in self._funding_histories
+        }
+        self._funding_history_failing: set[str] = set()
         self._fetchers = {
             symbol: _bind_market_data_source(
                 sources[symbol],
@@ -1220,9 +1266,11 @@ class LiveTrader:
         *,
         primary_symbol: str,
     ) -> None:
-        resting_orders.record_resting_since(
-            decision, ts, self._pending_resting_since, primary_symbol=primary_symbol
-        )
+        """Stamp the event an intent first rested on, once."""
+        if isinstance(decision, PortfolioWeights):
+            return
+        for intent in decision:
+            self._pending_resting_since.setdefault(intent.symbol or primary_symbol, ts)
 
     def _replace_resting_intents(
         self,
@@ -1231,39 +1279,45 @@ class LiveTrader:
         *,
         primary_symbol: str,
     ) -> None:
-        self._pending_decision = resting_orders.replace_resting_intents(
+        if isinstance(self._pending_decision, PortfolioWeights):
+            return
+        kept, replaced = replace_resting_intents(
             self._pending_decision,
             new_decision,
-            ts,
-            self._pending_resting_since,
+            resting_since=self._pending_resting_since.get,
             primary_symbol=primary_symbol,
-            on_runtime_event=self._on_runtime_event,
         )
+        self._forget_resting(replaced, ts, reason="resting_order_replaced")
+        if replaced:
+            self._pending_decision = kept
 
     def _validate_resting_sessions(
         self,
         decision: StrategyDecision,
-        ts: datetime,
         *,
         primary_symbol: str,
     ) -> None:
-        del ts
-        resting_orders.validate_resting_sessions(
+        require_resting_sessions(
             decision,
             primary_symbol=primary_symbol,
-            instruments=self._instruments,
+            calendar_id_of=lambda symbol: self._instruments[symbol].calendar_id,
             timeframe=self._config.timeframe,
         )
 
     def _prune_pending_submissions(self, *, primary_symbol: str) -> None:
-        self._pending_resting_since = resting_orders.prune_pending_submissions(
-            self._pending_decision,
-            self._pending_resting_since,
-            primary_symbol=primary_symbol,
-        )
+        """Forget submissions whose intent is no longer pending."""
+        if isinstance(self._pending_decision, PortfolioWeights):
+            self._pending_resting_since = {}
+            return
+        still_pending = {intent.symbol or primary_symbol for intent in self._pending_decision}
+        self._pending_resting_since = {
+            symbol: submitted_at
+            for symbol, submitted_at in self._pending_resting_since.items()
+            if symbol in still_pending
+        }
 
     def _session_of(self, symbol: str, ts: datetime) -> object:
-        return resting_orders.session_of(
+        return resting_session_of(
             symbol,
             ts,
             calendar_id=self._instruments[symbol].calendar_id,
@@ -1277,15 +1331,33 @@ class LiveTrader:
         *,
         primary_symbol: str,
     ) -> None:
-        self._pending_decision = resting_orders.expire_resting_day_intents(
+        if isinstance(self._pending_decision, PortfolioWeights) or not self._pending_decision:
+            return
+        kept, expired = expire_day_intents(
             self._pending_decision,
             ts,
             priced_symbols,
-            self._pending_resting_since,
+            resting_since=self._pending_resting_since.get,
             primary_symbol=primary_symbol,
             session_of=self._session_of,
-            on_runtime_event=self._on_runtime_event,
         )
+        self._forget_resting(expired, ts, reason="day_order_expired")
+        if expired:
+            self._pending_decision = kept
+
+    def _forget_resting(self, symbols: Sequence[str], ts: datetime, *, reason: str) -> None:
+        """Drop the resting record of intents that left the book, and audit each."""
+        for symbol in symbols:
+            self._pending_resting_since.pop(symbol, None)
+            if self._on_runtime_event:
+                self._on_runtime_event(
+                    RuntimeEvent(
+                        ts=ts,
+                        event_type="decision_skipped",
+                        symbol=symbol,
+                        detail={"reason": reason},
+                    )
+                )
 
     def _without_halted_account(self, decision: StrategyDecision) -> StrategyDecision:
         return [] if self._halted else decision
@@ -1827,6 +1899,7 @@ class LiveTrader:
                     audit_sink=audit_rows,
                     correction_sink=corrections,
                 )
+                self._refresh_funding_settlements(symbol, frame)
             except Exception as exc:
                 frame = self._ohlcv_cache.get(symbol)
                 return _MarketDataFetchResult(
@@ -3988,6 +4061,18 @@ class LiveTrader:
         """Normalize one exact subscription and expose only causally ready rows."""
         if frame.empty:
             return frame
+        if (
+            self._executor.simulation
+            and symbol not in self._funding_histories
+            and FUNDING_RATE_FIELD in frame.columns
+            and frame[FUNDING_RATE_FIELD].notna().any()
+        ):
+            # Refused before the bars reach the cache, so before any fill.
+            raise ValueError(
+                f"{symbol} bars carry {FUNDING_RATE_FIELD}, but its market-data source "
+                "has no fetch_funding_rate_history: sim pays funding once per "
+                "settlement from that history, never from a per-bar rate"
+            )
 
         normalized = self._normalize_runtime_rows(symbol, frame)
         eligible = normalized[AVAILABLE_AT_COLUMN] <= pd.Timestamp(self._utc_now())
@@ -4110,11 +4195,22 @@ class LiveTrader:
             # settlement published after the bar was first fetched.
             tied = cached["ts"].isin(fetched["ts"])
             if tied.any():
-                fresh = fetched.set_index("ts").loc[cached.loc[tied, "ts"]]
+                fresh = (
+                    fetched.set_index("ts")
+                    .loc[cached.loc[tied, "ts"]]
+                    .set_axis(cached.index[tied], axis="index")
+                )
                 for column in cached.columns.intersection(fresh.columns):
-                    cached.loc[tied, column] = cached.loc[tied, column].fillna(
-                        fresh[column].set_axis(cached.index[tied])
+                    cached.loc[tied, column] = cached.loc[tied, column].fillna(fresh[column])
+                # A fetch that has seen a later settlement in a bar carries the
+                # bar's whole sum. Sim pays each settlement once, not this sum,
+                # so taking it changes what the strategy sees, never the cash.
+                funding = [FUNDING_RATE_FIELD, FUNDING_SETTLED_AT_FIELD]
+                if set(funding) <= set(cached.columns) & set(fresh.columns):
+                    later = pd.to_datetime(fresh[FUNDING_SETTLED_AT_FIELD], utc=True) > (
+                        pd.to_datetime(cached.loc[tied, FUNDING_SETTLED_AT_FIELD], utc=True)
                     )
+                    cached.loc[later.index[later], funding] = fresh.loc[later, funding]
             cached = cached.assign(_librae_source_priority=0)
             fetched = fetched.assign(_librae_source_priority=1)
             merged = pd.concat([cached, fetched], ignore_index=True)
@@ -6959,7 +7055,7 @@ class LiveTrader:
                 )
                 self._record_resting_since(resting, ts, primary_symbol=primary_symbol)
             self._prune_pending_submissions(primary_symbol=primary_symbol)
-            self._apply_financing_cash_flows(ts, raw_bars, raw_frames)
+            self._apply_financing_cash_flows(ts, raw_bars)
         elif ready_decision and not self._execute_live_decision(
             ready_decision,
             raw_bars,
@@ -7139,7 +7235,7 @@ class LiveTrader:
         intent = self._without_halted_account(intent)
         self._period_index += 1
         if self._executor.simulation:
-            self._validate_resting_sessions(intent, ts, primary_symbol=primary_symbol)
+            self._validate_resting_sessions(intent, primary_symbol=primary_symbol)
             self._replace_resting_intents(intent, ts, primary_symbol=primary_symbol)
             self._pending_decision = merge_pending_decisions(
                 self._pending_decision,
@@ -7244,15 +7340,19 @@ class LiveTrader:
         self,
         ts: datetime,
         bars: Mapping[str, Mapping[str, object]],
-        frames: Mapping[str, pd.DataFrame],
     ) -> None:
         """Apply each simulation financing observation at most once.
 
         Funding and borrow accrue off the same bar event and share one
         per-symbol gate: both are consumed together or not at all.
         """
+        bar_start = pd.Timestamp(ts).to_pydatetime()
+        for symbol in bars.keys() & self._funding_settlements.keys():
+            # Settlements before the first bar this run charges are not its
+            # own, so none of them is ever due.
+            self._last_funding_settled_at.setdefault(symbol, bar_start - timedelta(microseconds=1))
         eligible_bars = {
-            symbol: self._unpaid_funding(symbol, ts, bar, frames.get(symbol))
+            symbol: self._unpaid_funding(symbol, bar_start, bar)
             for symbol, bar in bars.items()
             if ts
             > self._last_financing_ts.get(
@@ -7276,9 +7376,12 @@ class LiveTrader:
         for symbol in (*observed_symbols, *borrow_symbols):
             self._last_financing_ts[symbol] = ts
         for symbol in observed_symbols:
-            settled_at = eligible_bars[symbol].get(FUNDING_SETTLED_AT_FIELD)
-            if settled_at is not None and not pd.isna(settled_at):
-                self._last_funding_settled_at[symbol] = pd.Timestamp(settled_at).to_pydatetime()
+            self._last_funding_settled_at[symbol] = eligible_bars[symbol][FUNDING_SETTLED_AT_FIELD]
+        for symbol in bars.keys() & self._funding_settlements.keys():
+            paid_through = self._last_funding_settled_at[symbol]
+            settlements = self._funding_settlements[symbol]
+            for settled_at in [at for at in settlements if at <= paid_through]:
+                del settlements[settled_at]
         for cash_flow in cash_flows:
             self._cash += cash_flow.cash_flow
             if self._on_financing_cash_flow:
@@ -7286,30 +7389,88 @@ class LiveTrader:
         if cash_flows:
             self._performance_dirty = True
 
+    def _refresh_funding_settlements(self, symbol: str, frame: pd.DataFrame | None) -> None:
+        """Fetch every settlement after the paid watermark into the ledger.
+
+        From the watermark, not from the bars just fetched: bars can come from
+        a ``warmup_fetcher`` or be replayed after a restart, and a settlement
+        can be published bars after its own bar closed. Each one stays due
+        until paid, so the ledger holds all of them before a bar is processed.
+        Until something is paid it starts at the oldest cached bar. Only a
+        fetch that brings a bar the run has not processed asks, since no
+        other bar can pay.
+
+        Runs on the thread fetching ``symbol``, the only one that touches its
+        ledger until the cycle's fetches are done. Times are kept to the
+        microsecond the checkpointed watermark holds, so a settlement once
+        paid always compares as paid.
+        """
+        history = self._funding_histories.get(symbol)
+        if history is None or frame is None or frame.empty:
+            return
+        processed = self._last_bar_ts.get(symbol)
+        if processed is not None and pd.Timestamp(frame["ts"].iloc[-1]) <= processed:
+            return
+        since = self._last_funding_settled_at.get(symbol, pd.Timestamp(frame["ts"].iloc[0]))
+        try:
+            settlements = history(
+                self._instruments[symbol].venue_symbol,
+                since=pd.Timestamp(since).floor("ms").value // 1_000_000,
+                limit=None,
+            )
+        except Exception:
+            # The bars stand without it; whatever this fetch missed stays due
+            # and is paid once a later fetch brings it.
+            if symbol not in self._funding_history_failing:
+                self._funding_history_failing.add(symbol)
+                logger.warning(
+                    "%s funding settlements unavailable; positions in it are not "
+                    "charged funding until a fetch succeeds",
+                    symbol,
+                    exc_info=True,
+                )
+            return
+        self._funding_history_failing.discard(symbol)
+        if settlements.empty:
+            return
+        times = pd.to_datetime(settlements["ts"], utc=True)
+        # Unknown is not free, and one settlement is paid once.
+        if settlements[FUNDING_RATE_FIELD].isna().any():
+            raise ValueError(f"{symbol} funding settlements must all carry a funding_rate")
+        if not times.is_unique:
+            raise ValueError(f"{symbol} funding settlement times must be unique")
+        ledger = self._funding_settlements[symbol]
+        for settled_at, rate in zip(times, settlements[FUNDING_RATE_FIELD], strict=True):
+            ledger[settled_at.floor("us").to_pydatetime()] = float(rate)
+
     def _unpaid_funding(
         self,
         symbol: str,
-        ts: datetime,
+        bar_start: datetime,
         bar: Mapping[str, object],
-        frame: pd.DataFrame | None,
     ) -> Mapping[str, object]:
-        """The bar, carrying every settlement through it not yet paid.
+        """The bar, carrying every settlement due through it and not yet paid.
 
-        A settlement published after the bar it falls in was processed lands
-        on that bar on a later fetch; it is paid on this bar instead of never,
-        as a backtest pays one that fell in a gap.
+        A settlement is due on the bar whose end is after it, the bar
+        ``attach_funding_rate`` puts it on, and stays due until paid: one
+        published after its bar was processed is paid on the next bar instead
+        of never, as a backtest pays one that fell in a gap. Each settlement
+        is paid once, so a later settlement inside a bar already paid for is
+        paid alone. The bar's own ``funding_rate`` is the display sum and is
+        never paid.
         """
-        paid_through = self._last_funding_settled_at.get(symbol)
-        if paid_through is None or frame is None or FUNDING_SETTLED_AT_FIELD not in frame.columns:
+        settlements = self._funding_settlements.get(symbol)
+        if settlements is None:
             return bar
-        settled_at = pd.to_datetime(frame[FUNDING_SETTLED_AT_FIELD], utc=True)
-        unpaid = frame[(settled_at > pd.Timestamp(paid_through)) & (frame["ts"] <= ts)]
-        if unpaid.empty:
+        paid_through = self._last_funding_settled_at[symbol]
+        bar_end = bar_start + self._interval_delta
+        due = sorted(at for at in settlements if paid_through < at < bar_end)
+        if not due:
             return {**bar, FUNDING_RATE_FIELD: float("nan"), FUNDING_SETTLED_AT_FIELD: pd.NaT}
         return {
             **bar,
-            FUNDING_RATE_FIELD: float(unpaid[FUNDING_RATE_FIELD].sum()),
-            FUNDING_SETTLED_AT_FIELD: settled_at[unpaid.index].max(),
+            FUNDING_RATE_FIELD: sum(settlements[at] for at in due),
+            FUNDING_SETTLED_AT_FIELD: due[-1],
         }
 
     def _calc_account_snapshot(self) -> tuple[float, dict[str, Position]]:

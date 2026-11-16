@@ -414,6 +414,7 @@ librae/
 │   ├── cost_model.py         CostModel (commission / slippage / tax / contract multiplier / margin)
 │   ├── metrics.py            performance metrics + on-demand trade/signal outcome analysis
 │   ├── run_config.py         RunConfig + ExecutionPolicy + RiskPolicy — typed run parameters
+│   ├── resting_orders.py     resting intent lifetime — day expiry and cancel/replace, for backtest and sim alike
 │   └── utils.py              generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
 ├── integrations.py           stable public protocols and broker value types
@@ -432,8 +433,7 @@ librae/
 │   ├── auxiliary_cache.py    auxiliary refetch cadence + freshness that never holds the run
 │   ├── ohlcv_audit.py        best-effort vs at-least-once OHLCV audit delivery + its queue
 │   ├── halt_recovery.py      whether a halted run may reset, and the blocking reason
-│   ├── persistent_alerts.py  alerts for a lasting problem — first, repeat, resolved
-│   └── resting_orders.py     live intent lifetime — replace, expire, prune (mirrors backtest)
+│   └── persistent_alerts.py  alerts for a lasting problem — first, repeat, resolved
 │
 ├── console/                  read-only Streamlit monitoring console (`console` extra)
 │
