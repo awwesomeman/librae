@@ -23,9 +23,8 @@
 #   ./deploy/trade.sh reset momentum-live
 #   ./deploy/trade.sh stop momentum-live
 #
-# Strategy code comes from the selected immutable image. Without
-# TRADE_IMAGE_REF, local development builds an image from this checkout and
-# TRADE_STRATEGY_PATH. An optional host config is mounted read-only and passed
+# Strategy code comes from the immutable image selected by TRADE_IMAGE_REF
+# (see build_push.sh). An optional host config is mounted read-only and passed
 # to the strategy's existing --config option.
 #
 # Live mode requires one explicitly selected Docker env file; sim mode
@@ -394,56 +393,12 @@ cmd_start() {
         image="${TRADE_IMAGE_REF}"
         echo "Pulling immutable trade image ${image}..."
         docker pull -q "${image}" >/dev/null
-    elif [[ -n "${TRADE_IMAGE:-}" ]]; then
-        echo "TRADE_IMAGE is a publish repository, not a deployable reference." >&2
+    else
+        if [[ -n "${TRADE_IMAGE:-}" ]]; then
+            echo "TRADE_IMAGE is a publish repository, not a deployable reference." >&2
+        fi
         echo "Set TRADE_IMAGE_REF to the digest printed by build_push.sh." >&2
         exit 1
-    else
-        image="quant-trade:local"
-        local strategy_source
-        strategy_source="${TRADE_STRATEGY_PATH:?Set TRADE_STRATEGY_PATH to the directory containing <strategy>/run.py.}"
-        if [[ "${strategy_source}" != /* ]]; then
-            strategy_source="${PROJECT_ROOT}/${strategy_source}"
-        fi
-        if [[ ! -d "${strategy_source}" ]]; then
-            echo "Strategy source directory not found: ${strategy_source}" >&2
-            exit 1
-        fi
-        strategy_source="$(cd "${strategy_source}" && pwd)"
-        for required_file in __init__.py run.py config.yaml; do
-            if [[ ! -f "${strategy_source}/${strategy}/${required_file}" ]]; then
-                echo "Missing strategy file: ${strategy_source}/${strategy}/${required_file}" >&2
-                exit 1
-            fi
-        done
-        local librae_revision librae_version
-        librae_revision="$(git -C "${PROJECT_ROOT}" rev-parse --verify HEAD)"
-        librae_version="0+g${librae_revision:0:12}"
-        if [[ -n "$(git -C "${PROJECT_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
-            librae_version="${librae_version}.dirty"
-        fi
-        local -a uv_build_args=()
-        [[ -z "${UV_DEFAULT_INDEX:-}" ]] || uv_build_args+=(--build-arg UV_DEFAULT_INDEX)
-        [[ -z "${UV_INDEX:-}" ]] || uv_build_args+=(--build-arg UV_INDEX)
-        [[ -z "${UV_FIND_LINKS:-}" ]] || uv_build_args+=(--build-arg UV_FIND_LINKS)
-        if [[ -n "${UV_CONFIG_FILE:-}" ]]; then
-            local uv_config_source="${UV_CONFIG_FILE}"
-            if [[ "${uv_config_source}" != /* ]]; then
-                uv_config_source="${PROJECT_ROOT}/${uv_config_source}"
-            fi
-            if [[ ! -f "${uv_config_source}" ]]; then
-                echo "UV_CONFIG_FILE not found: ${uv_config_source}" >&2
-                exit 1
-            fi
-            uv_build_args+=(--secret "id=uv_config,src=${uv_config_source}")
-        fi
-        echo "Building trade image locally (librae=${librae_version})..."
-        docker build -q \
-            "${uv_build_args[@]+"${uv_build_args[@]}"}" \
-            --build-context "strategy_source=${strategy_source}" \
-            --build-arg LIBRAE_VERSION="${librae_version}" \
-            --build-arg LIBRAE_REVISION="${librae_revision}" \
-            -t "${image}" -f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}" >/dev/null
     fi
 
     local selected_revision runtime_revision

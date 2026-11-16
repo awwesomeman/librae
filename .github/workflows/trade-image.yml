@@ -32,8 +32,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Validate deployment scripts
-        run: bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh
+      - name: Validate deployment files
+        run: |
+          for script in deploy/*.sh; do
+            bash -n "${script}"
+          done
+          POSTGRES_PASSWORD=ci POSTGRES_APP_PASSWORD=ci POSTGRES_GRAFANA_PASSWORD=ci \
+            docker compose --file deploy/docker-compose.yml config --quiet
 
       - name: Enable multi-platform builds
         if: github.event_name == 'push'
@@ -898,6 +903,18 @@ jobs:
               cursor.close()
               connection.close()
           PY
+
+      - name: Verify database backup and restore round trip
+        run: |
+          psql_quant() {
+            docker exec quant_timescaledb psql -U quant -d quant -v ON_ERROR_STOP=1 -tA "$@"
+          }
+          psql_quant -c "CREATE TABLE ci_roundtrip (marker text); INSERT INTO ci_roundtrip VALUES ('kept');"
+          ./deploy/db_backup.sh "${RUNNER_TEMP}/backups"
+          psql_quant -c "DROP TABLE ci_roundtrip;"
+          ./deploy/db_restore.sh "${RUNNER_TEMP}"/backups/quant_*.dump
+          test "$(psql_quant -c "SELECT marker FROM ci_roundtrip")" = "kept"
+          psql_quant -c "SELECT count(*) FROM backtest_runs" >/dev/null
 
       - name: Verify Linux host-gateway routing
         run: |
