@@ -13,8 +13,9 @@ import pytest
 from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.executor import validate_strategy_decision
+from librae.core.resting_orders import expire_day_intents
 from librae.core.run_config import ExecutionPolicy
-from librae.core.strategy import OrderIntent, Strategy
+from librae.core.strategy import OrderIntent, PortfolioWeights, Strategy
 
 
 def _panel(periods: int = 6, volume: float = 100.0) -> pd.DataFrame:
@@ -605,27 +606,24 @@ def test_day_expiry_skips_symbols_without_a_bar_on_this_event() -> None:
     """On a union timeline another instrument's bar can fall outside this
     symbol's session entirely. That is not a boundary its order crossed, and
     asking for a session label there raises."""
-    from librae.backtest.engine import _DecisionEnvelope, _expire_day_intents
-
     resting = OrderIntent(
         action="long", symbol="TW", quantity=1.0, limit_price=95.0, time_in_force="day"
     )
-    ts = pd.Timestamp("2025-01-01T02:00Z")
-    envelope = _DecisionEnvelope([resting], None, pd.Timestamp("2025-01-01T01:00Z"))
 
     def exploding_session_of(symbol: str, when: pd.Timestamp) -> object:
         raise ValueError(f"{when} is outside the XTAI trading session")
 
-    kept, expired = _expire_day_intents(
-        [envelope],
-        ts,
+    kept, expired = expire_day_intents(
+        [resting],
+        pd.Timestamp("2025-01-01T02:00Z"),
         {"BTCUSDT"},
+        resting_since=lambda _symbol: pd.Timestamp("2025-01-01T01:00Z"),
         primary_symbol="BTCUSDT",
         session_of=exploding_session_of,
     )
 
     assert expired == []
-    assert kept[0].decision == [resting]
+    assert kept == [resting]
 
 
 def test_intraday_day_limit_without_a_calendar_fails_on_the_emitting_bar() -> None:
@@ -828,3 +826,224 @@ class TestUnionTimelineDoesNotBorrowAnotherCalendar:
 
         expiries = [reason for reason in _skip_reasons(result) if reason == "day_order_expired"]
         assert len(expiries) <= 1, "expiry must be judged once, on the symbol's own bars"
+
+
+# ---------------------------------------------------------------------------
+# The same intents through both runtimes
+# ---------------------------------------------------------------------------
+
+# BTCUSDT trades 24/7, so each UTC date is one session.
+_STARTS = pd.date_range("2025-01-01T21:00Z", periods=11, freq="h", tz="UTC")
+_LOWS = [99.0] * 7 + [96.0] + [99.0] * 3
+
+
+def _lifetime_bars(count: int) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts": _STARTS[:count],
+            "open": 100.0,
+            "high": 101.0,
+            "low": _LOWS[:count],
+            "close": 100.0,
+            "volume": 1_000.0,
+        }
+    )
+
+
+def _btc_limit(price: float, time_in_force: str) -> OrderIntent:
+    return OrderIntent(
+        action="long",
+        symbol="BTCUSDT",
+        quantity=1.0,
+        limit_price=price,
+        time_in_force=time_in_force,
+    )
+
+
+# A day limit that expires at midnight, a gtc limit that a later one
+# replaces, the replacement filling once a low reaches it, then a close.
+_SCRIPT = {
+    _STARTS[0]: [_btc_limit(95.0, "day")],
+    _STARTS[3]: [_btc_limit(90.0, "gtc")],
+    _STARTS[5]: [_btc_limit(97.0, "gtc")],
+    _STARTS[8]: [OrderIntent(action="close", symbol="BTCUSDT")],
+}
+
+
+class _Scripted(Strategy):
+    def on_bar(self, ctx):
+        return list(_SCRIPT.get(pd.Timestamp(ctx.ts), []))
+
+
+def _lifetime_outcome(position_events, runtime_events) -> tuple[list, list]:
+    fills = [
+        (pd.Timestamp(event.ts), event.event_type, event.price, event.fill_quantity)
+        for event in position_events
+    ]
+    skips = sorted(
+        (pd.Timestamp(event.ts), event.symbol, str(reason))
+        for event in runtime_events
+        if event.event_type == "decision_skipped"
+        for reason in [
+            event.detail.get("reason"),
+            *(related.get("reason") for related in event.detail.get("related_events", [])),
+        ]
+    )
+    return fills, skips
+
+
+def _backtest_lifetime() -> tuple[list, list]:
+    from tests.engine.live_factories import _test_cfg
+
+    bars = _lifetime_bars(len(_STARTS)).drop(columns="ts")
+    bars.index = pd.MultiIndex.from_product([["BTCUSDT"], _STARTS], names=["symbol", "datetime"])
+    result = Backtest(
+        bars,
+        _Scripted(),
+        config=_test_cfg(mode="backtest", warmup_periods=1),
+        cost_model=CostModel.zero(),
+    ).run()
+    return _lifetime_outcome(result.position_events, result.runtime_events)
+
+
+def _simulated_lifetime() -> tuple[list, list]:
+    from tests.engine.live_factories import _test_cfg, make_live_runner
+
+    visible = {"bars": 1}
+    runner = make_live_runner(
+        strategy=_Scripted(),
+        fetcher=lambda _symbol, _tf, limit, **_kw: _lifetime_bars(visible["bars"]).iloc[-limit:],
+        config=_test_cfg(mode="sim", warmup_periods=1),
+        clock=lambda: (_STARTS[-1] + pd.Timedelta(hours=1)).to_pydatetime(),
+    )
+    position_events: list = []
+    runtime_events: list = []
+    runner._on_position_event = lambda event, _sequence: position_events.append(event)
+    runner._on_runtime_event = runtime_events.append
+    for bars in range(1, len(_STARTS) + 1):
+        visible["bars"] = bars
+        runner._poll_cycle()
+    return _lifetime_outcome(position_events, runtime_events)
+
+
+def test_backtest_and_simulation_run_one_intent_sequence_alike() -> None:
+    backtest = _backtest_lifetime()
+
+    assert _simulated_lifetime() == backtest
+    # Pinned too, so a change that breaks both runtimes alike still fails.
+    assert backtest == (
+        [(_STARTS[7], "open", 97.0, 1.0), (_STARTS[9], "close", 100.0, 1.0)],
+        [
+            (_STARTS[3], "BTCUSDT", "day_order_expired"),
+            (_STARTS[5], "BTCUSDT", "resting_order_replaced"),
+        ],
+    )
+
+
+_RESTED = pd.Timestamp("2025-01-01T22:00Z").to_pydatetime()
+_NEXT_SESSION = pd.Timestamp("2025-01-02T01:00Z").to_pydatetime()
+_SAME_SESSION = pd.Timestamp("2025-01-02T00:00Z").to_pydatetime()
+
+
+def _eth(time_in_force: str) -> OrderIntent:
+    return OrderIntent(
+        action="long", symbol="ETHUSDT", quantity=1.0, limit_price=95.0, time_in_force=time_in_force
+    )
+
+
+# Each case: pending (intent, when it first rested), the case's input, and
+# the symbols both runtimes must audit.
+_EXPIRY_CASES = {
+    "past session expires": (
+        [(_btc_limit(95.0, "day"), _RESTED), (_eth("gtc"), _RESTED)],
+        {"BTCUSDT", "ETHUSDT"},
+        ["BTCUSDT"],
+    ),
+    "unpriced survives": ([(_btc_limit(95.0, "day"), _RESTED)], {"ETHUSDT"}, []),
+    "not yet rested survives": ([(_btc_limit(95.0, "day"), None)], {"BTCUSDT"}, []),
+    "own session survives": (
+        [(_btc_limit(95.0, "day"), _RESTED), (_eth("day"), _SAME_SESSION)],
+        {"BTCUSDT", "ETHUSDT"},
+        ["BTCUSDT"],
+    ),
+}
+
+_REPLACE_CASES = {
+    "rested symbol replaced": (
+        [(_btc_limit(95.0, "gtc"), _RESTED), (_eth("gtc"), None)],
+        [OrderIntent(action="long", symbol="BTCUSDT", quantity=1.0)],
+        ["BTCUSDT"],
+    ),
+    "unrested symbol kept": (
+        [(_btc_limit(95.0, "gtc"), _RESTED), (_eth("gtc"), None)],
+        [OrderIntent(action="long", symbol="ETHUSDT", quantity=1.0)],
+        [],
+    ),
+    "whole-book target replaces every rested order": (
+        [(_btc_limit(95.0, "gtc"), _RESTED), (_eth("gtc"), _RESTED)],
+        PortfolioWeights({"BTCUSDT": 0.5}),
+        ["BTCUSDT", "ETHUSDT"],
+    ),
+    "no decision replaces nothing": ([(_btc_limit(95.0, "gtc"), _RESTED)], [], []),
+}
+
+
+def _simulation_with_pending(pending):
+    from tests.engine.live_factories import _test_cfg, make_live_runner
+
+    runner = make_live_runner(config=_test_cfg(mode="sim", symbols=["BTCUSDT", "ETHUSDT"]))
+    runner._pending_decision = [intent for intent, _ in pending]
+    runner._pending_resting_since = {
+        intent.symbol: since for intent, since in pending if since is not None
+    }
+    audited: list[str] = []
+    runner._on_runtime_event = lambda event: audited.append(event.symbol)
+    return runner, audited
+
+
+def _envelopes(pending):
+    from librae.backtest.engine import _DecisionEnvelope
+
+    return [_DecisionEnvelope([intent], None, since) for intent, since in pending]
+
+
+def _flatten(envelopes) -> list[OrderIntent]:
+    return [intent for envelope in envelopes for intent in envelope.decision]
+
+
+@pytest.mark.parametrize("case", _EXPIRY_CASES)
+def test_backtest_and_simulation_expire_the_same_pending_intents(case: str) -> None:
+    from librae.backtest.engine import _expire_day_intents
+
+    pending, priced, expected = _EXPIRY_CASES[case]
+    runner, audited = _simulation_with_pending(pending)
+
+    kept, expired = _expire_day_intents(
+        _envelopes(pending),
+        _NEXT_SESSION,
+        priced,
+        primary_symbol="BTCUSDT",
+        session_of=runner._session_of,
+    )
+    runner._expire_resting_day_intents(_NEXT_SESSION, priced, primary_symbol="BTCUSDT")
+
+    assert expired == audited == expected
+    assert runner._pending_decision == _flatten(kept)
+    assert set(runner._pending_resting_since).isdisjoint(expired)
+
+
+@pytest.mark.parametrize("case", _REPLACE_CASES)
+def test_backtest_and_simulation_replace_the_same_pending_intents(case: str) -> None:
+    from librae.backtest.engine import _replace_resting_intents
+
+    pending, new_decision, expected = _REPLACE_CASES[case]
+    runner, audited = _simulation_with_pending(pending)
+
+    kept, replaced = _replace_resting_intents(
+        _envelopes(pending), new_decision, primary_symbol="BTCUSDT"
+    )
+    runner._replace_resting_intents(new_decision, _NEXT_SESSION, primary_symbol="BTCUSDT")
+
+    assert replaced == audited == expected
+    assert runner._pending_decision == _flatten(kept)
+    assert set(runner._pending_resting_since).isdisjoint(replaced)

@@ -1224,16 +1224,29 @@ without making other metrics invalid.
 
 ## Position financing cash flows
 
-Backtest and shadow-simulation bars may contain a `funding_rate` observation,
-expressed as a decimal rate for that payment. `funding_mark_price` is optional;
-the same event's raw `close` is used when it is absent. Missing rates mean no
-payment: the engine never forward-fills or fetches them.
+Backtest bars may contain a `funding_rate` observation, expressed as a decimal
+rate for that payment. `funding_mark_price` is optional; the same event's raw
+`close` is used when it is absent. Missing rates mean no payment: the engine
+never forward-fills them.
 
 `attach_funding_rate(bars, settlements, timeframe=...)` builds the columns, and
 the live market-data binding uses it too, so both modes charge a settlement on
 the same bar: the bar whose `[ts, ts + timeframe)` contains it, summed when a
 bar holds several, or the next bar when it falls in a gap. It also writes
-`funding_settled_at`, the bar's latest settlement. A backtest refuses:
+`funding_settled_at`, the bar's latest settlement.
+
+Shadow simulation pays each settlement once, from a perpetual source's
+`fetch_funding_rate_history`. It fetches from the last settlement paid, not
+from the bars it just fetched, so a settlement published bars late, or one in
+bars a restart replays from a `warmup_fetcher`, is still paid. Only that
+settlement time is checkpointed, so a restart fetches the settlements again and
+pays none twice. The `funding_rate` on sim bars is the per-bar sum, for the
+strategy to read, and grows when a later fetch brings a settlement the bar
+holds. Fetched sim bars carrying `funding_rate` whose source has no
+`fetch_funding_rate_history` are refused before they reach the run, rather than
+left unpaid.
+
+A backtest refuses:
 
 - a `funding_rate` without `funding_settled_at`, or one settlement on more
   than one bar (what an as-of join or forward fill produces);
@@ -1247,8 +1260,8 @@ before its equity snapshot and strategy decision. Every fill of the bar comes
 first, a stop, take-profit or limit reached inside it included, so the position
 left after them pays a settlement in that bar wherever inside it the
 settlement fell; backtest and sim order it the same way. A settlement published
-after sim processed its bar is paid on the next one. Positive rates mean longs
-pay shorts:
+after sim processed its bar is paid on the next one, alone even when an earlier
+settlement in its bar was already paid. Positive rates mean longs pay shorts:
 
 `cash_flow = -side_sign * quantity * mark_price * multiplier * funding_rate`
 
@@ -1626,7 +1639,7 @@ independently. The engine never selects these implementations from config.
 | Decision timing | completed T | completed T | completed T | completed T |
 | Execution timing | simulated on eligible T+1 | simulated on eligible T+1 | submit after T decision | submit after T decision |
 | Fill truth | raw T+1 bar + `CostModel` | raw T+1 bar + `CostModel` | paper `ExecutionReport` only | broker `ExecutionReport` only |
-| Funding truth | supplied timestamped bar observations | supplied timestamped bar observations | broker/exchange balance and records | broker/exchange balance and records |
+| Funding truth | supplied timestamped bar observations | settlements from the source's funding history | broker/exchange balance and records | broker/exchange balance and records |
 | Non-final order | one-bar intent expires | one-bar intent expires | durable cumulative order lifecycle | durable cumulative lifecycle; optional local timeout/cancel |
 | Restart | new run | restore when state is enabled | restore and reconcile | restore and reconcile |
 

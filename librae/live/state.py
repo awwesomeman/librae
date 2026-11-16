@@ -305,6 +305,10 @@ class LiveRuntimeState:
     last_feature_as_of: datetime | None = None
     last_bar_ts: dict[str, datetime] = field(default_factory=dict)
     last_financing_ts: dict[str, datetime] = field(default_factory=dict)
+    # Every funding settlement at or before this time has been paid, or came
+    # before the first bar the run charged. The settlements themselves are
+    # not kept: a restart fetches them again, and this alone keeps any from
+    # being paid twice.
     last_funding_settled_at: dict[str, datetime] = field(default_factory=dict)
     pending_decision: StrategyDecision = field(default_factory=list)
     # Bar timestamp each pending intent FIRST rested on, keyed by symbol

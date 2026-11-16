@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,7 @@ from librae.core.financing import (
 )
 from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import PositionState
+from librae.core.utils import interval_to_timedelta
 from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
 
@@ -729,88 +730,6 @@ def test_financing_pool_tracks_scale_in_and_same_timestamp_close_order() -> None
     assert attributed == pytest.approx([5.0, 45.0])
 
 
-def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
-    timestamps = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
-    rates = [np.nan, 0.01, -0.005]
-    frames = [
-        pd.DataFrame(
-            {
-                "ts": timestamps[: index + 1],
-                "open": 100.0,
-                "high": 100.0,
-                "low": 100.0,
-                "close": 100.0,
-                "volume": 1_000.0,
-                "funding_rate": rates[: index + 1],
-            }
-        )
-        for index in range(3)
-    ]
-    responses = iter(frames)
-    store = MemoryLiveStateStore()
-    recorded = []
-    config = make_test_cfg(
-        symbols=["PERP"],
-        execution=ExecutionPolicy(
-            max_bar_volume_participation_rate=None,
-            warmup_periods=1,
-        ),
-        instrument_overrides={
-            "PERP": {
-                "instrument_type": "contract_perpetual",
-                "currency": "USDT",
-                "calendar_id": "24/7",
-            }
-        },
-    )
-
-    runner = LiveTrader(
-        _OpenOnce(),
-        lambda frame: frame,
-        config=config,
-        adapter=lambda *_args, **_kwargs: next(responses),
-        cost_model=_cost_model(),
-        state_store=store,
-        on_bar=None,
-        on_position_event=None,
-        on_ohlcv=None,
-        on_heartbeat=None,
-        on_signal_outcome=None,
-        on_financing_cash_flow=recorded.append,
-        warmup_fetcher=None,
-        notifier=None,
-        clock=lambda: datetime(2026, 1, 1, 3, tzinfo=UTC),
-    )
-    runner._sleep = lambda _seconds: None
-    runner.run(max_iterations=3)
-
-    assert runner._cash == pytest.approx(99_790.0)
-    assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, 10.0])
-
-    restored = LiveTrader(
-        _OpenOnce(),
-        lambda frame: frame,
-        config=config,
-        adapter=lambda *_args, **_kwargs: frames[-1],
-        cost_model=_cost_model(),
-        state_store=store,
-        on_bar=None,
-        on_position_event=None,
-        on_ohlcv=None,
-        on_heartbeat=None,
-        on_signal_outcome=None,
-        on_financing_cash_flow=recorded.append,
-        warmup_fetcher=None,
-        notifier=None,
-        clock=lambda: datetime(2026, 1, 1, 3, tzinfo=UTC),
-    )
-    restored._sleep = lambda _seconds: None
-    restored.run(max_iterations=1)
-
-    assert restored._cash == pytest.approx(99_790.0)
-    assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, 10.0])
-
-
 # ---------------------------------------------------------------------------
 # Short borrow
 # ---------------------------------------------------------------------------
@@ -1076,18 +995,46 @@ def test_backtest_refuses_a_settlement_placed_a_bar_late() -> None:
         ).run()
 
 
-def test_shadow_simulation_pays_a_late_published_settlement_on_the_next_bar() -> None:
-    """The venue publishes the 02:59:59.997 settlement after the 02:00 bar was
-    processed; it is paid at 03:00 instead of never."""
-    timestamps = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
-    settlements = _settlements("2026-01-01T01:10Z", "2026-01-01T02:59:59.997Z")
-    settlements["funding_rate"] = [0.01, -0.005]
-    published = [0, 1, 1, 2]
+# ---------------------------------------------------------------------------
+# Sim pays each settlement once
+# ---------------------------------------------------------------------------
 
-    def frame(index: int) -> pd.DataFrame:
+
+class _PerpetualVenue:
+    """A perpetual's bars and funding settlements as a venue publishes them.
+
+    A bar is served once it has closed, and a settlement once it is
+    published: at its settlement time unless ``published_at`` holds it back.
+    """
+
+    def __init__(
+        self,
+        clock,
+        *,
+        timeframe: str,
+        bars: int,
+        settlements: dict[str, float],
+        published_at: dict[str, str] | None = None,
+    ) -> None:
+        self._clock = clock
+        self._interval = interval_to_timedelta(timeframe)
+        self._starts = pd.date_range("2026-01-01", periods=bars, freq=self._interval, tz="UTC")
+        published_at = published_at or {}
+        self._settlements = pd.DataFrame(
+            {
+                "ts": pd.to_datetime(list(settlements), utc=True, format="ISO8601"),
+                "funding_rate": list(settlements.values()),
+            }
+        )
+        self._published_at = pd.to_datetime(
+            [published_at.get(at, at) for at in settlements], utc=True, format="ISO8601"
+        )
+
+    def fetch_ohlcv(self, symbol, timeframe, limit=None, **_kwargs) -> pd.DataFrame:
+        closed = self._starts[self._starts + self._interval <= self._clock()]
         bars = pd.DataFrame(
             {
-                "ts": timestamps[: index + 1],
+                "ts": closed,
                 "open": 100.0,
                 "high": 100.0,
                 "low": 100.0,
@@ -1095,16 +1042,35 @@ def test_shadow_simulation_pays_a_late_published_settlement_on_the_next_bar() ->
                 "volume": 1_000.0,
             }
         )
-        return attach_funding_rate(bars, settlements.iloc[: published[index]], timeframe="1h")
+        return bars.iloc[-limit:] if limit else bars
 
-    responses = iter([frame(index) for index in range(4)])
-    recorded = []
+    def fetch_funding_rate_history(self, symbol, limit=None, *, since=None) -> pd.DataFrame:
+        shown = (self._published_at <= self._clock()) & (
+            self._settlements["ts"] >= pd.Timestamp(since, unit="ms", tz="UTC")
+        )
+        return self._settlements[shown].reset_index(drop=True)
+
+
+def _funded_sim(
+    adapter,
+    clock,
+    store,
+    recorded,
+    *,
+    timeframe: str,
+    feature_fn=lambda frame: frame,
+    warmup_periods: int = 1,
+    warmup_fetcher=None,
+) -> LiveTrader:
     runner = LiveTrader(
         _OpenOnce(),
-        lambda frame: frame,
+        feature_fn,
         config=make_test_cfg(
             symbols=["PERP"],
-            execution=ExecutionPolicy(max_bar_volume_participation_rate=None, warmup_periods=1),
+            timeframe=timeframe,
+            execution=ExecutionPolicy(
+                max_bar_volume_participation_rate=None, warmup_periods=warmup_periods
+            ),
             instrument_overrides={
                 "PERP": {
                     "instrument_type": "contract_perpetual",
@@ -1113,21 +1079,269 @@ def test_shadow_simulation_pays_a_late_published_settlement_on_the_next_bar() ->
                 }
             },
         ),
-        adapter=lambda *_args, **_kwargs: next(responses),
+        adapter=adapter,
         cost_model=_cost_model(),
-        state_store=MemoryLiveStateStore(),
+        state_store=store,
         on_bar=None,
         on_position_event=None,
         on_ohlcv=None,
         on_heartbeat=None,
         on_signal_outcome=None,
         on_financing_cash_flow=recorded.append,
-        warmup_fetcher=None,
+        warmup_fetcher=warmup_fetcher,
         notifier=None,
-        clock=lambda: datetime(2026, 1, 1, 4, tzinfo=UTC),
+        clock=clock,
     )
     runner._sleep = lambda _seconds: None
-    runner.run(max_iterations=4)
+    return runner
+
+
+def _poll_at(runner: LiveTrader, now: dict, at: str) -> None:
+    """Poll just after ``at``, once the bar ending there is published."""
+    now["now"] = pd.Timestamp(at).to_pydatetime() + timedelta(seconds=5)
+    runner._poll_cycle()
+
+
+def test_shadow_simulation_applies_and_checkpoints_funding_once() -> None:
+    now: dict = {}
+    venue = _PerpetualVenue(
+        lambda: now["now"],
+        timeframe="H1",
+        bars=3,
+        settlements={"2026-01-01T01:00Z": 0.01, "2026-01-01T02:00Z": -0.005},
+    )
+    store = MemoryLiveStateStore()
+    recorded: list[FinancingCashFlow] = []
+    runner = _funded_sim(venue, lambda: now["now"], store, recorded, timeframe="H1")
+    for hour in ("01", "02", "03"):
+        _poll_at(runner, now, f"2026-01-01T{hour}:00Z")
+
+    assert runner._cash == pytest.approx(99_790.0)
+    assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, 10.0])
+
+    restored = _funded_sim(venue, lambda: now["now"], store, recorded, timeframe="H1")
+    _poll_at(restored, now, "2026-01-01T03:00Z")
+
+    assert restored._cash == pytest.approx(99_790.0)
+    assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, 10.0])
+
+
+def test_shadow_simulation_pays_a_late_published_settlement_on_the_next_bar() -> None:
+    """The venue publishes the 02:59:59.997 settlement after the 02:00 bar was
+    processed; it is paid at 03:00 instead of never."""
+    now: dict = {}
+    venue = _PerpetualVenue(
+        lambda: now["now"],
+        timeframe="H1",
+        bars=4,
+        settlements={"2026-01-01T01:10Z": 0.01, "2026-01-01T02:59:59.997Z": -0.005},
+        published_at={"2026-01-01T02:59:59.997Z": "2026-01-01T03:30Z"},
+    )
+    recorded: list[FinancingCashFlow] = []
+    runner = _funded_sim(
+        venue, lambda: now["now"], MemoryLiveStateStore(), recorded, timeframe="H1"
+    )
+    for hour in ("01", "02", "03", "04"):
+        _poll_at(runner, now, f"2026-01-01T{hour}:00Z")
 
     assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, 10.0])
-    assert [item.ts for item in recorded] == [timestamps[1], timestamps[3]]
+    assert [pd.Timestamp(item.ts) for item in recorded] == pd.to_datetime(
+        ["2026-01-01T01:00Z", "2026-01-01T03:00Z"], utc=True
+    ).tolist()
+
+
+def test_a_settlement_published_bars_late_is_still_paid_once() -> None:
+    """Later than any fetch of recent bars reaches back: what is due is
+    fetched from the paid watermark, not from the bars just fetched."""
+    now: dict = {}
+    venue = _PerpetualVenue(
+        lambda: now["now"],
+        timeframe="H1",
+        bars=7,
+        settlements={"2026-01-01T01:30Z": 0.01},
+        published_at={"2026-01-01T01:30Z": "2026-01-01T05:30Z"},
+    )
+    recorded: list[FinancingCashFlow] = []
+    runner = _funded_sim(
+        venue, lambda: now["now"], MemoryLiveStateStore(), recorded, timeframe="H1"
+    )
+    for hour in range(1, 8):
+        _poll_at(runner, now, f"2026-01-01T{hour:02d}:00Z")
+
+    assert [item.cash_flow for item in recorded] == pytest.approx([-20.0])
+    assert [pd.Timestamp(item.ts) for item in recorded] == [pd.Timestamp("2026-01-01T05:00Z")]
+
+
+def test_bars_replayed_after_downtime_each_pay_their_own_settlements() -> None:
+    """The restart's bars come from a warmup_fetcher and reach back past the
+    warmup window, so the settlement fetch cannot start at those bars."""
+    now: dict = {}
+    venue = _PerpetualVenue(
+        lambda: now["now"],
+        timeframe="H1",
+        bars=10,
+        settlements={f"2026-01-01T{hour:02d}:30Z": 0.01 for hour in range(10)},
+    )
+
+    def warmup_fetcher(symbol, timeframe, limit):
+        return venue.fetch_ohlcv(symbol, timeframe, limit)
+
+    store = MemoryLiveStateStore()
+    recorded: list[FinancingCashFlow] = []
+
+    def start() -> LiveTrader:
+        return _funded_sim(
+            venue,
+            lambda: now["now"],
+            store,
+            recorded,
+            timeframe="H1",
+            warmup_periods=2,
+            warmup_fetcher=warmup_fetcher,
+        )
+
+    runner = start()
+    for hour in ("02", "03", "04"):
+        _poll_at(runner, now, f"2026-01-01T{hour}:00Z")
+    # Down for six bars, three times the warmup window.
+    runner = start()
+    for _ in range(8):
+        _poll_at(runner, now, "2026-01-01T10:00Z")
+
+    assert [item.cash_flow for item in recorded] == pytest.approx([-20.0] * 8)
+    assert [pd.Timestamp(item.ts) for item in recorded] == list(
+        pd.date_range("2026-01-01T02:00Z", periods=8, freq="h")
+    )
+
+
+def test_a_late_first_settlement_is_paid_on_the_next_bar() -> None:
+    """No settlement has been paid yet, and the next bar holds none."""
+    now: dict = {}
+    venue = _PerpetualVenue(
+        lambda: now["now"],
+        timeframe="H1",
+        bars=3,
+        settlements={"2026-01-01T01:30Z": 0.01},
+        published_at={"2026-01-01T01:30Z": "2026-01-01T02:30Z"},
+    )
+    recorded: list[FinancingCashFlow] = []
+    runner = _funded_sim(
+        venue, lambda: now["now"], MemoryLiveStateStore(), recorded, timeframe="H1"
+    )
+    for hour in ("01", "02", "03"):
+        _poll_at(runner, now, f"2026-01-01T{hour}:00Z")
+
+    assert [item.cash_flow for item in recorded] == pytest.approx([-20.0])
+    assert [pd.Timestamp(item.ts) for item in recorded] == [pd.Timestamp("2026-01-01T02:00Z")]
+
+
+# One 4h bar holds two settlements, and the second is published only after
+# that bar was processed.
+_COARSE_SETTLEMENTS = {
+    "2026-01-01T05:00Z": 0.01,
+    "2026-01-01T07:00Z": 0.002,
+    "2026-01-01T13:00Z": -0.005,
+}
+_LATE_SECOND = {"2026-01-01T07:00Z": "2026-01-01T09:00Z"}
+_COARSE_CLOSES = [
+    "2026-01-01T04:00Z",
+    "2026-01-01T08:00Z",
+    "2026-01-01T12:00Z",
+    "2026-01-01T16:00Z",
+]
+
+
+@pytest.mark.parametrize(
+    "restart_after",
+    [None, "2026-01-01T08:00Z", "2026-01-01T12:00Z"],
+    ids=["no restart", "restart before the late settlement", "restart after paying it"],
+)
+def test_a_late_second_settlement_in_one_bar_is_paid_once(restart_after: str | None) -> None:
+    now: dict = {}
+    venue = _PerpetualVenue(
+        lambda: now["now"],
+        timeframe="H4",
+        bars=4,
+        settlements=_COARSE_SETTLEMENTS,
+        published_at=_LATE_SECOND,
+    )
+    store = MemoryLiveStateStore()
+    recorded: list[FinancingCashFlow] = []
+    runner = _funded_sim(venue, lambda: now["now"], store, recorded, timeframe="H4")
+    for close in _COARSE_CLOSES:
+        _poll_at(runner, now, close)
+        if close == restart_after:
+            runner = _funded_sim(venue, lambda: now["now"], store, recorded, timeframe="H4")
+    # Every later poll fetches the paid settlements again.
+    _poll_at(runner, now, _COARSE_CLOSES[-1])
+
+    # Long 2 x 100 x multiplier 10: the 05:00 settlement on its own bar, the
+    # 07:00 one alone on the next, never 05:00 again, then the 13:00 one.
+    assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, -4.0, 10.0])
+    assert [pd.Timestamp(item.ts) for item in recorded] == pd.to_datetime(
+        ["2026-01-01T04:00Z", "2026-01-01T08:00Z", "2026-01-01T12:00Z"], utc=True
+    ).tolist()
+    assert runner._cash == pytest.approx(100_000.0 - 200.0 - 20.0 - 4.0 + 10.0)
+
+
+def test_a_bar_shows_every_settlement_known_for_it() -> None:
+    """The strategy reads the per-bar sum; a late settlement joins it."""
+    now: dict = {}
+    venue = _PerpetualVenue(
+        lambda: now["now"],
+        timeframe="H4",
+        bars=4,
+        settlements=_COARSE_SETTLEMENTS,
+        published_at=_LATE_SECOND,
+    )
+    seen: list[pd.DataFrame] = []
+
+    def feature_fn(history: pd.DataFrame) -> pd.DataFrame:
+        seen.append(history.copy())
+        return history
+
+    runner = _funded_sim(
+        venue,
+        lambda: now["now"],
+        MemoryLiveStateStore(),
+        [],
+        timeframe="H4",
+        feature_fn=feature_fn,
+        warmup_periods=2,
+    )
+    for close in _COARSE_CLOSES[:3]:
+        _poll_at(runner, now, close)
+
+    bar = pd.Timestamp("2026-01-01T04:00Z")
+    before, after = (history.loc[bar] for history in seen[-2:])
+    assert before["funding_rate"] == pytest.approx(0.01)
+    assert after["funding_rate"] == pytest.approx(0.012)
+    assert after["funding_settled_at"] == pd.Timestamp("2026-01-01T07:00Z")
+
+
+def test_shadow_simulation_refuses_a_per_bar_rate_before_any_fill(caplog) -> None:
+    """A bare callable source has no settlement history, so its bars'
+    funding_rate would otherwise go unpaid; the bars never reach the run."""
+    now: dict = {}
+    venue = _PerpetualVenue(
+        lambda: now["now"],
+        timeframe="H1",
+        bars=3,
+        settlements={f"2026-01-01T{hour:02d}:30Z": 0.01 for hour in range(3)},
+    )
+
+    def bars_with_rates(_symbol, timeframe, limit, *, drop_incomplete=False):
+        bars = venue.fetch_ohlcv("PERP", timeframe, limit)
+        return attach_funding_rate(
+            bars, venue.fetch_funding_rate_history("PERP", since=0), timeframe=timeframe
+        )
+
+    runner = _funded_sim(
+        bars_with_rates, lambda: now["now"], MemoryLiveStateStore(), [], timeframe="H1"
+    )
+    for hour in ("01", "02", "03"):
+        _poll_at(runner, now, f"2026-01-01T{hour}:00Z")
+
+    assert runner._period_index == 0
+    assert not runner._positions
+    assert "has no fetch_funding_rate_history" in caplog.text
