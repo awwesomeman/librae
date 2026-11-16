@@ -49,14 +49,14 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 32
+_STATE_SCHEMA_VERSION = 33
 # The one exception: previous versions that lack only fields no build writing
 # them recorded, which load empty, as that build's own restart would. Version
-# 31 lacks ``last_funding_settled_at``; version 30 lacks
-# ``rebalance_stopped_at`` and ``failed_rebalance_symbols`` too. A later bump
-# decides afresh which of its previous versions are additive in the same way;
-# most are not.
-_ADDITIVE_PREVIOUS_SCHEMA_VERSIONS = (30, 31)
+# 32 lacks ``pending_decided_at``, ``pending_decided_on`` and
+# ``market_exit_decided_at``; version 31 lacks ``last_funding_settled_at`` too.
+# A later bump decides afresh which of its previous versions are additive in
+# the same way; most are not.
+_ADDITIVE_PREVIOUS_SCHEMA_VERSIONS = (31, 32)
 
 
 def normalize_runtime_revision(
@@ -318,6 +318,14 @@ class LiveRuntimeState:
     # executable on the next. Only set once an intent has actually rested, and
     # it has to survive a restart along with the intent itself.
     pending_resting_since: dict[str, datetime] = field(default_factory=dict)
+    # Simulation only. When each pending intent was decided, keyed by symbol
+    # (a whole-book target under every symbol), and when a drawdown breach
+    # decided on a bar queued each held symbol's exit: either fills on its
+    # symbol's first bar that starts at or after then. And the event each
+    # pending intent was decided on, which deciding that event again replaces.
+    pending_decided_at: dict[str, datetime] = field(default_factory=dict)
+    pending_decided_on: dict[str, datetime] = field(default_factory=dict)
+    market_exit_decided_at: dict[str, datetime] = field(default_factory=dict)
     # Audit rows the runtime accepted but the database has not acknowledged.
     # Lands with the watermark it belongs to, so a crash between the two
     # replays the row rather than losing it.
@@ -413,6 +421,18 @@ class LiveRuntimeState:
                 symbol: timestamp.isoformat()
                 for symbol, timestamp in self.pending_resting_since.items()
             },
+            "pending_decided_at": {
+                symbol: timestamp.isoformat()
+                for symbol, timestamp in self.pending_decided_at.items()
+            },
+            "pending_decided_on": {
+                symbol: timestamp.isoformat()
+                for symbol, timestamp in self.pending_decided_on.items()
+            },
+            "market_exit_decided_at": {
+                symbol: timestamp.isoformat()
+                for symbol, timestamp in self.market_exit_decided_at.items()
+            },
             "active_orders": [order.to_dict() for order in self.active_orders],
             "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
             "equity_peak": self.equity_peak,
@@ -493,13 +513,28 @@ class LiveRuntimeState:
                 _timestamps_from_dict(
                     raw["last_funding_settled_at"], field="last_funding_settled_at"
                 )
-                if schema_version == _STATE_SCHEMA_VERSION
+                if schema_version >= 32
                 else {}
             ),
             pending_decision=_pending_decision_from_dict(raw["pending_decision"]),
             pending_ohlcv=[PendingOhlcvDelivery.from_dict(item) for item in raw["pending_ohlcv"]],
             pending_resting_since=_timestamps_from_dict(
                 raw["pending_resting_since"], field="pending_resting_since"
+            ),
+            pending_decided_at=(
+                _timestamps_from_dict(raw["pending_decided_at"], field="pending_decided_at")
+                if schema_version == _STATE_SCHEMA_VERSION
+                else {}
+            ),
+            pending_decided_on=(
+                _timestamps_from_dict(raw["pending_decided_on"], field="pending_decided_on")
+                if schema_version == _STATE_SCHEMA_VERSION
+                else {}
+            ),
+            market_exit_decided_at=(
+                _timestamps_from_dict(raw["market_exit_decided_at"], field="market_exit_decided_at")
+                if schema_version == _STATE_SCHEMA_VERSION
+                else {}
             ),
             active_orders=[TrackedOrder.from_dict(item) for item in raw["active_orders"]],
             live_rebalance=(
@@ -520,16 +555,8 @@ class LiveRuntimeState:
                 if raw["pending_flatten"] is not None
                 else None
             ),
-            rebalance_stopped_at=(
-                _to_utc(raw["rebalance_stopped_at"])
-                if schema_version == _STATE_SCHEMA_VERSION
-                else None
-            ),
-            failed_rebalance_symbols=(
-                [str(symbol) for symbol in raw["failed_rebalance_symbols"]]
-                if schema_version == _STATE_SCHEMA_VERSION
-                else []
-            ),
+            rebalance_stopped_at=_to_utc(raw["rebalance_stopped_at"]),
+            failed_rebalance_symbols=[str(symbol) for symbol in raw["failed_rebalance_symbols"]],
             entries_paused=bool(raw["entries_paused"]),
             unstarted_groups=[str(group_id) for group_id in raw["unstarted_groups"]],
             adv_session_labels={

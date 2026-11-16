@@ -51,6 +51,7 @@ from librae.core.executor import (
     order_side_is_tradable,
     partition_pending_decision,
     queue_market_exit_all,
+    refuse_cross_grid_legs,
     refused_short_symbols,
     validate_exposure_transition,
     validate_strategy_decision,
@@ -72,10 +73,10 @@ from librae.core.market_data import (
     FeatureBatch,
     MarketDataSubscription,
     MarketDataView,
+    bar_grids_align,
     completion_floor,
     evaluate_batch_features,
     normalize_bar_times,
-    require_aligned_bar_grids,
     subscription_from_instrument,
     validate_feature_frame,
     validate_ohlcv_values,
@@ -870,7 +871,8 @@ class LiveTrader:
         )
         self._optional_symbols = frozenset(config.optional_symbols)
         self._market_data_subscriptions = dict(snapshot.subscriptions)
-        require_aligned_bar_grids(
+        # Off one bar grid, bar starts no longer order the bars by completion.
+        self._events_by_availability = not bar_grids_align(
             [self._market_data_subscriptions[symbol] for symbol in self._symbols]
         )
         # Auxiliary inputs reuse their symbol's resolved instrument, calendar
@@ -1103,6 +1105,14 @@ class LiveTrader:
         # Bar timestamp each pending intent first rested on, keyed by symbol.
         # A resting "day" limit expires against the session it first rested in.
         self._pending_resting_since: dict[str, datetime] = {}
+        # Simulation only: when each pending intent was decided, and when a
+        # drawdown breach decided on a bar queued each held symbol's exit.
+        # Either fills on its symbol's first bar that starts at or after
+        # then, as in a backtest; live sends its orders at once. Each pending
+        # intent's event too, which a later decision on that event replaces.
+        self._pending_decided_at: dict[str, datetime] = {}
+        self._pending_decided_on: dict[str, datetime] = {}
+        self._market_exit_decided_at: dict[str, datetime] = {}
         self._active_orders: list[TrackedOrder] = []
         self._live_rebalance: LiveRebalance | None = None
         self._equity_peak = self._cash
@@ -1305,7 +1315,12 @@ class LiveTrader:
         )
 
     def _prune_pending_submissions(self, *, primary_symbol: str) -> None:
-        """Forget submissions whose intent is no longer pending."""
+        """Forget submissions whose intent is no longer pending, and exits no longer owed."""
+        self._market_exit_decided_at = {
+            symbol: decided_at
+            for symbol, decided_at in self._market_exit_decided_at.items()
+            if symbol in self._positions
+        }
         if isinstance(self._pending_decision, PortfolioWeights):
             self._pending_resting_since = {}
             return
@@ -1315,6 +1330,119 @@ class LiveTrader:
             for symbol, submitted_at in self._pending_resting_since.items()
             if symbol in still_pending
         }
+        self._pending_decided_at = {
+            symbol: decided_at
+            for symbol, decided_at in self._pending_decided_at.items()
+            if symbol in still_pending
+        }
+        self._pending_decided_on = {
+            symbol: event
+            for symbol, event in self._pending_decided_on.items()
+            if symbol in still_pending
+        }
+
+    def _record_decision(
+        self,
+        decision: StrategyDecision,
+        event: datetime,
+        decided_at: datetime | None,
+        *,
+        primary_symbol: str,
+    ) -> None:
+        """Note the event and instant a decision merged into the pending one was made.
+
+        A whole-book target replaces whatever was pending and is recorded under
+        every symbol, since it executes as one on a single event.
+        """
+        if not decision:
+            return
+        symbols = (
+            self._symbols
+            if isinstance(decision, PortfolioWeights)
+            else [intent.symbol or primary_symbol for intent in decision]
+        )
+        if isinstance(decision, PortfolioWeights):
+            self._pending_decided_at, self._pending_decided_on = {}, {}
+        for symbol in symbols:
+            self._pending_decided_on[symbol] = event
+            if decided_at is not None:
+                self._pending_decided_at[symbol] = decided_at
+
+    def _drop_earlier_decision_on(self, event: datetime, *, primary_symbol: str) -> None:
+        """Drop what an earlier decision on ``event`` left pending.
+
+        Sim decides an event's bars again when a symbol's bar of the same
+        start arrives after they were decided, past the cohort hold or after
+        a segment-end settle. A backtest decides those bars once, together,
+        so the decision made with all of them replaces the earlier one.
+        """
+        decided = {symbol for symbol, on in self._pending_decided_on.items() if on == event}
+        if not decided:
+            return
+        if isinstance(self._pending_decision, PortfolioWeights):
+            dropped = sorted(decided)
+            self._pending_decision = []
+        else:
+            dropped = [
+                symbol
+                for intent in self._pending_decision
+                if (symbol := intent.symbol or primary_symbol) in decided
+            ]
+            self._pending_decision = [
+                intent
+                for intent in self._pending_decision
+                if (intent.symbol or primary_symbol) not in decided
+            ]
+        logger.info("Deciding %s again replaces its earlier pending decision: %s", event, dropped)
+        self._forget_resting(
+            [symbol for symbol in dropped if symbol in self._pending_resting_since],
+            event,
+            reason="resting_order_replaced",
+        )
+        for symbol in decided:
+            self._pending_decided_at.pop(symbol, None)
+            self._pending_decided_on.pop(symbol, None)
+
+    def _partition_pending(
+        self,
+        ts: datetime,
+        bars: dict[str, dict[str, float]],
+        *,
+        primary_symbol: str,
+    ) -> tuple[StrategyDecision, StrategyDecision]:
+        """``partition_pending_decision`` on bars starting at ``ts``, holding
+        what was decided after they opened.
+
+        A decision fills on the first bar that starts once it was made, as in
+        a backtest: a bar already open then would fill it on prices from
+        before it. Legs of one group were decided together and wait together.
+        """
+        pending = self._pending_decision
+        if isinstance(pending, PortfolioWeights):
+            decided_at = max(self._pending_decided_at.values(), default=None)
+            if decided_at is not None and ts < decided_at:
+                return [], pending
+            return partition_pending_decision(
+                pending, bars, self._positions, primary_symbol=primary_symbol
+            )
+
+        def too_new(intent: OrderIntent) -> bool:
+            decided_at = self._pending_decided_at.get(intent.symbol or primary_symbol)
+            return decided_at is not None and ts < decided_at
+
+        held_groups = {intent.group_id for intent in pending if too_new(intent)} - {None}
+        ready, _ = partition_pending_decision(
+            [
+                intent
+                for intent in pending
+                if not too_new(intent) and intent.group_id not in held_groups
+            ],
+            bars,
+            self._positions,
+            primary_symbol=primary_symbol,
+        )
+        ready_ids = {id(intent) for intent in ready}
+        return ready, [intent for intent in pending if id(intent) not in ready_ids]
 
     def _session_of(self, symbol: str, ts: datetime) -> object:
         return resting_session_of(
@@ -1383,6 +1511,9 @@ class LiveTrader:
             last_funding_settled_at=dict(self._last_funding_settled_at),
             pending_decision=deepcopy(self._pending_decision),
             pending_resting_since=dict(self._pending_resting_since),
+            pending_decided_at=dict(self._pending_decided_at),
+            pending_decided_on=dict(self._pending_decided_on),
+            market_exit_decided_at=dict(self._market_exit_decided_at),
             pending_ohlcv=list(self._pending_ohlcv),
             active_orders=deepcopy(self._active_orders),
             live_rebalance=deepcopy(self._live_rebalance),
@@ -1450,6 +1581,9 @@ class LiveTrader:
         self._last_funding_settled_at = state.last_funding_settled_at
         self._pending_decision = state.pending_decision
         self._pending_resting_since = dict(state.pending_resting_since)
+        self._pending_decided_at = dict(state.pending_decided_at)
+        self._pending_decided_on = dict(state.pending_decided_on)
+        self._market_exit_decided_at = dict(state.market_exit_decided_at)
         self._pending_ohlcv = list(state.pending_ohlcv)
         self._active_orders = state.active_orders
         self._unstarted_groups = set(state.unstarted_groups)
@@ -3631,7 +3765,8 @@ class LiveTrader:
         if data_not_ready:
             return
 
-        candidate_symbols_by_timestamp: dict[datetime, set[str]] = {}
+        # Each symbol's bars past its watermark, oldest first.
+        candidates: dict[str, list[datetime]] = {}
         skipped_by_symbol: dict[str, int] = {}
         for symbol, frame in frames.items():
             watermark = self._last_bar_ts.get(symbol)
@@ -3645,8 +3780,7 @@ class LiveTrader:
                 timestamp = pd.Timestamp(raw_ts)
                 if timestamp.tzinfo is None:
                     raise ValueError(f"{symbol} completed bar timestamp must be timezone-aware")
-                event_ts = timestamp.to_pydatetime().astimezone(UTC)
-                candidate_symbols_by_timestamp.setdefault(event_ts, set()).add(symbol)
+                candidates.setdefault(symbol, []).append(timestamp.to_pydatetime().astimezone(UTC))
 
         if skipped_by_symbol:
             summary = ", ".join(
@@ -3659,28 +3793,45 @@ class LiveTrader:
                 message=f"Skipped older uncommitted bars ({summary}); only latest bars are tradable.",
             )
 
-        held_from = self._held_cohort(frames, candidate_symbols_by_timestamp)
-        for cycle_ts in sorted(candidate_symbols_by_timestamp):
+        # Events in decision order, each with its symbols' bar starts, oldest
+        # first. On one grid an event is the bars of one start, keyed by it.
+        events: dict[datetime, dict[str, list[datetime]]] = {}
+        if self._events_by_availability:
+            events = self._availability_events(frames, candidates)
+        else:
+            for symbol, starts in candidates.items():
+                for start in starts:
+                    events.setdefault(start, {})[symbol] = [start]
+        held_from = self._held_cohort(frames, events)
+        for cycle_ts in sorted(events):
             if held_from is not None and cycle_ts >= held_from:
                 break
 
-            event_frames: dict[str, pd.DataFrame] = {}
-            advanced_symbols: list[str] = []
-            event_symbols = set(candidate_symbols_by_timestamp[cycle_ts])
-            if self._executor.simulation:
-                event_symbols.update(
-                    symbol
-                    for symbol, frame in frames.items()
-                    if bool((pd.to_datetime(frame["ts"], utc=True) == pd.Timestamp(cycle_ts)).any())
-                )
-            for symbol in sorted(event_symbols):
-                frame = frames[symbol]
-                event_frames[symbol] = frame
-                if cycle_ts > self._last_bar_ts.get(
-                    symbol,
-                    datetime.min.replace(tzinfo=UTC),
-                ):
-                    advanced_symbols.append(symbol)
+            bar_starts: dict[str, list[datetime]] | None = None
+            if self._events_by_availability:
+                bar_starts = events[cycle_ts]
+                advanced_symbols = [symbol for symbol in self._symbols if symbol in bar_starts]
+                event_frames = {symbol: frames[symbol] for symbol in advanced_symbols}
+            else:
+                event_frames = {}
+                advanced_symbols = []
+                event_symbols = set(events[cycle_ts])
+                if self._executor.simulation:
+                    event_symbols.update(
+                        symbol
+                        for symbol, frame in frames.items()
+                        if bool(
+                            (pd.to_datetime(frame["ts"], utc=True) == pd.Timestamp(cycle_ts)).any()
+                        )
+                    )
+                for symbol in sorted(event_symbols):
+                    frame = frames[symbol]
+                    event_frames[symbol] = frame
+                    if cycle_ts > self._last_bar_ts.get(
+                        symbol,
+                        datetime.min.replace(tzinfo=UTC),
+                    ):
+                        advanced_symbols.append(symbol)
 
             if not advanced_symbols:
                 continue
@@ -3690,12 +3841,15 @@ class LiveTrader:
                 sorted(event_frames),
             )
             if self._batch_feature_fn is None:
-                committed_feature_as_of = self._process_cycle(event_frames, cycle_ts)
+                committed_feature_as_of = self._process_cycle(
+                    event_frames, cycle_ts, bar_starts=bar_starts
+                )
             else:
                 committed_feature_as_of = self._process_cycle(
                     frames,
                     cycle_ts,
                     active_symbols=advanced_symbols,
+                    bar_starts=bar_starts,
                 )
                 if committed_feature_as_of is None:
                     continue
@@ -3703,20 +3857,60 @@ class LiveTrader:
             # Commit the event and feature frontiers together, only after the
             # full feature/strategy/execution cycle succeeded.
             for symbol in advanced_symbols:
-                self._last_bar_ts[symbol] = cycle_ts
-            # Each symbol's watermark orders its own bars. On aligned grids a
-            # bar can still start before the last event when its source
-            # delivered past the hold; it is decided, not refused.
+                self._last_bar_ts[symbol] = (
+                    cycle_ts if bar_starts is None else bar_starts[symbol][-1]
+                )
+            # Each symbol's watermark orders its own bars. A bar can still be
+            # decided after a later event when its source delivered past the
+            # hold; it is decided, not refused.
             self._last_cycle_ts = max(cycle_ts, self._last_cycle_ts or cycle_ts)
             if committed_feature_as_of is not None:
                 self._last_feature_as_of = committed_feature_as_of
             self._persist_state()
         self._trim_runtime_caches()
 
+    def _availability_events(
+        self,
+        frames: Mapping[str, pd.DataFrame],
+        candidates: Mapping[str, Sequence[datetime]],
+    ) -> dict[datetime, dict[str, list[datetime]]]:
+        """Group the candidate bars by the instant they became available.
+
+        Off one bar grid a bar that starts later can complete first, so an
+        event is the bars available at one instant, as in a backtest. A bar
+        counts as available no earlier than its symbol's previous bar, so
+        each symbol's bars stay in start order and a late bar holds only its
+        own symbol.
+        """
+        events: dict[datetime, dict[str, list[datetime]]] = {}
+        delayed: dict[str, pd.Timedelta] = {}
+        for symbol, starts in candidates.items():
+            frame = frames[symbol]
+            available = pd.to_datetime(frame[AVAILABLE_AT_COLUMN], utc=True)
+            counted = dict(
+                zip(
+                    pd.to_datetime(frame["ts"], utc=True),
+                    zip(available, available.cummax(), strict=True),
+                    strict=True,
+                )
+            )
+            for start in starts:
+                own, at = counted[pd.Timestamp(start)]
+                if at > own:
+                    delayed[symbol] = max(delayed.get(symbol, pd.Timedelta(0)), at - own)
+                events.setdefault(at.to_pydatetime(), {}).setdefault(symbol, []).append(start)
+        if delayed:
+            logger.warning(
+                "Bars decided after their available_at because an earlier bar of the same "
+                "symbol is available later; check them for a mis-stamped available_at: %s",
+                ", ".join(f"{symbol} by up to {delayed[symbol]}" for symbol in sorted(delayed)),
+            )
+        return events
+
     def _held_cohort(
         self,
         frames: Mapping[str, pd.DataFrame],
-        candidates: Mapping[datetime, set[str]],
+        events: Mapping[datetime, Mapping[str, Sequence[datetime]]],
     ) -> datetime | None:
         """The first event to hold back for a required symbol due it too (``COHORT_HOLD``).
 
@@ -3777,21 +3971,36 @@ class LiveTrader:
                 )
             )
 
-        for event_ts in sorted(candidates):
-            released = candidates[event_ts]
+        for event_ts in sorted(events):
+            released = events[event_ts]
             event = pd.Timestamp(event_ts)
-            event_available = min(available[symbol][event] for symbol in released)
+            # Off one grid the event is its bars' availability; on one, their
+            # start, and the hold runs from the first of them to be available.
+            event_available = (
+                event
+                if self._events_by_availability
+                else min(available[symbol][event] for symbol in released)
+            )
             if now >= event_available + self.COHORT_HOLD:
                 continue
             following = [
-                close for symbol in released if (close := next_close(symbol, event)) is not None
+                close
+                for symbol, starts in released.items()
+                if (close := next_close(symbol, pd.Timestamp(starts[-1]))) is not None
             ]
             if not following or next_poll >= min(following):
                 continue
             late = []
             for symbol in frames:
                 newest = pd.Timestamp(frames[symbol]["ts"].iloc[-1])
-                if symbol in self._optional_symbols or symbol in released or newest >= event:
+                if symbol in self._optional_symbols or symbol in released:
+                    continue
+                # A symbol whose newest bar is in this event or a later one is not late.
+                if (
+                    available[symbol].max() >= event
+                    if self._events_by_availability
+                    else newest >= event
+                ):
                     continue
                 due = next_available(symbol, newest)
                 if due is not None and due <= event_available:
@@ -4311,7 +4520,7 @@ class LiveTrader:
         self,
         audit_bars: Mapping[str, dict[str, object]],
         audit_histories: Mapping[str, pd.DataFrame],
-        ts: datetime,
+        bar_ts: Mapping[str, datetime],
     ) -> None:
         """Checkpoint the cycle with its decided bars queued, then record them.
 
@@ -4319,9 +4528,14 @@ class LiveTrader:
         caller advances the watermark past these bars, and nothing records a
         bar behind the watermark again. The window behind them is collected
         only now, after any order went out, so audit work never delays one.
+        ``bar_ts`` gives each decided bar's start.
         """
+        by_start: dict[datetime, dict[str, dict[str, object]]] = {}
+        for symbol, bar in audit_bars.items():
+            by_start.setdefault(bar_ts[symbol], {})[symbol] = bar
         try:
-            self._queue_ohlcv(audit_bars, ts)
+            for start, bars in by_start.items():
+                self._queue_ohlcv(bars, start)
         except Exception:
             # A full queue reports each dropped row through the runtime-event
             # callback, which may raise; audit work must never stand between
@@ -4332,7 +4546,8 @@ class LiveTrader:
             )
         self._persist_state()
         try:
-            self._deliver_ohlcv(audit_bars, ts)
+            for start, bars in by_start.items():
+                self._deliver_ohlcv(bars, start)
             window_rows: list[tuple[str, datetime, dict[str, object]]] = []
             for symbol, history in audit_histories.items():
                 window_rows.extend(self._unrecorded_window(symbol, history))
@@ -6737,11 +6952,21 @@ class LiveTrader:
         raw_frames: Mapping[str, pd.DataFrame],
         active_symbols: tuple[str, ...],
         ts: datetime,
+        *,
+        bar_ts: Mapping[str, datetime] | None = None,
+        as_of: datetime | None = None,
     ) -> FeatureBatch:
-        """Build one causal primary snapshot without using poll wall time as its frontier."""
+        """Build one causal primary snapshot without using poll wall time as its frontier.
+
+        Each active symbol's history ends at its bar in the event: at ``ts``,
+        unless ``bar_ts`` gives another start. The snapshot is as of the
+        latest availability among those bars and the previous frontier, or
+        ``as_of`` when the caller has it.
+        """
         normalized_frames: dict[str, pd.DataFrame] = {}
         cutoffs: dict[str, datetime] = {}
         active_set = set(active_symbols)
+        starts = {symbol: (bar_ts or {}).get(symbol, ts) for symbol in active_symbols}
         for symbol in self._symbols:
             raw_frame = raw_frames.get(symbol)
             if raw_frame is None:
@@ -6753,24 +6978,31 @@ class LiveTrader:
                 raw_frame = pd.DataFrame(columns=["ts", AVAILABLE_AT_COLUMN])
             normalized = self._normalize_runtime_rows(symbol, raw_frame)
             normalized_frames[symbol] = normalized
-            cutoff = ts if symbol in active_set else self._last_bar_ts.get(symbol)
+            cutoff = starts[symbol] if symbol in active_set else self._last_bar_ts.get(symbol)
             if cutoff is not None:
                 cutoffs[symbol] = cutoff
 
         cohort_availability: list[pd.Timestamp] = []
         for symbol in active_symbols:
             frame = normalized_frames[symbol]
-            current = frame.loc[pd.to_datetime(frame["ts"], utc=True) == pd.Timestamp(ts)]
+            current = frame.loc[
+                pd.to_datetime(frame["ts"], utc=True) == pd.Timestamp(starts[symbol])
+            ]
             if current.empty:
-                raise ValueError(f"{symbol} batch cohort is missing event timestamp {ts}")
+                raise ValueError(
+                    f"{symbol} batch cohort is missing event timestamp {starts[symbol]}"
+                )
             cohort_availability.extend(
                 pd.to_datetime(current[AVAILABLE_AT_COLUMN], utc=True).tolist()
             )
-        if not cohort_availability:
-            raise ValueError("batch feature cohort has no causal availability frontier")
-        as_of = max(cohort_availability)
-        if self._last_feature_as_of is not None:
-            as_of = max(as_of, pd.Timestamp(self._last_feature_as_of))
+        if as_of is not None:
+            frontier = pd.Timestamp(as_of)
+        else:
+            if not cohort_availability:
+                raise ValueError("batch feature cohort has no causal availability frontier")
+            frontier = max(cohort_availability)
+            if self._last_feature_as_of is not None:
+                frontier = max(frontier, pd.Timestamp(self._last_feature_as_of))
 
         histories = {}
         for subscription, owner in self._auxiliary_subscriptions.items():
@@ -6787,9 +7019,9 @@ class LiveTrader:
             visible = (
                 frame.iloc[0:0]
                 if cutoff is None
-                else frame.loc[(timestamps <= pd.Timestamp(cutoff)) & (available_at <= as_of)].iloc[
-                    -self._feature_history_limit :
-                ]
+                else frame.loc[
+                    (timestamps <= pd.Timestamp(cutoff)) & (available_at <= frontier)
+                ].iloc[-self._feature_history_limit :]
             )
             auxiliary_history = visible.set_index("ts")
             auxiliary_history.index.name = "ts"
@@ -6803,7 +7035,7 @@ class LiveTrader:
                 timestamps = pd.to_datetime(frame["ts"], utc=True)
                 available_at = pd.to_datetime(frame[AVAILABLE_AT_COLUMN], utc=True)
                 causal = frame.loc[
-                    (timestamps <= pd.Timestamp(cutoff)) & (available_at <= as_of)
+                    (timestamps <= pd.Timestamp(cutoff)) & (available_at <= frontier)
                 ].iloc[-self._feature_history_limit :]
             history = causal.set_index("ts")
             history.index.name = "ts"
@@ -6811,7 +7043,7 @@ class LiveTrader:
 
         market_data = MarketDataView._from_causal_frames(
             histories,
-            as_of=as_of.to_pydatetime(),
+            as_of=frontier.to_pydatetime(),
             history_limit=self._feature_history_limit,
         )
         active_subscriptions = tuple(
@@ -6821,7 +7053,7 @@ class LiveTrader:
         )
         return FeatureBatch(
             event_ts=ts,
-            as_of=as_of.to_pydatetime(),
+            as_of=frontier.to_pydatetime(),
             primary_subscriptions=self._primary_subscriptions,
             active_primary_subscriptions=active_subscriptions,
             market_data=market_data,
@@ -6871,6 +7103,7 @@ class LiveTrader:
         ts: datetime,
         *,
         active_symbols: list[str] | tuple[str, ...] | None = None,
+        bar_starts: Mapping[str, Sequence[datetime]] | None = None,
     ) -> datetime | None:
         """Execute and evaluate one data-driven market event.
 
@@ -6878,75 +7111,145 @@ class LiveTrader:
         Live mode never books that historical range: it evaluates the
         completed bar, submits the current decision immediately, and commits
         only broker-confirmed execution reports.
+
+        On one bar grid each active symbol's bar starts at ``ts``. Off it,
+        ``ts`` is the instant the event's bars became available and
+        ``bar_starts`` lists each symbol's bars in it, oldest first:
+        simulation fills, stops and finances them one start at a time, in
+        start order, and the decision reads each symbol's newest.
         """
         primary_symbol = self._symbols[0]
         active_set = set(raw_frames) if active_symbols is None else set(active_symbols)
         resolved_active_symbols = tuple(symbol for symbol in self._symbols if symbol in active_set)
         if not resolved_active_symbols:
             raise ValueError("market-data event requires at least one active primary symbol")
+        starts = {
+            symbol: (ts,) if bar_starts is None else tuple(bar_starts[symbol])
+            for symbol in resolved_active_symbols
+        }
+        bar_ts = {symbol: symbol_starts[-1] for symbol, symbol_starts in starts.items()}
+        # Sim offers a symbol's bar again with a same-start bar that arrived
+        # after it was decided.
+        decides_again = any(
+            (decided := self._last_bar_ts.get(symbol)) is not None and decided >= bar_ts[symbol]
+            for symbol in resolved_active_symbols
+        )
         execution_symbols: set[str] = set()
         for symbol in resolved_active_symbols:
             execution_watermark = self._last_execution_bar_ts.get(symbol)
-            if execution_watermark is not None and ts < execution_watermark:
+            # An event retried after its decision failed has executed already,
+            # through the watermark when a later bar joined it since.
+            if execution_watermark == bar_ts[symbol]:
+                continue
+            if (
+                execution_watermark is not None
+                and starts[symbol][0] <= execution_watermark
+                and execution_watermark not in starts[symbol]
+            ):
                 raise RuntimeError(
                     "out-of-order execution phase cannot be applied after a newer event: "
-                    f"{symbol} {ts} < {execution_watermark}"
+                    f"{symbol} {starts[symbol][0]} is not after {execution_watermark}"
                 )
-            if execution_watermark != ts:
-                execution_symbols.add(symbol)
+            execution_symbols.add(symbol)
         execution_already_committed = not execution_symbols
-        cycle_used_bar_quantity_by_symbol = {
-            symbol: self._execution_bar_filled_quantities.get(symbol, 0.0)
-            for symbol in resolved_active_symbols
-            if self._last_execution_bar_ts.get(symbol) == ts
-        }
         feature_batch: FeatureBatch | None = None
         histories: dict[str, pd.DataFrame] = {}
         raw_bars: dict[str, dict[str, float]] = {}
         audit_bars: dict[str, dict[str, object]] = {}
         audit_histories: dict[str, pd.DataFrame] = {}
-        previous_volumes: dict[str, float] = {}
-        lagged_adv_by_symbol: dict[str, float] = {}
+        # Every bar of the event by its start, with the volume before it and
+        # its lagged ADV; ``raw_bars`` and the audit rows are each symbol's newest.
+        step_bars: dict[datetime, dict[str, dict[str, float]]] = {}
+        previous_volumes: dict[datetime, dict[str, float]] = {}
+        lagged_adv: dict[datetime, dict[str, float]] = {}
         for symbol in resolved_active_symbols:
             raw_df = raw_frames[symbol]
-            audit_history = raw_df[raw_df["ts"] <= ts].iloc[-self._warmup_periods :].set_index("ts")
-            audit_history.index.name = "ts"
-            if audit_history.empty or pd.Timestamp(audit_history.index[-1]).to_pydatetime() != ts:
-                continue
-            history = audit_history.drop(columns=[AVAILABLE_AT_COLUMN], errors="ignore")
-            histories[symbol] = history
-            raw_bar = history.iloc[-1].to_dict()
-            audit_bar = audit_history.iloc[-1].to_dict()
-            audit_bar[OBSERVED_AT_COLUMN] = self._observed_at(
-                symbol, ts, audit_bar.get(AVAILABLE_AT_COLUMN)
+            for start in starts[symbol]:
+                audit_history = (
+                    raw_df[raw_df["ts"] <= start].iloc[-self._warmup_periods :].set_index("ts")
+                )
+                audit_history.index.name = "ts"
+                if (
+                    audit_history.empty
+                    or pd.Timestamp(audit_history.index[-1]).to_pydatetime() != start
+                ):
+                    continue
+                history = audit_history.drop(columns=[AVAILABLE_AT_COLUMN], errors="ignore")
+                raw_bar = history.iloc[-1].to_dict()
+                close = float(raw_bar.get("close", float("nan")))
+                if not isfinite(close) or close <= 0:
+                    raise ValueError(f"{symbol} has invalid close at {start}: {close}")
+                step_bars.setdefault(start, {})[symbol] = raw_bar
+                if len(history) > 1:
+                    previous_volume = history.iloc[-2].get("volume")
+                    if previous_volume is not None and not pd.isna(previous_volume):
+                        previous_volumes.setdefault(start, {})[symbol] = float(previous_volume)
+                if self._adv_lookback_sessions is not None:
+                    calendar_id = self._market_data_subscriptions[symbol].calendar_id
+                    labels = None
+                    if self._interval_delta.days < 1:
+                        labels = session_labels(
+                            pd.DatetimeIndex(history.index),
+                            calendar_id,
+                        )
+                    adv = calculate_lagged_adv(
+                        history["volume"],
+                        self._adv_lookback_sessions,
+                        session_labels=labels,
+                    ).iloc[-1]
+                    if not pd.isna(adv):
+                        lagged_adv.setdefault(start, {})[symbol] = float(adv)
+                if start != bar_ts[symbol]:
+                    continue
+                histories[symbol] = history
+                raw_bars[symbol] = raw_bar
+                audit_bar = audit_history.iloc[-1].to_dict()
+                audit_bar[OBSERVED_AT_COLUMN] = self._observed_at(
+                    symbol, start, audit_bar.get(AVAILABLE_AT_COLUMN)
+                )
+                audit_bars[symbol] = audit_bar
+                audit_histories[symbol] = audit_history
+        steps = [(start, step_bars[start]) for start in sorted(step_bars)]
+        lagged_adv_by_symbol = {
+            symbol: value
+            for start, values in lagged_adv.items()
+            for symbol, value in values.items()
+            if bar_ts[symbol] == start
+        }
+
+        # When this event's decision is made: the latest availability seen
+        # so far. What it decides, and a drawdown exit it queues, fill on a
+        # bar that starts at or after then. On one grid that is the latest
+        # availability of its bars and of the previous feature snapshot.
+        decided_at: datetime | None
+        if self._events_by_availability:
+            decided_at = max(
+                at for at in (ts, self._last_feature_as_of, self._last_cycle_ts) if at is not None
             )
-            audit_bars[symbol] = audit_bar
-            audit_histories[symbol] = audit_history
-            close = float(raw_bar.get("close", float("nan")))
-            if not isfinite(close) or close <= 0:
-                raise ValueError(f"{symbol} has invalid close at {ts}: {close}")
-            raw_bars[symbol] = raw_bar
-            if len(history) > 1:
-                previous_volume = history.iloc[-2].get("volume")
-                if previous_volume is not None and not pd.isna(previous_volume):
-                    previous_volumes[symbol] = float(previous_volume)
-            self._last_prices[symbol] = close
-            if self._adv_lookback_sessions is not None:
-                self._reset_adv_session(symbol, self._adv_session(symbol, ts))
-                calendar_id = self._market_data_subscriptions[symbol].calendar_id
-                labels = None
-                if self._interval_delta.days < 1:
-                    labels = session_labels(
-                        pd.DatetimeIndex(history.index),
-                        calendar_id,
-                    )
-                lagged_adv = calculate_lagged_adv(
-                    history["volume"],
-                    self._adv_lookback_sessions,
-                    session_labels=labels,
-                ).iloc[-1]
-                if not pd.isna(lagged_adv):
-                    lagged_adv_by_symbol[symbol] = float(lagged_adv)
+        else:
+            decided_at = max(
+                (
+                    pd.Timestamp(available_at).to_pydatetime()
+                    for bar in audit_bars.values()
+                    if (available_at := bar.get(AVAILABLE_AT_COLUMN)) is not None
+                    and not pd.isna(available_at)
+                ),
+                default=None,
+            )
+            if self._last_feature_as_of is not None:
+                decided_at = max(
+                    at for at in (decided_at, self._last_feature_as_of) if at is not None
+                )
+
+        def observe(start: datetime, bars: Mapping[str, Mapping[str, float]]) -> None:
+            for symbol, bar in bars.items():
+                self._last_prices[symbol] = float(bar["close"])
+                if self._adv_lookback_sessions is not None:
+                    self._reset_adv_session(symbol, self._adv_session(symbol, start))
+
+        if not self._executor.simulation:
+            for start, bars in steps:
+                observe(start, bars)
 
         if self._stop_holds_next_bar:
             # The leg that stopped the rebalance went out ahead of this bar.
@@ -6968,114 +7271,60 @@ class LiveTrader:
         live_rebalance_blocks_decisions = not self._executor.simulation and (
             self._live_rebalance is not None or bool(self._active_orders)
         )
-        ready_decision: StrategyDecision = []
-        if not execution_already_committed:
+        # The bar volume already filled on the bar each symbol last executed,
+        # when it is in this event; each step then carries its own.
+        newest_used_quantity = {
+            symbol: self._execution_bar_filled_quantities.get(symbol, 0.0)
+            for symbol in resolved_active_symbols
+            if self._last_execution_bar_ts.get(symbol) in starts[symbol]
+        }
+        if self._executor.simulation:
+            for start, bars in steps:
+                observe(start, bars)
+                if not execution_already_committed:
+                    self._execute_simulated_step(
+                        start,
+                        bars,
+                        execution_symbols=execution_symbols,
+                        previous_volumes=previous_volumes.get(start, {}),
+                        lagged_adv=lagged_adv.get(start, {}),
+                        used_quantity=newest_used_quantity,
+                        primary_symbol=primary_symbol,
+                    )
+        elif not execution_already_committed:
             self._pending_decision = self._without_halted_account(self._pending_decision)
             self._expire_resting_day_intents(ts, raw_bars, primary_symbol=primary_symbol)
             if not live_rebalance_blocks_decisions:
-                ready_decision, waiting_decision = partition_pending_decision(
-                    self._pending_decision,
-                    raw_bars,
-                    self._positions,
-                    primary_symbol=primary_symbol,
+                ready_decision, self._pending_decision = self._partition_pending(
+                    ts, raw_bars, primary_symbol=primary_symbol
                 )
-                self._pending_decision = waiting_decision
-        if not execution_already_committed and self._executor.simulation:
-            exposure_prices = dict(self._last_prices)
-            exposure_prices.update(
-                {
-                    symbol: float(bar["open"])
-                    for symbol, bar in raw_bars.items()
-                    if bar.get("open") is not None
-                }
-            )
-            if self._halted:
-                step_result = check_stop_targets(
-                    self._positions,
-                    raw_bars,
-                    ts,
-                    get_cost_model=self._get_cost_model,
-                    max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
-                    max_adv_participation_rate=self._max_adv_participation_rate,
-                    get_volume=lambda symbol: previous_volumes.get(symbol),
-                    get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
-                    used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol,
-                    used_adv_quantity_by_symbol=self._adv_filled_quantities,
-                    eligible_symbols=execution_symbols,
-                    get_executable_quantity=self._get_executable_quantity,
-                )
-                staged_cash = self._cash + step_result.cash_delta
-            else:
-                max_position_notional = None
-                if self._risk_policy.max_position_weight:
-                    execution_equity, _ = calc_equity(
-                        self._cash,
-                        self._positions,
-                        get_price=lambda symbol, _position: exposure_prices[symbol],
-                        get_cost_model=self._get_cost_model,
-                    )
-                    max_position_notional = self._risk_policy.max_position_weight * max(
-                        execution_equity, 0.0
-                    )
-                staged_cash, step_result = execute_pending_decision_and_stops(
-                    ts,
-                    self._positions,
-                    self._cash,
+                if ready_decision and not self._execute_live_decision(
                     ready_decision,
                     raw_bars,
-                    get_cost_model=self._get_cost_model,
-                    primary_symbol=primary_symbol,
-                    max_position_notional=max_position_notional,
-                    max_order_notional=self._risk_policy.max_order_notional,
-                    max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
-                    max_adv_participation_rate=self._max_adv_participation_rate,
-                    get_previous_volume=lambda symbol: previous_volumes.get(symbol),
-                    get_lagged_adv=lambda symbol: lagged_adv_by_symbol.get(symbol),
-                    used_bar_quantity_by_symbol=cycle_used_bar_quantity_by_symbol,
-                    used_adv_quantity_by_symbol=self._adv_filled_quantities,
-                    eligible_stop_symbols=execution_symbols,
-                    max_gross_exposure=self._risk_policy.max_gross_exposure,
-                    max_net_exposure=self._risk_policy.max_net_exposure,
-                    exposure_prices=exposure_prices,
-                    get_executable_quantity=self._get_executable_quantity,
-                    validate_intent_prices=self._validate_intent_prices,
-                    get_min_notional=self._get_min_notional,
-                )
-            self._commit_simulated_results(
-                cash=staged_cash,
-                positions=self._positions,
-                result=step_result,
-            )
-            if step_result.resting_intents:
-                resting = list(step_result.resting_intents)
-                self._pending_decision = merge_pending_decisions(
-                    self._pending_decision,
-                    resting,
-                    primary_symbol=primary_symbol,
-                )
-                self._record_resting_since(resting, ts, primary_symbol=primary_symbol)
-            self._prune_pending_submissions(primary_symbol=primary_symbol)
-            self._apply_financing_cash_flows(ts, raw_bars)
-        elif ready_decision and not self._execute_live_decision(
-            ready_decision,
-            raw_bars,
-            ts,
-            lagged_adv_by_symbol=lagged_adv_by_symbol,
-        ):
-            self._commit_cycle_bars(audit_bars, audit_histories, ts)
-            return None
+                    ts,
+                    lagged_adv_by_symbol=lagged_adv_by_symbol,
+                ):
+                    self._commit_cycle_bars(audit_bars, audit_histories, bar_ts)
+                    return None
         if not execution_already_committed:
             for symbol in resolved_active_symbols:
-                self._last_execution_bar_ts[symbol] = ts
-                self._execution_bar_filled_quantities[symbol] = (
-                    cycle_used_bar_quantity_by_symbol.get(symbol, 0.0)
+                self._last_execution_bar_ts[symbol] = bar_ts[symbol]
+                self._execution_bar_filled_quantities[symbol] = newest_used_quantity.get(
+                    symbol, 0.0
                 )
             self._persist_state()
 
         evaluated_bars: dict[str, tuple[dict[str, float], float]] = {}
         if self._batch_feature_fn is not None:
             try:
-                feature_batch = self._build_feature_batch(raw_frames, resolved_active_symbols, ts)
+                feature_batch = self._build_feature_batch(
+                    raw_frames,
+                    resolved_active_symbols,
+                    ts,
+                    bar_ts=bar_ts,
+                    as_of=decided_at if self._events_by_availability else None,
+                )
+                decided_at = feature_batch.as_of
                 featured_batch = evaluate_batch_features(self._batch_feature_fn, feature_batch)
                 for subscription in feature_batch.active_primary_subscriptions:
                     featured = featured_batch[subscription]
@@ -7087,8 +7336,8 @@ class LiveTrader:
                     price = float(bar.get("close", float("nan")))
                     if not isfinite(price) or price <= 0:
                         raise ValueError(
-                            f"{subscription.symbol} feature output has invalid close at {ts}: "
-                            f"{price}"
+                            f"{subscription.symbol} feature output has invalid close at "
+                            f"{bar_ts[subscription.symbol]}: {price}"
                         )
                     evaluated_bars[subscription.symbol] = (bar, price)
             except Exception:
@@ -7106,33 +7355,36 @@ class LiveTrader:
         # and stops are applied, before the strategy sees the bar. Mirrors
         # the backtest engine's ordering so a drawdown breach halts new
         # entries on the same cycle it's detected, not one cycle later ──
-        self._record_equity(ts)
+        self._record_equity(ts, decided_at=decided_at)
         if self._halted:
-            for symbol, position in self._positions.items():
-                if symbol in raw_bars:
-                    position.periods_held += 1
+            self._age_positions(steps)
             # Equity is still marked on this bar, so the bar is recorded too.
-            self._commit_cycle_bars(audit_bars, audit_histories, ts)
+            self._commit_cycle_bars(audit_bars, audit_histories, bar_ts)
             return feature_batch.as_of if feature_batch is not None else None
 
         # A rebalance stopped on this bar is replanned on the next one: the
         # same bar and book would size the same leg and send it again. Kept on
         # the trader, since a cycle that fails after the stop retries the bar.
         if live_rebalance_blocks_decisions or self._rebalance_stopped_at == ts:
-            for symbol, position in self._positions.items():
-                if symbol in raw_bars:
-                    position.periods_held += 1
-            self._commit_cycle_bars(audit_bars, audit_histories, ts)
+            self._age_positions(steps)
+            self._commit_cycle_bars(audit_bars, audit_histories, bar_ts)
             return feature_batch.as_of if feature_batch is not None else None
 
         # A declared auxiliary input is read through ctx.market_data, which
         # only the batch-feature path built before. Assemble the same view for
         # a plain feature_fn strategy too: reading a second frequency must not
-        # require adopting batch features.
+        # require adopting batch features. Off one grid the view is where a
+        # strategy reads each bar's own start, so it is always built.
         market_data_view = feature_batch.market_data if feature_batch is not None else None
-        if market_data_view is None and self._auxiliary_subscriptions:
+        if market_data_view is None and (
+            self._auxiliary_subscriptions or self._events_by_availability
+        ):
             market_data_view = self._build_feature_batch(
-                raw_frames, resolved_active_symbols, ts
+                raw_frames,
+                resolved_active_symbols,
+                ts,
+                bar_ts=bar_ts,
+                as_of=decided_at if self._events_by_availability else None,
             ).market_data
 
         if feature_batch is None:
@@ -7143,7 +7395,7 @@ class LiveTrader:
                     featured = _validate_feature_output(
                         self._feature_fn(history),
                         symbol=symbol,
-                        event_ts=ts,
+                        event_ts=bar_ts[symbol],
                     )
                     bar = (
                         featured.iloc[-1]
@@ -7153,7 +7405,8 @@ class LiveTrader:
                     price = float(bar.get("close", float("nan")))
                     if not isfinite(price) or price <= 0:
                         raise ValueError(
-                            f"{symbol} feature output has invalid close at {ts}: {price}"
+                            f"{symbol} feature output has invalid close at {bar_ts[symbol]}: "
+                            f"{price}"
                         )
                 except Exception:
                     logger.exception(
@@ -7179,12 +7432,12 @@ class LiveTrader:
             if self._on_signal_outcome:
                 sig = bar.get("entry_signal")
                 if sig is not None and not pd.isna(sig) and float(sig) != 0:
-                    self._on_signal_outcome(symbol, ts, float(sig), price)
+                    self._on_signal_outcome(symbol, bar_ts[symbol], float(sig), price)
                 exit_sig = bar.get("exit_signal")
                 if exit_sig is not None and not pd.isna(exit_sig) and float(exit_sig) != 0:
                     self._on_signal_outcome(
                         symbol,
-                        ts,
+                        bar_ts[symbol],
                         float(exit_sig),
                         price,
                         signal_type="exit",
@@ -7208,14 +7461,20 @@ class LiveTrader:
                 equity=equity,
             ),
             period_index=self._period_index,
-            decision_at=feature_batch.as_of if feature_batch is not None else None,
+            decision_at=(
+                decided_at
+                if self._events_by_availability
+                else feature_batch.as_of
+                if feature_batch is not None
+                else None
+            ),
             market_data=market_data_view,
             settles_next_session=frozenset(
                 symbol
                 for symbol in bars
                 if self._instruments[symbol].continuous_alias
                 and self._instruments[symbol].calendar_id == TAIFEX_INDEX_CALENDAR
-                and final_settlement_follows(session_label(ts, TAIFEX_INDEX_CALENDAR))
+                and final_settlement_follows(session_label(bar_ts[symbol], TAIFEX_INDEX_CALENDAR))
             ),
         )
         strategy_started = perf_counter()
@@ -7223,6 +7482,8 @@ class LiveTrader:
             intent = self._strategy.on_bar(ctx)
         finally:
             self._cycle_strategy_seconds += perf_counter() - strategy_started
+        if self._events_by_availability:
+            refuse_cross_grid_legs(intent, bars, self._positions, ts, primary_symbol=primary_symbol)
         validate_strategy_decision(
             intent,
             set(self._symbols),
@@ -7236,12 +7497,15 @@ class LiveTrader:
         self._period_index += 1
         if self._executor.simulation:
             self._validate_resting_sessions(intent, primary_symbol=primary_symbol)
+            if decides_again:
+                self._drop_earlier_decision_on(ts, primary_symbol=primary_symbol)
             self._replace_resting_intents(intent, ts, primary_symbol=primary_symbol)
             self._pending_decision = merge_pending_decisions(
                 self._pending_decision,
                 intent,
                 primary_symbol=primary_symbol,
             )
+            self._record_decision(intent, ts, decided_at, primary_symbol=primary_symbol)
         else:
             ready_decision, waiting_decision = partition_pending_decision(
                 intent,
@@ -7262,15 +7526,137 @@ class LiveTrader:
                     lagged_adv_by_symbol=lagged_adv_by_symbol,
                 )
                 if not execution_complete and self._halted:
-                    self._commit_cycle_bars(audit_bars, audit_histories, ts)
+                    self._commit_cycle_bars(audit_bars, audit_histories, bar_ts)
                     return None
 
-        for symbol, position in self._positions.items():
-            if symbol in raw_bars:
-                position.periods_held += 1
+        self._age_positions(steps)
         # Record OHLCV after processing (equity already recorded in Step 1.5)
-        self._commit_cycle_bars(audit_bars, audit_histories, ts)
+        self._commit_cycle_bars(audit_bars, audit_histories, bar_ts)
         return feature_batch.as_of if feature_batch is not None else None
+
+    def _execute_simulated_step(
+        self,
+        ts: datetime,
+        bars: dict[str, dict[str, float]],
+        *,
+        execution_symbols: Container[str],
+        previous_volumes: Mapping[str, float],
+        lagged_adv: Mapping[str, float],
+        used_quantity: dict[str, float],
+        primary_symbol: str,
+    ) -> None:
+        """Fill the pending decision, stops and financing on the bars starting at ``ts``.
+
+        ``used_quantity`` carries the bar volume each symbol's newest bar has
+        filled and is updated with what fills here.
+        """
+        used_bar_quantity = {
+            symbol: quantity
+            for symbol, quantity in used_quantity.items()
+            if self._last_execution_bar_ts.get(symbol) == ts
+        }
+        # A queued drawdown exit, like a decision, fills on a bar starting at
+        # or after the event that decided it. A bar a failed attempt at this
+        # event executed is not checked again.
+        eligible_stop_symbols = {
+            symbol
+            for symbol in bars
+            if symbol in execution_symbols
+            and ts > self._last_execution_bar_ts.get(symbol, datetime.min.replace(tzinfo=UTC))
+            and (
+                symbol not in self._market_exit_decided_at
+                or ts >= self._market_exit_decided_at[symbol]
+            )
+        }
+        self._pending_decision = self._without_halted_account(self._pending_decision)
+        self._expire_resting_day_intents(ts, bars, primary_symbol=primary_symbol)
+        ready_decision, self._pending_decision = self._partition_pending(
+            ts, bars, primary_symbol=primary_symbol
+        )
+        exposure_prices = dict(self._last_prices)
+        exposure_prices.update(
+            {
+                symbol: float(bar["open"])
+                for symbol, bar in bars.items()
+                if bar.get("open") is not None
+            }
+        )
+        if self._halted:
+            step_result = check_stop_targets(
+                self._positions,
+                bars,
+                ts,
+                get_cost_model=self._get_cost_model,
+                max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
+                max_adv_participation_rate=self._max_adv_participation_rate,
+                get_volume=lambda symbol: previous_volumes.get(symbol),
+                get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
+                used_bar_quantity_by_symbol=used_bar_quantity,
+                used_adv_quantity_by_symbol=self._adv_filled_quantities,
+                eligible_symbols=eligible_stop_symbols,
+                get_executable_quantity=self._get_executable_quantity,
+            )
+            staged_cash = self._cash + step_result.cash_delta
+        else:
+            max_position_notional = None
+            if self._risk_policy.max_position_weight:
+                execution_equity, _ = calc_equity(
+                    self._cash,
+                    self._positions,
+                    get_price=lambda symbol, _position: exposure_prices[symbol],
+                    get_cost_model=self._get_cost_model,
+                )
+                max_position_notional = self._risk_policy.max_position_weight * max(
+                    execution_equity, 0.0
+                )
+            staged_cash, step_result = execute_pending_decision_and_stops(
+                ts,
+                self._positions,
+                self._cash,
+                ready_decision,
+                bars,
+                get_cost_model=self._get_cost_model,
+                primary_symbol=primary_symbol,
+                max_position_notional=max_position_notional,
+                max_order_notional=self._risk_policy.max_order_notional,
+                max_bar_volume_participation_rate=self._max_bar_volume_participation_rate,
+                max_adv_participation_rate=self._max_adv_participation_rate,
+                get_previous_volume=lambda symbol: previous_volumes.get(symbol),
+                get_lagged_adv=lambda symbol: lagged_adv.get(symbol),
+                used_bar_quantity_by_symbol=used_bar_quantity,
+                used_adv_quantity_by_symbol=self._adv_filled_quantities,
+                eligible_stop_symbols=eligible_stop_symbols,
+                max_gross_exposure=self._risk_policy.max_gross_exposure,
+                max_net_exposure=self._risk_policy.max_net_exposure,
+                exposure_prices=exposure_prices,
+                get_executable_quantity=self._get_executable_quantity,
+                validate_intent_prices=self._validate_intent_prices,
+                get_min_notional=self._get_min_notional,
+            )
+        self._commit_simulated_results(
+            cash=staged_cash,
+            positions=self._positions,
+            result=step_result,
+        )
+        if step_result.resting_intents:
+            resting = list(step_result.resting_intents)
+            self._pending_decision = merge_pending_decisions(
+                self._pending_decision,
+                resting,
+                primary_symbol=primary_symbol,
+            )
+            self._record_resting_since(resting, ts, primary_symbol=primary_symbol)
+        self._prune_pending_submissions(primary_symbol=primary_symbol)
+        self._apply_financing_cash_flows(ts, bars)
+        for symbol in bars.keys() | used_bar_quantity.keys():
+            used_quantity[symbol] = used_bar_quantity.get(symbol, 0.0)
+
+    def _age_positions(self, steps: Sequence[tuple[datetime, Mapping[str, object]]]) -> None:
+        """Count each held position's bars in the event, one per bar."""
+        for _start, bars in steps:
+            for symbol, position in self._positions.items():
+                if symbol in bars:
+                    position.periods_held += 1
 
     def _post_fill_risk_violation(self, *, include_net: bool = True) -> str | None:
         """Validate confirmed exposure after an exposure-increasing fill."""
@@ -7481,9 +7867,13 @@ class LiveTrader:
             get_cost_model=self._get_cost_model,
         )
 
-    def _check_drawdown(self, ts: datetime) -> tuple[float, float]:
+    def _check_drawdown(
+        self, ts: datetime, *, decided_at: datetime | None = None
+    ) -> tuple[float, float]:
         """Value the book, raise the peak, and flatten and halt past ``max_drawdown_rate``.
 
+        ``decided_at`` is when an event's breach is decided; a simulated exit
+        it queues fills on its symbol's first bar that starts at or after then.
         Returns the equity and drawdown left after any flatten.
         """
         equity, _ = self._calc_account_snapshot()
@@ -7502,6 +7892,7 @@ class LiveTrader:
                     reason=REASON_DRAWDOWN_BREACH,
                     title="Max Drawdown Breach",
                     detail=f"drawdown={drawdown:.2%} <= -{self._risk_policy.max_drawdown_rate:.2%}",
+                    decided_at=decided_at,
                 )
             equity, _ = self._calc_account_snapshot()
             drawdown = (
@@ -7542,10 +7933,10 @@ class LiveTrader:
         if moved and not self._halted:
             self._persist_state()
 
-    def _record_equity(self, ts: datetime) -> None:
+    def _record_equity(self, ts: datetime, *, decided_at: datetime | None = None) -> None:
         """Calculate equity + drawdown, check the max-drawdown circuit
         breaker, call on_bar callback, and send periodic status."""
-        equity, drawdown = self._check_drawdown(ts)
+        equity, drawdown = self._check_drawdown(ts, decided_at=decided_at)
 
         period_return = equity / self._prev_equity - 1.0 if self._prev_equity > 0 else 0.0
         self._prev_equity = equity
@@ -7609,7 +8000,13 @@ class LiveTrader:
                 self._status_window_equity = equity
 
     def _flatten_account_and_halt(
-        self, ts: datetime, *, reason: str, title: str, detail: str
+        self,
+        ts: datetime,
+        *,
+        reason: str,
+        title: str,
+        detail: str,
+        decided_at: datetime | None = None,
     ) -> None:
         """Queue or submit exits for every position, halt, and alert the outcome.
 
@@ -7640,6 +8037,8 @@ class LiveTrader:
             exits_owed = self._halt_cancels_pending
         if self._executor.simulation:
             queue_market_exit_all(self._positions, reason=reason)
+            if decided_at is not None:
+                self._market_exit_decided_at.update(dict.fromkeys(self._positions, decided_at))
             flattened = not self._positions
             exit_queued = not flattened
         elif exits_owed:

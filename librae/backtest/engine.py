@@ -73,6 +73,7 @@ from librae.core.executor import (
     merge_pending_decisions,
     partition_pending_decision,
     queue_market_exit_all,
+    refuse_cross_grid_legs,
     validate_strategy_decision,
 )
 from librae.core.financing import (
@@ -435,46 +436,6 @@ def _primary_events(
             )
         )
     return events
-
-
-def _refuse_cross_grid_legs(
-    decision: StrategyDecision,
-    bars: Mapping[str, object],
-    positions: Mapping[str, PositionState],
-    ts: pd.Timestamp,
-    *,
-    primary_symbol: str,
-) -> None:
-    """Refuse a whole-book target or order group whose legs are on other grids.
-
-    Both execute on one event, and off one bar grid the legs' bars complete at
-    different instants, so they would never share one. Filling each leg on its
-    own later bar would need per-leg sizing and give up the group's
-    all-or-none contract.
-    """
-    if isinstance(decision, PortfolioWeights):
-        needed = {
-            "PortfolioWeights": set(positions)
-            | {symbol for symbol, weight in decision.weights.items() if abs(weight) > EPSILON}
-        }
-    else:
-        needed = {}
-        for intent in decision:
-            if intent.group_id is not None:
-                needed.setdefault(f"group {intent.group_id!r}", set()).add(
-                    intent.symbol or primary_symbol
-                )
-    for label, symbols in needed.items():
-        missing = sorted(symbols - set(bars))
-        if missing:
-            raise ValueError(
-                f"{label} at {ts} needs a bar for {missing} in this event, but the "
-                "primaries do not start on one bar grid, so their bars become available "
-                "at different instants. PortfolioWeights and group_id orders are not "
-                "supported across grids; return per-symbol OrderIntents without a "
-                "group_id, which each fill on their own first bar starting at or after "
-                "the decision"
-            )
 
 
 class _MarketDataReplay:
@@ -2270,7 +2231,7 @@ class Backtest:
                 )
                 new_decision = self._strategy.on_bar(ctx)
                 if self._events_by_availability:
-                    _refuse_cross_grid_legs(
+                    refuse_cross_grid_legs(
                         new_decision, strategy_bars, positions, ts, primary_symbol=primary_symbol
                     )
                 validate_strategy_decision(

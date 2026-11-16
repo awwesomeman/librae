@@ -451,28 +451,6 @@ def bar_grids_align(subscriptions: Sequence[MarketDataSubscription]) -> bool:
     )
 
 
-def require_aligned_bar_grids(subscriptions: Sequence[MarketDataSubscription]) -> None:
-    """Refuse primaries off one shared grid, for a runtime that orders events by bar start.
-
-    Off one grid the bar read at the earlier start closes after another
-    symbol's next bar opens, so such a runtime meets the bars out of
-    completion order and could fill a decision before its data was available.
-    """
-    if bar_grids_align(subscriptions):
-        return
-    timeframes = {subscription.timeframe for subscription in subscriptions}
-    described = ", ".join(
-        f"{subscription.symbol}={subscription.calendar_id}/{subscription.session_mode}"
-        for subscription in subscriptions
-    )
-    raise ValueError(
-        f"primary bars do not start on one shared grid ({described} at "
-        f"{', '.join(sorted(timeframes))}): one symbol's bar would start while another's "
-        "is still open, so a decision could fill before the data it read was available. "
-        "Use primaries whose sessions open on one grid of the bar period"
-    )
-
-
 def _grids_align(subscriptions: Sequence[MarketDataSubscription], canonical: str) -> bool:
     if canonical.startswith(("M", "H")) and not canonical.startswith("MN"):
         period_seconds = int(interval_to_timedelta(canonical).total_seconds())

@@ -266,7 +266,7 @@ operations require reconfiguration and restart; they are not behavior that
 strategy code should emulate.
 
 Per-symbol `OrderIntent`s become eligible on that symbol's next observed bar
-(in a backtest, the first that starts once the decision's bars were all
+(in a backtest or sim, the first that starts once the decision's bars were all
 available) and can wait indefinitely without blocking anything else. `PortfolioWeights`
 is intentionally synchronous and must be immediately executable when
 returned: the strategy checks `ctx.available_symbols` for every non-zero
@@ -399,8 +399,9 @@ the engine never silently converts an exact contract into a rolling alias.
 
 Execution then deliberately diverges:
 
-- **Backtest/sim:** an OrderIntent decided at T is eligible on that symbol's next
-  observed raw bar. Bar fields, one-bar numeric limits, stops, take-profit,
+- **Backtest/sim:** an OrderIntent decided at T is eligible on that symbol's
+  first observed raw bar that starts at or after T, the latest availability
+  its event had seen. Bar fields, one-bar numeric limits, stops, take-profit,
   liquidation, and estimated costs belong to this deterministic simulation
   model.
 - **Live:** each batch of newly completed bars is an event and its ready intent
@@ -425,9 +426,11 @@ already decided is recorded beside the old one (`run_bars` in
 defined under data staleness below. Both modes advance a durable per-symbol
 watermark only after successful processing. A late symbol at the same
 timestamp is processed with any same-timestamp bars already present in cache,
-so a waiting target basket can become executable. A bar delivered after a
-later-starting event was decided is decided at its own start; how events are
-ordered and held is in
+so a waiting target basket can become executable; in sim that decision
+replaces what the earlier one on those bars left pending, since a backtest
+decides them once. A bar delivered after a
+later-starting event was decided is decided at its own start, or off one bar
+grid its own availability; how events are ordered and held is in
 [architecture.md](../../architecture.md#data-acquisition-and-ownership-boundary).
 If a backtest still holds a symbol
 without a real bar in the final
@@ -1006,8 +1009,9 @@ adapter at submission.
   `calculate_position_weights()` are the shared accounting SSOT used by risk
   validation, backtest snapshots, live post-fill checks, and live diagnostics.
 - `max_drawdown_rate`: once detected from a completed bar, backtest/sim queues
-  market exits for the run's open positions and fills them at the next observed
-  bar open (subject to the normal volume cap); it never observes a close and
+  market exits for the run's open positions and fills them at the open of each
+  symbol's first bar that starts once the breach was decided (subject to the
+  normal volume cap); it never observes a close and
   fills at that same close. Live submits immediate market closes and books only
   confirmed broker fills; a close below the venue minimum is skipped as above.
   Live also checks on every poll while a strategy order works, through a
