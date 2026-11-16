@@ -200,6 +200,20 @@ def _store_down(store: MemoryLiveStateStore, *, when=None) -> dict[str, bool]:
     return outage
 
 
+def _partly_filled_trader(store: MemoryLiveStateStore, group_id: str | None = None):
+    """``_resting_trader`` at 100 with a 40% position limit, whose buy reads half filled at 90."""
+    trader, adapter, strategy, events, alerts = _resting_trader(close=100.0, store=store)
+    [order] = trader._active_orders
+    trader._active_orders = [replace(order, request=replace(order.request, group_id=group_id))]
+    trader._risk_policy = RiskPolicy(max_drawdown_rate=0.2, max_position_weight=0.4)
+    trader._last_reconciliation_at = trader._utc_now()
+    trader._persist_state()
+    partial = _broker_report(order_id="rest-1", status="open", filled=0.5, average=90.0)
+    adapter.get_order.return_value = partial
+    adapter.cancel_order.return_value = {**partial, "status": "canceled"}
+    return trader, adapter, strategy, events, alerts
+
+
 def _venue_positions(sizes: dict[str, float]):
     def position(request) -> dict:
         size = sizes.get(request.symbol, 0.0)
@@ -320,21 +334,130 @@ class TestRiskChecksThroughAStoreOutage:
         assert adapter.place_order.call_args_list[0].args[0]["quantity"] == pytest.approx(2.0)
         assert strategy.calls == 0
 
-    def test_a_fill_in_the_outage_is_checked_against_the_exposure_limits(self):
-        """A plain halt still cancels nothing until the store records it."""
+    def test_a_fill_in_the_outage_is_checked_and_the_halt_cancels_at_once(self):
+        """Half of AAA's buy fills at 90 in the outage: AAA is 150 of 305, past 40%.
+
+        The order keeps working, so the halt cancels it without waiting for
+        the store, and is recorded once the store answers.
+        """
         store = MemoryLiveStateStore(restart_durable_for_tests=True)
-        trader, adapter, _, _, alerts = _resting_trader(close=100.0, store=store)
-        trader._risk_policy = RiskPolicy(max_drawdown_rate=0.2, max_position_weight=0.4)
-        _store_down(store)
-        adapter.get_order.return_value = _broker_report(order_id="rest-1", average=90.0)
+        trader, adapter, strategy, events, alerts = _partly_filled_trader(store)
+        outage = _store_down(store)
 
         with pytest.raises(StateStoreUnavailableError):
             trader._poll_cycle()
 
         assert trader._halted is True
+        assert [call.args[0] for call in adapter.cancel_order.call_args_list] == ["rest-1"]
+        assert trader._active_orders == []
+        assert trader._positions["AAA"].quantity == pytest.approx(1.5)
         [breach] = _alerts_titled(alerts, "Post-fill Risk Breach")
         assert "AAA confirmed weight" in breach["message"]
-        assert "halt not persisted" in breach["message"]
+        assert "not recorded yet (StateStoreUnavailableError" in breach["message"]
+
+        outage["down"] = False
+        trader._poll_cycle()
+
+        saved = store.load(trader._state_key)
+        assert saved.halted is True
+        assert saved.positions["AAA"].quantity == pytest.approx(1.5)
+        assert store.orders["rest-1"].status == "cancelled"
+        assert len(_alerts_titled(alerts, "Halt Persisted")) == 1
+        assert [event.detail["reason"] for event in events if event.event_type == "halted"] == [
+            "Post-fill Risk Breach"
+        ]
+        adapter.place_order.assert_not_called()
+        assert strategy.calls == 0
+
+    def test_an_operator_halt_keeps_cancelling_through_the_outage(self):
+        """The venue leaves the cancel pending; the next cycle, still in the
+        outage, sees the order end."""
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        trader, adapter, strategy, _, alerts = _resting_trader(close=100.0, store=store)
+        trader._last_reconciliation_at = trader._utc_now()
+        adapter.cancel_order.return_value = {**_accepted("rest-1"), "status": "pending_cancel"}
+        _store_down(store)
+        trader.request_halt("desk asked to stop")
+
+        with pytest.raises(StateStoreUnavailableError):
+            trader._poll_cycle()
+
+        assert trader._halted is True
+        assert adapter.cancel_order.call_count == 1
+        [halt] = _alerts_titled(alerts, "Manual Halt")
+        assert "not recorded yet (StateStoreUnavailableError" in halt["message"]
+        assert "awaiting cancel confirmation for AAA order_id=rest-1" in halt["message"]
+
+        adapter.get_order.return_value = {**_accepted("rest-1"), "status": "canceled"}
+        with pytest.raises(StateStoreUnavailableError):
+            trader._poll_cycle()
+
+        assert trader._active_orders == []
+        assert len(_alerts_titled(alerts, "Halt Cancellation Completed")) == 1
+        adapter.place_order.assert_not_called()
+        assert strategy.calls == 0
+
+    def test_a_halt_in_the_outage_drops_an_unsent_order_and_sends_nothing(self):
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        trader, adapter, strategy, _, _ = _resting_trader(close=100.0, store=store)
+        trader._last_reconciliation_at = trader._utc_now()
+        queued = _order("q-2", "BBB")
+        trader._active_orders.append(queued)
+        trader._persist_state()
+        outage = _store_down(store)
+        trader.request_halt("desk asked to stop")
+
+        with pytest.raises(StateStoreUnavailableError):
+            trader._poll_cycle()
+
+        assert queued.status == "cancelled"
+        assert trader._active_orders == []
+        with pytest.raises(StateStoreUnavailableError):
+            trader._poll_cycle()
+        outage["down"] = False
+        trader._poll_cycle()
+
+        assert store.orders["q-2"].status == "cancelled"
+        assert store.load(trader._state_key).halted is True
+        adapter.place_order.assert_not_called()
+        assert strategy.calls == 0
+
+    @pytest.mark.parametrize(
+        ("recorded", "group_id"),
+        [(True, None), (False, None), (False, "pair")],
+        ids=["recorded", "unrecorded", "unrecorded-grouped"],
+    )
+    def test_a_restart_halts_only_on_a_recorded_halt_or_an_ungrouped_cancel(
+        self, recorded, group_id
+    ):
+        """Started once the halt is recorded, the successor resumes halted.
+        Started before, it resumes unhalted from the older checkpoint and
+        reads the halt's cancel as the venue's: an order without group_id
+        halts it as Order Cancelled, a grouped one fails only its group and
+        it trades on. Either way it sends no cancel again."""
+        store = MemoryLiveStateStore(restart_durable_for_tests=True)
+        trader, adapter, _, _, _ = _partly_filled_trader(store, group_id=group_id)
+        outage = _store_down(store)
+        with pytest.raises(StateStoreUnavailableError):
+            trader._poll_cycle()
+        outage["down"] = False
+        if recorded:
+            trader._poll_cycle()
+
+        adapter.get_order.return_value = adapter.cancel_order.return_value
+        adapter.get_position.side_effect = _venue_positions({"AAA": 1.5, "BBB": 1.0, "DUST": 1.0})
+        adapter.cancel_order.reset_mock()
+        successor, alerts = _successor(adapter, store, close=100.0)
+        assert successor._halted is recorded
+
+        successor._initialize_run()
+        successor._poll_cycle()
+
+        assert successor._halted is (recorded or group_id is None)
+        assert len(_alerts_titled(alerts, "Order Cancelled")) == (0 if recorded else 1)
+        assert successor._positions["AAA"].quantity == pytest.approx(1.5)
+        assert successor._active_orders == []
+        adapter.place_order.assert_not_called()
         adapter.cancel_order.assert_not_called()
 
     def test_an_operator_flatten_closes_the_book_in_the_outage(self):

@@ -19,8 +19,10 @@ import librae.db as db
 import psycopg2
 import pytest
 from librae.db.timescale_state import TimescaleLiveStateStore
-from librae.live.state import StateStoreUnavailableError
+from librae.live.executor import OrderRequest
+from librae.live.state import StateStoreUnavailableError, TrackedOrder
 
+from tests.engine.live_factories import TEST_CLOCK_NOW
 from tests.engine.test_halt_runtime_events import _buy_btc, _live_trader
 from tests.engine.test_live_flatten import _adapter, _titled, _trader
 from tests.engine.test_live_runner import _mock_order_adapter
@@ -88,8 +90,36 @@ def test_a_connection_to_it_fails_within_the_bound(unanswering_dsn):
     assert time.monotonic() - started < WRITE_BOUND_S
 
 
-def test_a_halt_alerts_within_the_bound(unanswering_dsn):
-    trader, _, alerts = _trader(_adapter())
+def _working(symbol: str) -> TrackedOrder:
+    return TrackedOrder(
+        request=OrderRequest(
+            client_order_id=f"{symbol}-1",
+            symbol=symbol,
+            side="buy",
+            quantity=1.0,
+            order_type="limit",
+            limit_price=90.0,
+            submitted_at=TEST_CLOCK_NOW,
+            reference_price=100.0,
+        ),
+        placement_attempted=True,
+        placement_attempted_at=TEST_CLOCK_NOW,
+        order_id=f"{symbol}-1",
+        status="accepted",
+    )
+
+
+def _venue_order(order_id: str, status: str) -> dict:
+    return {"id": order_id, "status": status, "amount": 1.0, "filled": 0.0}
+
+
+def test_a_halt_cancels_and_alerts_within_the_bound(unanswering_dsn):
+    """Only the halt's own write waits for the server; its cancels do not."""
+    adapter = _adapter()
+    adapter.get_order.side_effect = lambda order_id, _s: _venue_order(order_id, "open")
+    adapter.cancel_order.side_effect = lambda order_id, _s: _venue_order(order_id, "canceled")
+    trader, _, alerts = _trader(adapter)
+    trader._active_orders = [_working("AAA"), _working("BBB")]
     _store_on(trader, unanswering_dsn)
     started = time.monotonic()
 
@@ -98,8 +128,10 @@ def test_a_halt_alerts_within_the_bound(unanswering_dsn):
 
     assert time.monotonic() - started < WRITE_BOUND_S
     assert trader._halted is True
+    assert [call.args[0] for call in adapter.cancel_order.call_args_list] == ["AAA-1", "BBB-1"]
+    assert trader._active_orders == []
     [halt] = _titled(alerts, "Manual Halt")
-    assert "halt not persisted (StateStoreUnavailableError" in halt["message"]
+    assert "not recorded yet (StateStoreUnavailableError" in halt["message"]
 
 
 def test_a_failed_placement_reaches_its_lookup_within_the_bound(unanswering_dsn):
@@ -128,4 +160,4 @@ def test_a_failed_placement_reaches_its_lookup_within_the_bound(unanswering_dsn)
     assert time.monotonic() - times["looked_up"] < WRITE_BOUND_S
     assert trader._halted is True
     [halt] = _titled(alerts, "Ambiguous Order Placement")
-    assert "halt not persisted (StateStoreUnavailableError" in halt["message"]
+    assert "not recorded yet (StateStoreUnavailableError" in halt["message"]

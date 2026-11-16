@@ -467,8 +467,9 @@ timestamp is processed with any same-timestamp bars already present in cache,
 so a waiting target basket can become executable; in sim that decision
 replaces what the earlier one on those bars left pending, since a backtest
 decides them once. A bar delivered after a
-later-starting event was decided is decided at its own start, or off one bar
-grid its own availability; how events are ordered and held is in
+later-starting event was decided is decided at its own start, without the
+bars decided there, or off one bar grid at its own availability; how events
+are ordered and held is in
 [architecture.md](../../architecture.md#data-acquisition-and-ownership-boundary).
 If a backtest still holds a symbol
 without a real bar in the final
@@ -1148,7 +1149,8 @@ adapter at submission.
   failure stops the cycle there, except an answer that cannot be applied,
   which alerts and lets reconciliation run; a repeated `halt()` raises until
   it runs through. A **Halt Cancellation
-  Completed** alert follows once no order is tracked. If the checkpoint write fails, nothing is
+  Completed** alert follows once no order is tracked. If the checkpoint write
+  fails other than in a store outage, nothing is
   cancelled yet, the halt alert still goes out naming the failure, the error
   propagates (to `halt()`'s caller, or as a poll-cycle error), and the run
   stays halted. A drawdown or operator flatten whose exits cannot be queued,
@@ -1160,14 +1162,18 @@ adapter at submission.
   working. `reset_halt()` refuses with `halt_not_persisted` until then. A
   process that exits first restarts from the last written checkpoint,
   unhalted, and its drawdown breaker measures from the peak that checkpoint
-  holds. A drawdown breach or operator flatten does not wait for a store
-  outage, since that would leave the book open for as long as the store is
-  down: its cancels and exits go out with their rows held in memory for the
-  next checkpoint that lands, its alert says `not recorded yet`, and each
-  later cycle retries the checkpoint, then goes on with the cancels and
-  exits still owed. A restart before a checkpoint lands halts on any
-  position or untracked open order the flatten left at the venue, and sends
-  nothing. An
+  holds. No halt waits for a store outage (`StateStoreUnavailableError`):
+  a cancel adds no exposure, and a drawdown breach or operator flatten would
+  leave the book open for as long as the store is down. Once a write meets
+  the outage, its cancels, and a flatten's exits, go out without waiting on
+  the store again, their rows held in memory for the next checkpoint that
+  lands; its alert says `not recorded yet`, and each later
+  cycle retries the checkpoint, then goes on with the cancels and exits
+  still owed. A restart before a checkpoint lands resumes trading unhalted
+  from the last one, sending any order still queued in it. It halts, sending
+  nothing, on any position or untracked open order a flatten left at the
+  venue. It reads an order the halt cancelled as one the venue ended: one
+  without `group_id` halts it, a grouped one fails only its group. An
   order whose placement write fails was not sent, and is not taken as sent.
 - Audit trail: every halt alert records one `halted` runtime event, so one
   stop can record several: a flatten whose exit fails records the exit's halt

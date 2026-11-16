@@ -1653,12 +1653,17 @@ class LiveTrader:
         write, e.g. behind a lock on the row, was not refused.
 
         Inside ``_acting_through_store_outage`` a store outage returns instead,
-        its rows still carried, with ``_checkpoint_failing`` left set.
+        its rows still carried, with ``_checkpoint_failing`` left set. Once
+        that work has met an outage, its later writes carry their rows
+        without trying the store: each would wait out the outage's timeout
+        again before the next cancel or exit goes out.
         """
         if self._state_store is None:
             return
         for tracked in orders:
             self._unpersisted_orders[tracked.request.client_order_id] = tracked
+        if self._unrecorded:
+            return
         snapshot = self._snapshot_state()
         self._checkpoint_failing = True
         try:
@@ -1683,18 +1688,21 @@ class LiveTrader:
 
     @contextmanager
     def _acting_through_store_outage(self) -> Iterator[None]:
-        """Let a flatten's cancels and exits reach the venue while the store is down.
+        """Let a halt's cancels and a flatten's exits reach the venue while the store is down.
 
         Every order and cancel is otherwise recorded before it is sent, so a
-        restart can find it, and a store outage holds it back. For a flatten
-        that would leave the book open for as long as the store is down. In
+        restart can find it, and a store outage holds it back. For a halt that
+        would leave its orders working, and a flatten its book open, for as
+        long as the store is down. In
         here a write that meets an outage keeps its rows carried for the next
         checkpoint that lands and the work goes on; the outermost scope then
         raises the outage, as any failed write does. A restart before a
-        checkpoint lands starts from one that does not know this work:
-        startup reconciliation halts on the positions or untracked open orders
-        it left at the venue and sends nothing, and an order it cancelled reads
-        as one the venue ended.
+        checkpoint lands starts unhalted from one that does not know this
+        work. Startup reconciliation halts, sending nothing, on the positions
+        or untracked open orders a flatten left at the venue. An order this
+        work cancelled reads as one the venue ended: one without ``group_id``
+        halts the account, a grouped one fails only its group, and the
+        account trades on.
         """
         if self._unrecorded is not None:
             yield
@@ -2584,8 +2592,9 @@ class LiveTrader:
 
         The halt is checkpointed before cancelling, and each cancel records
         itself. A failure of either still alerts, naming it, before it
-        propagates. Within a flatten, a store outage holds back neither
-        (``_acting_through_store_outage``).
+        propagates. A store outage holds back neither
+        (``_acting_through_store_outage``): a cancel adds no exposure, and a
+        restart reads one it does not know as the venue's.
 
         On an account a flatten has halted or is halting, whose only orders
         are its exits, the exits keep working, as for a manual halt:
@@ -2612,27 +2621,30 @@ class LiveTrader:
             cancelled = (order,)
         dropped, self._pending_flatten = self._pending_flatten, None
         self._enter_halt()
-        failure, note = self._persist_halt(*cancelled, cancel_on_retry=not keep_exits)
-        if keep_exits:
-            others = [tracked for tracked in self._active_orders if tracked not in cancelled]
-            unsent = sum(1 for tracked in others if not tracked.placement_attempted)
-            prefix = "; cancelling that order only; other" if cancelled else ";"
-            note += (
-                f"{prefix} recovery exits: {len(others) - unsent} working, {unsent} queued unsent"
+        with self._acting_through_store_outage():
+            failure, note = self._persist_halt(*cancelled, cancel_on_retry=not keep_exits)
+            if keep_exits:
+                others = [tracked for tracked in self._active_orders if tracked not in cancelled]
+                unsent = sum(1 for tracked in others if not tracked.placement_attempted)
+                prefix = "; cancelling that order only; other" if cancelled else ";"
+                note += (
+                    f"{prefix} recovery exits: {len(others) - unsent} working, "
+                    f"{unsent} queued unsent"
+                )
+            elif failure is None and not self._executor.simulation:
+                failure, cancel_note = self._cancel_for_halt()
+                note = cancel_note + note
+            if dropped is not None:
+                note += f"; the {dropped.title} exits not yet sent are dropped"
+            logger.error("%s: %s", title, message)
+            self._notify(
+                "send_alert",
+                title=f"[{self._executor.strategy_name}] {title}",
+                message=f"{message}; trading halted{note}.",
             )
-        elif failure is None and not self._executor.simulation:
-            failure, note = self._cancel_for_halt()
-        if dropped is not None:
-            note += f"; the {dropped.title} exits not yet sent are dropped"
-        logger.error("%s: %s", title, message)
-        self._notify(
-            "send_alert",
-            title=f"[{self._executor.strategy_name}] {title}",
-            message=f"{message}; trading halted{note}.",
-        )
-        self._record_runtime_event("halted", {"reason": title, "message": message})
-        if failure is not None:
-            raise failure
+            self._record_runtime_event("halted", {"reason": title, "message": message})
+            if failure is not None:
+                raise failure
 
     def _record_runtime_event(
         self,
@@ -2713,8 +2725,9 @@ class LiveTrader:
             logger.error("Halt checkpoint not written: %s", error)
             return None, (
                 f"; not recorded yet ({type(error).__name__}: {error}), so a restart now "
-                "would start unhalted from the last checkpoint and halt only if the venue's "
-                "positions or open orders differ from it"
+                "would resume trading unhalted from the last checkpoint, halting only on a "
+                "venue position or open order that differs from it or on an order without "
+                "group_id that this halt cancelled"
             )
         return None, ""
 
@@ -2780,16 +2793,15 @@ class LiveTrader:
         cancellation pass, which already polled and cancelled every tracked
         order, or those exits, which already advanced the queue.
 
-        A flatten's halt is the exception: its cancels and exits go on through
-        a store outage (``_acting_through_store_outage``). While the halt itself
-        is unrecorded the outage then stops the cycle, so its exits are also
-        advanced here.
+        A store outage is the exception: a halt's cancels, and a flatten's
+        exits, go on through it (``_acting_through_store_outage``). While the
+        halt itself is unrecorded the outage then stops the cycle, so a
+        flatten's exits are also advanced here.
         """
-        if not self._flatten_owns_halt():
-            return self._retry_halt_work()
+        flatten_owns_halt = self._flatten_owns_halt()
         with self._acting_through_store_outage():
             sent = self._retry_halt_work()
-            if self._halt_unpersisted and not sent:
+            if flatten_owns_halt and self._halt_unpersisted and not sent:
                 self._advance_live_orders()
                 sent = True
         return sent
@@ -3816,7 +3828,13 @@ class LiveTrader:
                 event_frames = {}
                 advanced_symbols = []
                 event_symbols = set(events[cycle_ts])
-                if self._executor.simulation:
+                # Sim decides a bar again with a same-start bar that arrived
+                # after it, as a backtest decides them once, but only while no
+                # later bar has executed: that bar acted on the earlier
+                # decision, which deciding again could no longer replace.
+                if self._executor.simulation and all(
+                    executed <= cycle_ts for executed in self._last_execution_bar_ts.values()
+                ):
                     event_symbols.update(
                         symbol
                         for symbol, frame in frames.items()
@@ -3848,7 +3866,7 @@ class LiveTrader:
                 committed_feature_as_of = self._process_cycle(
                     frames,
                     cycle_ts,
-                    active_symbols=advanced_symbols,
+                    active_symbols=tuple(event_frames),
                     bar_starts=bar_starts,
                 )
                 if committed_feature_as_of is None:
@@ -3865,7 +3883,9 @@ class LiveTrader:
             # hold; it is decided, not refused.
             self._last_cycle_ts = max(cycle_ts, self._last_cycle_ts or cycle_ts)
             if committed_feature_as_of is not None:
-                self._last_feature_as_of = committed_feature_as_of
+                self._last_feature_as_of = max(
+                    committed_feature_as_of, self._last_feature_as_of or committed_feature_as_of
+                )
             self._persist_state()
         self._trim_runtime_caches()
 
@@ -6965,11 +6985,24 @@ class LiveTrader:
         unless ``bar_ts`` gives another start. The snapshot is as of the
         latest availability among those bars and the previous frontier, or
         ``as_of`` when the caller has it.
+
+        In sim on one grid, a bar decided after a later start, because it
+        arrived past the hold, reads every symbol only through its own start
+        and as of its own availability, as a backtest's decision on that
+        start does: the later frontier would hold its fills a bar past the
+        backtest's. Live sends a decision's orders at once, so it decides
+        such a bar on everything it has.
         """
         normalized_frames: dict[str, pd.DataFrame] = {}
         cutoffs: dict[str, datetime] = {}
         active_set = set(active_symbols)
         starts = {symbol: (bar_ts or {}).get(symbol, ts) for symbol in active_symbols}
+        late = (
+            self._executor.simulation
+            and as_of is None
+            and self._last_cycle_ts is not None
+            and ts < self._last_cycle_ts
+        )
         for symbol in self._symbols:
             raw_frame = raw_frames.get(symbol)
             if raw_frame is None:
@@ -6983,7 +7016,7 @@ class LiveTrader:
             normalized_frames[symbol] = normalized
             cutoff = starts[symbol] if symbol in active_set else self._last_bar_ts.get(symbol)
             if cutoff is not None:
-                cutoffs[symbol] = cutoff
+                cutoffs[symbol] = min(cutoff, ts) if late else cutoff
 
         cohort_availability: list[pd.Timestamp] = []
         for symbol in active_symbols:
@@ -7004,7 +7037,7 @@ class LiveTrader:
             if not cohort_availability:
                 raise ValueError("batch feature cohort has no causal availability frontier")
             frontier = max(cohort_availability)
-            if self._last_feature_as_of is not None:
+            if self._last_feature_as_of is not None and not late:
                 frontier = max(frontier, pd.Timestamp(self._last_feature_as_of))
 
         histories = {}
@@ -7133,10 +7166,12 @@ class LiveTrader:
         bar_ts = {symbol: symbol_starts[-1] for symbol, symbol_starts in starts.items()}
         # Sim offers a symbol's bar again with a same-start bar that arrived
         # after it was decided.
-        decides_again = any(
-            (decided := self._last_bar_ts.get(symbol)) is not None and decided >= bar_ts[symbol]
+        decided_before = {
+            symbol
             for symbol in resolved_active_symbols
-        )
+            if (decided := self._last_bar_ts.get(symbol)) is not None and decided >= bar_ts[symbol]
+        }
+        decides_again = bool(decided_before)
         execution_symbols: set[str] = set()
         for symbol in resolved_active_symbols:
             execution_watermark = self._last_execution_bar_ts.get(symbol)
@@ -7450,6 +7485,14 @@ class LiveTrader:
         # executable when returned (validate_strategy_decision enforces
         # this), so on_bar is never gated waiting for one to become ready.
         equity, position_snapshot = self._calc_account_snapshot()
+        # A bar decided again was counted when first decided; the strategy
+        # sees the count it saw then, as a backtest's one decision on it does.
+        position_snapshot = {
+            symbol: replace(position, periods_held=position.periods_held - 1)
+            if symbol in decided_before
+            else position
+            for symbol, position in position_snapshot.items()
+        }
         ctx = Context(
             ts=ts,
             symbol=primary_symbol,
@@ -7655,10 +7698,16 @@ class LiveTrader:
             used_quantity[symbol] = used_bar_quantity.get(symbol, 0.0)
 
     def _age_positions(self, steps: Sequence[tuple[datetime, Mapping[str, object]]]) -> None:
-        """Count each held position's bars in the event, one per bar."""
-        for _start, bars in steps:
+        """Count each held position's bars in the event, one per bar.
+
+        A bar decided again with a late same-start bar was counted when first
+        decided, so only a bar past its symbol's decided watermark counts.
+        """
+        for start, bars in steps:
             for symbol, position in self._positions.items():
-                if symbol in bars:
+                if symbol in bars and start > self._last_bar_ts.get(
+                    symbol, datetime.min.replace(tzinfo=UTC)
+                ):
                     position.periods_held += 1
 
     def _post_fill_risk_violation(self, *, include_net: bool = True) -> str | None:
