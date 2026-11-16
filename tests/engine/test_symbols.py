@@ -268,6 +268,31 @@ class TestFuturesSelectorAtRegistration:
         with pytest.raises(ValueError, match="security_type='FUT' contradicts"):
             resolve_symbol(config, "MU")
 
+    def test_registered_stock_overridden_to_a_perpetual_says_to_use_another_key(self):
+        config = RunConfig(
+            strategy_name="x",
+            symbols=["MU"],
+            timeframe="1d",
+            market="crypto",
+            data_source="binance_perp",
+            mode="backtest",
+            account=AccountConfig(currency="USD", initial_cash=100_000.0),
+            instrument_overrides={
+                "MU": {
+                    "data_source": "binance_perp",
+                    "data_adapter": "crypto",
+                    "instrument_type": "contract_perpetual",
+                    "venue_symbol": "MUUSDT",
+                }
+            },
+            symbol_cost_overrides={"MU": {"multiplier": 1.0}},
+        )
+
+        # The override cannot clear the registered security_type, so the error
+        # must point at the workable fix rather than "set both".
+        with pytest.raises(ValueError, match="key that product under its own symbol"):
+            resolve_symbol(config, "MU")
+
     def test_run_configuration_refuses_the_route_before_any_fetch(self):
         config = RunConfig(
             strategy_name="x",

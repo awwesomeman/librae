@@ -526,7 +526,9 @@ class SymbolInfo:
             raise ValueError(
                 f"{self.symbol!r} security_type={self.security_type!r} contradicts "
                 f"instrument_type={self.instrument_type!r}; it trades as one of "
-                f"{sorted(allowed)}, so set both to the same product"
+                f"{sorted(allowed)}, so set both to the same product; an override "
+                "cannot clear a registered security_type, so to trade a registered "
+                "symbol as another product, key that product under its own symbol"
             )
         if dated_contract:
             validate_futures_selector(
