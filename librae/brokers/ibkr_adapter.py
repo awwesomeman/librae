@@ -139,19 +139,11 @@ def _utc_now() -> datetime:
 
 def _resolve_session_mode(
     session_mode: MarketDataSessionMode | None,
-    use_rth: bool | None,
 ) -> MarketDataSessionMode:
-    """Resolve the generic session contract and legacy IBKR spelling."""
+    """Validate ``session_mode`` and apply the adapter default (``"extended"``)."""
     if session_mode is not None and session_mode not in ("regular", "extended"):
         raise ValueError(f"session_mode must be 'regular' or 'extended', got {session_mode!r}")
-    if use_rth is not None and not isinstance(use_rth, bool):
-        raise TypeError("use_rth must be a bool or None")
-    legacy_mode: MarketDataSessionMode | None = None
-    if use_rth is not None:
-        legacy_mode = "regular" if use_rth else "extended"
-    if session_mode is not None and legacy_mode is not None and session_mode != legacy_mode:
-        raise ValueError("session_mode and use_rth request different IBKR sessions")
-    return session_mode or legacy_mode or "extended"
+    return session_mode or "extended"
 
 
 def _require_session_on_calendar(
@@ -573,7 +565,6 @@ class IBKRAdapter:
         contract_month: str | None = None,
         calendar_id: str | None = None,
         session_mode: MarketDataSessionMode | None = None,
-        use_rth: bool | None = None,
         drop_incomplete: bool = False,
     ) -> pd.DataFrame:
         """Fetch OHLCV via IBKR's reqHistoricalData.
@@ -598,8 +589,6 @@ class IBKRAdapter:
                 daily labels. Required for ``1d`` requests.
             session_mode: ``"extended"`` (default) requests every session
                 exposed by IBKR; ``"regular"`` requests RTH only.
-            use_rth: Adapter-specific compatibility spelling retained for direct
-                callers. It must agree with ``session_mode`` when both are set.
             drop_incomplete: Drop the newest bar unless the source has
                 shown it closed (see ``drop_incomplete_ohlcv``).
 
@@ -615,7 +604,7 @@ class IBKRAdapter:
         directly.
         """
         bar_size = _to_bar_size(timeframe)
-        resolved_session_mode = _resolve_session_mode(session_mode, use_rth)
+        resolved_session_mode = _resolve_session_mode(session_mode)
         _require_session_on_calendar(calendar_id, resolved_session_mode)
         if security_type == "FUT" and timeframe in _NATIVE_CALENDAR_TIMEFRAMES:
             raise NotImplementedError(
