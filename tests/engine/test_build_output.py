@@ -226,6 +226,7 @@ class TestRuntimeEvents:
     def test_skipped_decision_is_reported(self) -> None:
         # A contract: a crypto spot short is refused before it can reach this skip.
         df = _make_df(symbol="BTCUSDT_QUARTERLY")
+        df["contract"] = "BTCUSDT_260327"  # a continuous series names each bar's contract
         bt = Backtest(
             df, LongThenReverseWhileOpen(), data_source="test", cost_model=CostModel.zero()
         )

@@ -50,23 +50,58 @@ currency conversion, cash yield, or settlement lag. Adjusted/continuous
 series can be research inputs, but using them as fill prices makes the
 cash-and-position simulation economically incomplete.
 
-**A TAIFEX continuous alias cannot be held through a contract switch.** An
-alias such as `TXFR1` or `MXFR2` (`continuous_alias=True` on the `XTAIFEX`
-calendar) moves to the next contract partway through the final settlement
-session, at a time its bars do not show, so a position held across the switch
-would book the price gap between the two contracts as PnL. A backtest raises
-when such a position is still held at the close of any bar in that session,
-when a fill in that session is not at a bar's open (a stop, take-profit or
-limit reached inside the bar may be priced on the next contract), or when a
-position is carried over the session and the session has no bar. Only the
-session's first open still belongs to the old contract: exit by then and
-re-enter after the session if the strategy wants to stay exposed. When to roll
-stays a strategy decision: `Context.settles_next_session` holds the aliases
-whose next session is that settlement session, so a close decided on a bar
-where the symbol is in it fills by the session's first open.
-`taifex_final_settlement_day` gives the settlement day of a contract month.
-Exact contracts (`contract_month`) and other venues' continuous aliases are not
-checked.
+**A continuous series cannot be held through a contract switch.** A
+continuous series splices one contract onto the next, and a backtest has no
+roll ledger, so a position held across the switch would book the price gap
+between the two contracts as PnL. Where the switch is comes from the data:
+
+- **Bars that name their contract.** A `contract` column, a non-empty string
+  on every bar of the symbol (for example `TX202611`), gives the contract each
+  bar is priced on, and the switch falls between two bars. A backtest raises
+  when a position is still held into the first bar of the next contract, so
+  the exit must fill on the old contract's last bar. The column must follow a
+  schedule known in advance, such as a calendar roll: the strategy is warned
+  from it before the switch (below). This is the rule for any symbol, of any
+  venue, whose data names its contracts.
+- **A registered TAIFEX alias read from its registered `data_source`**
+  without that column (Shioaji's `TXFR1` or `MXFR2` from `shioaji`) falls back
+  to the venue's alias rule: the alias moves to the next contract partway
+  through the final settlement session, at a time its bars do not show. A
+  backtest raises when such a position is still held at the close of any bar
+  in that session, when a fill in that session is not at a bar's open (a stop,
+  take-profit or limit reached inside the bar may be priced on the next
+  contract), or when a position is carried over the session and the session
+  has no bar. Only the session's first open still belongs to the old
+  contract.
+
+Any other continuous series (`continuous_alias=True`) without a `contract`
+column is refused: its roll is unknown, and guessing it would book the gap
+between contracts as PnL. The data source is the declared one (the run's or
+the symbol's `data_source`, or a direct `Backtest`'s), so declare where the
+bars come from. Exact contracts (`contract_month`) are not checked. Sim and
+live apply only the alias rule.
+When to roll stays a strategy decision: `Context.exit_before_roll` holds the
+symbols to close on this bar or an earlier one (with a `contract` column, the
+last bar whose close fills on the old contract; under the alias rule, the bars
+of the session before the settlement session); re-enter after the switch to
+stay exposed. `taifex_final_settlement_day` gives the settlement day of a
+TAIFEX contract month.
+
+A daily TAIEX-futures series from a caller's own store needs only its
+product and its contracts:
+
+```python
+config = RunConfig(
+    ...,
+    symbols=["TXR1"],
+    market="tw_futures",
+    data_source="my_store",
+    instrument_overrides={
+        "TXR1": {"product": "TX", "data_adapter": "my_store", "continuous_alias": True},
+    },
+)
+bars["contract"] = contract_of_each_bar  # e.g. "TX202611", keyed like the bars
+```
 
 The backtest boundary fails fast on malformed input. Index levels must be
 exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps

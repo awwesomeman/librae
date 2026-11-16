@@ -7469,7 +7469,7 @@ class LiveTrader:
                 else None
             ),
             market_data=market_data_view,
-            settles_next_session=frozenset(
+            exit_before_roll=frozenset(
                 symbol
                 for symbol in bars
                 if self._instruments[symbol].continuous_alias

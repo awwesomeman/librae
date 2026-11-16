@@ -1,4 +1,8 @@
-"""A TAIFEX continuous alias must not carry a position through a contract switch."""
+"""A continuous series must not carry a position through a contract switch.
+
+The bars' ``contract`` column says where the switch is; without it, a TAIFEX
+continuous alias falls back to the venue's alias rule.
+"""
 
 from __future__ import annotations
 
@@ -97,13 +101,18 @@ class Scripted(Strategy):
         return [OrderIntent(symbol=ctx.symbol, **fields)]  # type: ignore[arg-type]
 
 
-def _run(frame: pd.DataFrame, actions: dict[int, str | dict[str, object]]) -> float:
+def _run(
+    frame: pd.DataFrame,
+    actions: dict[int, str | dict[str, object]],
+    strategy: Strategy | None = None,
+    data_source: str = "shioaji",  # the registered aliases' own source
+) -> float:
     backtest = Backtest(
         frame,
-        Scripted(actions),
+        strategy or Scripted(actions),
         initial_balance=INITIAL_CASH,
         cost_model=CostModel.zero(),
-        data_source="test",
+        data_source=data_source,
     )
     return backtest.run().final_equity
 
@@ -239,7 +248,7 @@ class HoldUntilSettlementFollows(Strategy):
 
     def on_bar(self, ctx: Context) -> list[OrderIntent]:
         session = session_label(ctx.ts, CALENDAR)
-        if ctx.symbol in ctx.settles_next_session:
+        if ctx.symbol in ctx.exit_before_roll:
             self.flagged.append(session)
             return [OrderIntent(action="close", symbol=ctx.symbol)] if ctx.positions else []
         if not ctx.positions and session != SETTLEMENT:
@@ -257,7 +266,7 @@ def test_a_strategy_exiting_on_the_flag_never_holds_through_settlement(
         strategy,
         initial_balance=INITIAL_CASH,
         cost_model=CostModel.zero(),
-        data_source="test",
+        data_source="shioaji",
     ).run()
 
     assert set(strategy.flagged) == {date(2026, 11, 17)}
@@ -274,3 +283,156 @@ def test_a_strategy_exiting_on_the_flag_never_holds_through_settlement(
 )
 def test_final_settlement_follows(session: date, expected: bool) -> None:
     assert final_settlement_follows(session) is expected
+
+
+# A series that moves to the next contract on the final settlement day, the
+# night session before it included, so each bar is one contract's: here
+# 2026-11-18 is already December's, priced 150 points below November.
+SERIES_DAYS = [date(2026, 11, day) for day in (9, 10, 11, 12, 13, 16, 17, 18, 19, 20)]
+SERIES_D1 = _d1_stamps(SERIES_DAYS)
+ROLL_BAR = SERIES_DAYS.index(SETTLEMENT)
+CONTRACTS = ["TX202611"] * ROLL_BAR + ["TX202612"] * (len(SERIES_DAYS) - ROLL_BAR)
+
+
+def _series(symbol: str = "TXR1", contracts: list[object] | None = CONTRACTS) -> pd.DataFrame:
+    frame = _frame(symbol, SERIES_D1)
+    frame.iloc[ROLL_BAR:, :4] = 19_850.0
+    if contracts is not None:
+        frame["contract"] = pd.Series(contracts, index=frame.index, dtype=object)
+    return frame
+
+
+def _product_config(symbol: str = "TXR1", **route: object) -> RunConfig:
+    """A series from the caller's own store, configured by its product alone."""
+    return RunConfig(
+        strategy_name="product-series",
+        mode="backtest",
+        symbols=(symbol,),
+        timeframe="D1",
+        market="tw_futures",
+        data_source="my_store",
+        account=AccountConfig(currency="TWD", initial_cash=INITIAL_CASH),
+        instrument_overrides={
+            symbol: {"product": "TX", "data_adapter": "test", "continuous_alias": True, **route}
+        },
+    )
+
+
+def _run_configured(frame: pd.DataFrame, strategy: Strategy, config: RunConfig):
+    return Backtest(frame, strategy, config=config, cost_model=CostModel.zero()).run()
+
+
+class RollOnFlag(Strategy):
+    """Stay long, exiting on the flag and re-entering on the next bar."""
+
+    def __init__(self) -> None:
+        self.flagged: list[date] = []
+
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
+        assert "contract" not in ctx.bar  # roll-guard input, not a market field
+        if ctx.symbol in ctx.exit_before_roll:
+            self.flagged.append(session_label(ctx.ts, CALENDAR))
+            return [OrderIntent(action="close", symbol=ctx.symbol)] if ctx.positions else []
+        if not ctx.positions:
+            return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+        return []
+
+
+def test_a_strategy_exiting_on_the_flag_rolls_without_booking_the_gap() -> None:
+    strategy = RollOnFlag()
+
+    result = _run_configured(_series(), strategy, _product_config())
+
+    assert strategy.flagged == [date(2026, 11, 16)]
+    events = [(e.ts, e.event_type, e.price) for e in result.position_events]
+    assert events[:3] == [
+        (SERIES_D1[1], "open", 20_000.0),
+        (SERIES_D1[ROLL_BAR - 1], "close", 20_000.0),  # November's last bar
+        (SERIES_D1[ROLL_BAR], "open", 19_850.0),  # December, held through its settlement day
+    ]
+    assert result.final_equity == pytest.approx(INITIAL_CASH)
+
+
+@pytest.mark.parametrize("run", ["product_series", "registered_alias"])
+def test_hold_into_the_next_contracts_bar_is_refused(run: str) -> None:
+    pattern = (
+        r"holds a position on contract 'TX202611' into the .* bar, which is priced on 'TX202612'"
+    )
+    with pytest.raises(ValueError, match=pattern) as err:
+        if run == "product_series":
+            _run_configured(_series(), Scripted({0: "long"}), _product_config())
+        else:  # the bars' contracts win over the alias rule
+            _run(_series("TXFR1"), {0: "long"})
+    assert SERIES_D1[ROLL_BAR].isoformat() in str(err.value)
+
+
+def test_exit_at_the_first_open_of_the_next_contract_is_refused() -> None:
+    # The alias rule allows this fill; the bars say it is December's.
+    actions: dict[int, str | dict[str, object]] = {0: "long", ROLL_BAR - 1: "close"}
+    with pytest.raises(ValueError, match=r"into the .* bar, which is priced on 'TX202612'"):
+        _run_configured(_series(), Scripted(actions), _product_config())
+
+
+def test_exit_flag_follows_the_bars_not_the_alias_rule() -> None:
+    strategy = RollOnFlag()
+
+    _run(_series("TXFR1"), {}, strategy)
+
+    # The alias rule flags 2026-11-17; November's last close is decided a bar earlier.
+    assert strategy.flagged == [date(2026, 11, 16)]
+
+
+def test_a_registered_alias_from_its_own_source_falls_back_to_the_alias_rule() -> None:
+    strategy = RollOnFlag()
+    unnamed = _series("TXFR1", contracts=[None] * len(SERIES_D1))
+
+    _run(unnamed, {}, strategy)
+    assert strategy.flagged == [date(2026, 11, 17)]
+    with pytest.raises(ValueError, match="TAIFEX final settlement session"):
+        _run(unnamed, {0: "long"})
+
+
+REFUSED_WITHOUT_CONTRACTS = r"its bars do not name their contract.*add a 'contract' column"
+
+
+def test_a_product_series_without_contracts_is_refused() -> None:
+    with pytest.raises(ValueError, match=REFUSED_WITHOUT_CONTRACTS):
+        _run_configured(_series(contracts=None), Scripted({}), _product_config())
+
+
+@pytest.mark.parametrize("data_source", ["my_store", ""], ids=["other_source", "no_source"])
+def test_a_registered_alias_read_from_elsewhere_without_contracts_is_refused(
+    data_source: str,
+) -> None:
+    with pytest.raises(ValueError, match=REFUSED_WITHOUT_CONTRACTS):
+        _run(_series("TMFR1", contracts=None), {}, data_source=data_source)
+
+
+def test_a_rerouted_registered_alias_without_contracts_is_refused() -> None:
+    config = RunConfig(
+        strategy_name="rerouted-alias",
+        mode="backtest",
+        symbols=("TMFR1",),
+        timeframe="D1",
+        market="tw_futures",
+        data_source="my_store",
+        account=AccountConfig(currency="TWD", initial_cash=INITIAL_CASH),
+        instrument_overrides={
+            "TMFR1": {
+                "data_source": "my_store",
+                "data_adapter": "test",
+                "instrument_type": "contract_monthly",
+                "venue_symbol": "TMFR1",
+            }
+        },
+    )
+    with pytest.raises(ValueError, match=REFUSED_WITHOUT_CONTRACTS):
+        _run_configured(_series("TMFR1", contracts=None), Scripted({}), config)
+
+
+def test_contracts_on_some_bars_only_are_refused() -> None:
+    contracts: list[object] = list(CONTRACTS)
+    contracts[1] = None
+
+    with pytest.raises(ValueError, match="names a 'contract' on some bars only"):
+        _run(_series("TXFR1", contracts), {})

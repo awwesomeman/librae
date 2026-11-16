@@ -30,6 +30,9 @@ CAN_BUY_COLUMN = "can_buy"
 CAN_SELL_COLUMN = "can_sell"
 SIDE_TRADABILITY_COLUMNS = (CAN_BUY_COLUMN, CAN_SELL_COLUMN)
 AVAILABLE_AT_COLUMN = "available_at"
+# The contract a continuous series' bar is priced on (e.g. "TX202611"); a
+# change between two bars is a roll.
+CONTRACT_COLUMN = "contract"
 # When a sim/live engine received a bar version: wall clock, not a bar clock.
 OBSERVED_AT_COLUMN = "observed_at"
 

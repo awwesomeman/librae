@@ -479,6 +479,14 @@ class RunConfig:
                 "per-contract fee, but the fee differs by product; set it per symbol in "
                 "symbol_cost_overrides"
             )
+        from librae.config.symbols import validate_product_overrides
+
+        validate_product_overrides(
+            self.symbols,
+            instrument_overrides=self.instrument_overrides or {},
+            cost_overrides=self.cost_overrides or {},
+            symbol_cost_overrides=self.symbol_cost_overrides or {},
+        )
         if len(self.symbols) > 1:
             self._refuse_run_wide_contract_economics_over_registered()
         object.__setattr__(self, "optional_symbols", tuple(self.optional_symbols))
@@ -569,19 +577,19 @@ class RunConfig:
             )
 
     def _refuse_run_wide_contract_economics_over_registered(self) -> None:
-        """A run-wide multiplier or tick_size fills in for unregistered
-        symbols; across products it would silently replace a registered
-        contract's own value, so a value that differs is refused instead."""
-        from librae.config.symbols import load_symbol_registry
+        """A run-wide multiplier or tick_size fills in for symbols without
+        their own; across products it would silently replace a registered
+        contract's or a product's value, so a value that differs is refused
+        instead."""
+        from librae.config.symbols import declared_specs
 
-        registry = load_symbol_registry()
         run_wide = self.cost_overrides or {}
         for field_name in ("multiplier", "tick_size"):
             if field_name not in run_wide:
                 continue
             for symbol in self.symbols:
-                registered = registry.get(symbol)
-                own = getattr(registered, field_name, None)
+                specs = declared_specs(symbol, (self.instrument_overrides or {}).get(symbol, {}))
+                own = getattr(specs, field_name, None)
                 if (
                     own is None
                     or own == run_wide[field_name]

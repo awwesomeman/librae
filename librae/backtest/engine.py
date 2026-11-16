@@ -88,6 +88,7 @@ from librae.core.financing import (
 from librae.core.liquidity import calculate_lagged_adv
 from librae.core.market_data import (
     AVAILABLE_AT_COLUMN,
+    CONTRACT_COLUMN,
     BatchFeatureFn,
     FeatureBatch,
     MarketDataSubscription,
@@ -620,20 +621,78 @@ def _taifex_settlement_days(first: date, last: date) -> list[date]:
     return days
 
 
-class _TaifexRollGuard:
-    """Refuse a TAIFEX continuous-alias position held through a contract switch.
+def _bar_contracts(data: pd.DataFrame) -> dict[str, dict[pd.Timestamp, str]]:
+    """The contract behind every bar of each symbol whose bars name one."""
+    if CONTRACT_COLUMN not in data.columns:
+        return {}
+    result: dict[str, dict[pd.Timestamp, str]] = {}
+    for symbol, symbol_data in data.groupby(level="symbol", sort=False):
+        values = symbol_data[CONTRACT_COLUMN]
+        if values.isna().all():
+            continue
+        if not all(isinstance(value, str) and value for value in values):
+            # An unnamed bar's contract is unknown, not unchanged.
+            raise ValueError(
+                f"{symbol!r} names a {CONTRACT_COLUMN!r} on some bars only; name the "
+                "contract of every bar of a symbol, as a non-empty string, or of none"
+            )
+        timestamps = symbol_data.index.get_level_values("datetime")
+        result[symbol] = dict(zip(timestamps, values, strict=True))
+    return result
 
-    The alias moves to the next contract partway through the final settlement
-    session, at a time that bars do not reveal, and Librae has no roll ledger:
-    a position held across that switch would book the price gap between the
-    two contracts as PnL. Only the session's first open is still certain to
-    be the old contract's, so a position must be closed by then and no fill
-    may be priced anywhere else in that session.
+
+def _last_exits_before_roll(contracts: Mapping[pd.Timestamp, str]) -> set[pd.Timestamp]:
+    """Bars on which a close still fills on their contract, at the next bar's
+    open, while a close decided a bar later would fill on the next contract."""
+    stamps = list(contracts)
+    return {
+        stamps[i]
+        for i in range(len(stamps) - 2)
+        if contracts[stamps[i]] == contracts[stamps[i + 1]] != contracts[stamps[i + 2]]
+    }
+
+
+class _RollGuard:
+    """Refuse a continuous-series position held through a contract change.
+
+    Librae has no roll ledger: a position held across a change would book the
+    price gap between the two contracts as PnL. Where the bars name their
+    contract (``CONTRACT_COLUMN``), a change falls between two bars, so a
+    position must be closed by a fill on the old contract's last bar.
+
+    A registered TAIFEX continuous alias read from its registered source,
+    whose bars do not name one, falls back to the venue's alias rule: it moves to the next contract partway through the
+    final settlement session, at a time that bars do not reveal. Only the
+    session's first open is still certain to be the old contract's, so a
+    position must be closed by then and no fill may be priced anywhere else in
+    that session.
     """
 
-    def __init__(self, labels: Mapping[str, Mapping[pd.Timestamp, date]]) -> None:
-        self._labels = labels
+    def __init__(
+        self,
+        contracts: Mapping[str, Mapping[pd.Timestamp, str]],
+        alias_labels: Mapping[str, Mapping[pd.Timestamp, date]],
+    ) -> None:
+        self._contracts = contracts
+        self._labels = alias_labels
+        self._exits = {
+            symbol: _last_exits_before_roll(by_bar) for symbol, by_bar in contracts.items()
+        }
+        self._last_contract: dict[str, str] = {}
         self._last_session: dict[str, date] = {}
+
+    def exit_before_roll(self, bar_ts_by_symbol: Mapping[str, pd.Timestamp]) -> frozenset[str]:
+        """Symbols whose bar in this event is the last to close on its contract."""
+        flagged = {
+            symbol for symbol, exits in self._exits.items() if bar_ts_by_symbol.get(symbol) in exits
+        }
+        flagged.update(
+            symbol
+            for symbol, labels in self._labels.items()
+            if (bar_ts := bar_ts_by_symbol.get(symbol)) in labels
+            and final_settlement_follows(labels[bar_ts])
+        )
+        return frozenset(flagged)
 
     def before_fills(
         self,
@@ -641,8 +700,21 @@ class _TaifexRollGuard:
         bars: Mapping[str, object],
         positions: Mapping[str, PositionState],
     ) -> None:
-        """Refuse a position carried over a settlement session that had no bar."""
+        """Refuse a position carried into another contract's bar, or over a
+        settlement session that had no bar."""
         for symbol in bars:
+            contract = self._contracts.get(symbol, {}).get(ts)
+            if contract is not None:
+                previous_contract = self._last_contract.get(symbol)
+                self._last_contract[symbol] = contract
+                if symbol in positions and previous_contract not in (None, contract):
+                    raise ValueError(
+                        f"{symbol!r} holds a position on contract {previous_contract!r} into "
+                        f"the {ts.isoformat()} bar, which is priced on {contract!r}, and "
+                        "backtests do not roll positions. Exit so the order fills no later "
+                        f"than {previous_contract!r}'s last bar."
+                    )
+                continue
             session = self._labels.get(symbol, {}).get(ts)
             if session is None:
                 continue
@@ -1856,8 +1928,8 @@ class Backtest:
         rebalance_delay_bars = 0
         unavailable_rebalance_symbols: tuple[str, ...] = ()
         drawdown_exit_origins: dict[str, pd.Timestamp] = {}
-        alias_session_labels = self._taifex_alias_session_labels()
-        roll_guard = _TaifexRollGuard(alias_session_labels)
+        contracts = _bar_contracts(self._data)
+        roll_guard = _RollGuard(contracts, self._alias_rule_session_labels(contracts))
 
         events = _primary_events(
             self._data,
@@ -2222,12 +2294,7 @@ class Backtest:
                         else None
                     ),
                     market_data=market_data_view,
-                    settles_next_session=frozenset(
-                        symbol
-                        for symbol, labels in alias_session_labels.items()
-                        if (bar_ts := bar_ts_by_symbol.get(symbol)) in labels
-                        and final_settlement_follows(labels[bar_ts])
-                    ),
+                    exit_before_roll=roll_guard.exit_before_roll(bar_ts_by_symbol),
                 )
                 new_decision = self._strategy.on_bar(ctx)
                 if self._events_by_availability:
@@ -2719,7 +2786,10 @@ class Backtest:
         result: dict[pd.Timestamp, dict[str, dict[str, float]]] = {}
         # Row timing/identity facts are audit metadata, not numeric market
         # fields. They must never leak into executor bars or ``Context``.
-        market_values = self._data.drop(columns=[AVAILABLE_AT_COLUMN], errors="ignore")
+        # The contract name feeds only the roll guard.
+        market_values = self._data.drop(
+            columns=[AVAILABLE_AT_COLUMN, CONTRACT_COLUMN], errors="ignore"
+        )
         raw = market_values.to_dict(orient="index")
         for (sym, ts), row in raw.items():
             result.setdefault(ts, {})[sym] = row
@@ -2767,17 +2837,43 @@ class Backtest:
             timeframe=self._timeframe,
         )
 
-    def _taifex_alias_session_labels(self) -> dict[str, dict[pd.Timestamp, date]]:
-        """Session label of every bar of each TAIFEX continuous alias."""
+    def _alias_rule_session_labels(
+        self, contracts: Mapping[str, object]
+    ) -> dict[str, dict[pd.Timestamp, date]]:
+        """Session label of every bar of each continuous alias that rolls by
+        the TAIFEX alias rule.
+
+        That rule describes the venue's own alias, so it holds only for a
+        registered TAIFEX alias whose bars come from its registered
+        data_source. Any other continuous series must name each bar's
+        contract: a guessed roll would book the gap between contracts as PnL.
+        """
+        from librae.config.symbols import load_symbol_registry
+
+        registry = load_symbol_registry()
+        sources = {item.symbol: item.data_source for item in self._primary_subscriptions}
         result: dict[str, dict[pd.Timestamp, date]] = {}
         for symbol, symbol_data in self._data.groupby(level="symbol", sort=False):
             instrument = self._instruments.get(symbol)
-            if (
-                instrument is None
-                or not instrument.continuous_alias
-                or self._calendar_ids.get(symbol) != TAIFEX_INDEX_CALENDAR
-            ):
+            if instrument is None or not instrument.continuous_alias or symbol in contracts:
                 continue
+            registered = registry.get(symbol)
+            source = sources.get(symbol, self._data_source)
+            if (
+                registered is None
+                or not registered.continuous_alias
+                or registered.calendar_id != TAIFEX_INDEX_CALENDAR
+                or self._calendar_ids.get(symbol) != TAIFEX_INDEX_CALENDAR
+                or source != registered.data_source
+            ):
+                raise ValueError(
+                    f"{symbol!r} is a continuous series (continuous_alias=True) read from "
+                    f"data_source={source!r}, and its bars do not name their contract, so "
+                    "a backtest cannot tell where it rolls; add a "
+                    f"{CONTRACT_COLUMN!r} column naming the contract each bar is priced on "
+                    "(for example 'TX202611'). Only a registered TAIFEX alias read from its "
+                    "registered data_source rolls by the venue's rule without one."
+                )
             timestamps = pd.DatetimeIndex(symbol_data.index.get_level_values("datetime"))
             labels = session_labels(timestamps, TAIFEX_INDEX_CALENDAR)
             result[symbol] = dict(zip(timestamps, labels, strict=True))

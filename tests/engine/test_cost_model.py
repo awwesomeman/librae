@@ -296,7 +296,9 @@ class TestFromConfig:
         """tick_size isn't required even for an unregistered symbol — it
         falls back to the market default."""
         cm = CostModel.from_config(
-            self._cfg("TXF202612", cost_overrides={"multiplier": 10.0}),
+            self._cfg(
+                "ZEF202612", cost_overrides={"multiplier": 10.0, "commission_per_contract": 0.0}
+            ),
         )
         assert cm.multiplier == 10.0
         assert cm.tick_size == 1.0  # tw_futures market default
@@ -321,8 +323,13 @@ class TestFromConfig:
         assert cm.tick_size == 0.01  # crypto market default — BTCUSDT doesn't override it
 
     def test_explicit_cost_overrides_win_over_symbol_multiplier(self) -> None:
-        cm = CostModel.from_config(self._cfg("TXFR1", cost_overrides={"multiplier": 999.0}))
-        assert cm.multiplier == 999.0
+        cfg = self._cfg(
+            "BTCUSDT_QUARTERLY",
+            market="crypto",
+            data_source="binance_futures_continuous",
+            cost_overrides={"multiplier": 999.0},
+        )
+        assert CostModel.from_config(cfg).multiplier == 999.0
 
     def test_explicit_override_object_wins_over_everything(self) -> None:
         explicit = CostModel.zero()
@@ -374,9 +381,11 @@ class TestFromConfig:
 
     def test_symbol_cost_overrides_wins_over_run_wide_cost_overrides(self) -> None:
         cfg = self._cfg(
-            "TXFR1",
+            "BTCUSDT_QUARTERLY",
+            market="crypto",
+            data_source="binance_futures_continuous",
             cost_overrides={"multiplier": 111.0},
-            symbol_cost_overrides={"TXFR1": {"multiplier": 222.0}},
+            symbol_cost_overrides={"BTCUSDT_QUARTERLY": {"multiplier": 222.0}},
         )
         assert CostModel.from_config(cfg).multiplier == 222.0
 
@@ -384,11 +393,33 @@ class TestFromConfig:
         """cost_overrides is the run-wide fallback; symbol_cost_overrides only
         overrides the specific symbols it lists."""
         cfg = self._cfg(
-            "TXFR1",
+            "BTCUSDT_QUARTERLY",
+            market="crypto",
+            data_source="binance_futures_continuous",
             cost_overrides={"multiplier": 111.0},
             symbol_cost_overrides={"MXFR1": {"multiplier": 222.0}},
         )
-        assert CostModel.from_config(cfg, symbol="TXFR1").multiplier == 111.0
+        assert CostModel.from_config(cfg, symbol="BTCUSDT_QUARTERLY").multiplier == 111.0
+
+    @pytest.mark.parametrize(
+        ("overrides", "field"),
+        [
+            ({"symbol_cost_overrides": {"TXFR1": {"multiplier": 50.0}}}, "multiplier"),
+            ({"cost_overrides": {"tick_size": 0.5}}, "tick_size"),
+            ({"instrument_overrides": {"TXFR1": {"calendar_id": "24/7"}}}, "calendar_id"),
+        ],
+    )
+    def test_an_override_cannot_change_a_product_spec(self, overrides, field: str) -> None:
+        with pytest.raises(ValueError, match=rf"set {field}=.* for 'TXFR1', whose product 'TX'"):
+            self._cfg("TXFR1", **overrides)
+
+    def test_an_override_may_restate_a_product_spec_or_set_its_own_fee(self) -> None:
+        cfg = self._cfg(
+            "TXFR1",
+            symbol_cost_overrides={"TXFR1": {"multiplier": 200.0, "commission_per_contract": 25.0}},
+        )
+        cm = CostModel.from_config(cfg)
+        assert (cm.multiplier, cm.commission_per_contract) == (200.0, 25.0)
 
 
 class TestRunWideContractEconomics:
@@ -420,7 +451,7 @@ class TestRunWideContractEconomics:
     ) -> None:
         with pytest.raises(
             ValueError,
-            match=rf"cost_overrides\['{field}'\].*{registered} of 'TXFR1'.*symbol_cost_overrides",
+            match=rf"set {field}={value} for 'TXFR1', whose product 'TX' has {field}={registered}",
         ):
             self._cfg(["TXFR1", "MXFR1"], cost_overrides={field: value})
 
@@ -459,9 +490,27 @@ class TestRunWideContractEconomics:
         assert CostModel.from_config(cfg, symbol="BTCUSDT").tick_size == 0.1
 
     def test_unregistered_homogeneous_universe_keeps_the_run_wide_value(self) -> None:
-        cfg = self._cfg(["TXF202612", "TXF202703"], cost_overrides={"multiplier": 200.0})
+        symbols = ["ZEF202612", "ZEF202703"]
+        cfg = self._cfg(
+            symbols,
+            cost_overrides={"multiplier": 200.0},
+            symbol_cost_overrides={symbol: {"commission_per_contract": 0.0} for symbol in symbols},
+        )
 
-        assert CostModel.from_config(cfg, symbol="TXF202703").multiplier == 200.0
+        assert CostModel.from_config(cfg, symbol="ZEF202703").multiplier == 200.0
+
+    def test_run_wide_value_cannot_replace_a_product_value(self) -> None:
+        with pytest.raises(
+            ValueError, match=r"multiplier=10\.0 for 'TXF202612', whose product 'TX'"
+        ):
+            self._cfg(
+                ["TXF202612", "MXF202612"],
+                cost_overrides={"multiplier": 10.0},
+                instrument_overrides={
+                    "TXF202612": {"product": "TX", "contract_month": "202612"},
+                    "MXF202612": {"product": "MTX", "contract_month": "202612"},
+                },
+            )
 
 
 class TestPerContractCommission:
@@ -571,7 +620,7 @@ class TestPerContractCommission:
 
     @staticmethod
     def _unregistered_cfg(symbol: str, *, market: str = "tw_futures", **costs):
-        """A contract with no registry entry, routed the way a caller must."""
+        """A contract with no registry entry and no product, routed the way a caller must."""
         from librae.core.run_config import AccountConfig, RunConfig
 
         return RunConfig(
@@ -593,36 +642,85 @@ class TestPerContractCommission:
             },
         )
 
-    @pytest.mark.parametrize(
-        ("symbol", "fee"),
-        [
-            ("TXF202612", 40.0),
-            ("MXF202611", 30.0),
-            ("TMF202612", 20.0),
-            ("TXFL6", 40.0),  # Shioaji's own month code: L = December, 6 = 2026
-            ("MXFA7", 30.0),
-            ("TMFH6", 20.0),
-        ],
-    )
-    def test_contract_months_charge_their_product_fee(self, symbol: str, fee: float) -> None:
-        cm = CostModel.from_config(self._unregistered_cfg(symbol), symbol=symbol)
-        assert cm.commission_per_contract == fee
-        assert cm.calc_commission(22_000.0, 10.0) == pytest.approx(10 * fee)
+    @staticmethod
+    def _product_cfg(symbol: str, product: str, **route):
+        """An unregistered symbol that names its product and nothing else it shares."""
+        from librae.core.run_config import AccountConfig, RunConfig
+
+        return RunConfig(
+            strategy_name="x",
+            symbols=[symbol],
+            timeframe="D1",
+            market="tw_futures",
+            data_source="my_store",
+            account=AccountConfig(currency="TWD", initial_cash=1_000_000.0),
+            mode="backtest",
+            instrument_overrides={symbol: {"product": product, "data_adapter": "test", **route}},
+        )
 
     @pytest.mark.parametrize(
-        ("month", "alias"), [("TXF202612", "TXFR1"), ("MXF202611", "MXFR2"), ("TMFH6", "TMFR1")]
+        ("symbol", "product", "fee", "multiplier"),
+        [
+            ("TXR1", "TX", 40.0, 200.0),
+            ("MTXR2", "MTX", 30.0, 50.0),
+            ("TMF_R1", "TMF", 20.0, 10.0),
+        ],
+    )
+    def test_a_symbol_naming_its_product_takes_the_product_fee_and_specs(
+        self, symbol: str, product: str, fee: float, multiplier: float
+    ) -> None:
+        from librae.config.symbols import resolve_symbol
+
+        cfg = self._product_cfg(symbol, product, continuous_alias=True)
+        cm = CostModel.from_config(cfg, symbol=symbol)
+        instrument = resolve_symbol(cfg, symbol)
+
+        assert cm.commission_per_contract == fee
+        assert cm.multiplier == multiplier
+        assert cm.calc_commission(22_000.0, 10.0) == pytest.approx(10 * fee)
+        assert instrument.product == product
+        assert instrument.market == "tw_futures"
+        assert instrument.instrument_type == "contract_monthly"
+        assert instrument.calendar_id == "XTAIFEX"
+        assert instrument.price_increment == 1.0
+
+    @pytest.mark.parametrize(
+        ("month", "product", "alias"),
+        [("TXF202612", "TX", "TXFR1"), ("MXF202611", "MTX", "MXFR2"), ("TMFH6", "TMF", "TMFR1")],
     )
     def test_contract_month_and_continuous_alias_share_one_fee(
-        self, month: str, alias: str
+        self, month: str, product: str, alias: str
     ) -> None:
-        month_cm = CostModel.from_config(self._unregistered_cfg(month), symbol=month)
+        month_cfg = self._product_cfg(month, product, contract_month="202612")
+        month_cm = CostModel.from_config(month_cfg, symbol=month)
         alias_cm = CostModel.from_config(self._cfg(alias))
         assert month_cm.commission_per_contract == alias_cm.commission_per_contract
 
-    @pytest.mark.parametrize("symbol", ["ZEF202612", "TXO202612", "TXF", "TXF2026", "TXFR3"])
-    def test_unrecognized_tw_future_refuses_to_resolve_without_a_fee(self, symbol: str) -> None:
-        with pytest.raises(ValueError, match="commission_per_contract"):
+    def test_registered_symbols_take_their_fee_from_their_product(self) -> None:
+        from librae.config.symbols import get_product, load_symbol_registry
+
+        for info in load_symbol_registry().values():
+            if info.product is None:
+                continue
+            product = get_product(info.product)
+            cm = CostModel.from_config(self._cfg(info.symbol))
+            assert cm.commission_per_contract == product.commission_per_contract
+            assert info.multiplier == product.multiplier
+
+    @pytest.mark.parametrize("symbol", ["ZEF202612", "TXF202612", "TXFL6", "TXR1"])
+    def test_tw_future_without_a_product_refuses_to_resolve_without_a_fee(
+        self, symbol: str
+    ) -> None:
+        with pytest.raises(ValueError, match=r"\['product'\].*commission_per_contract"):
             CostModel.from_config(self._unregistered_cfg(symbol), symbol=symbol)
+
+    def test_unknown_product_is_refused_with_the_known_ones(self) -> None:
+        with pytest.raises(ValueError, match=r"'TXF' is not a known product; one of \['MTX'"):
+            self._product_cfg("TXF202612", "TXF", contract_month="202612")
+
+    def test_a_registered_symbol_cannot_change_product(self) -> None:
+        with pytest.raises(ValueError, match="contradicts registered symbol 'TXFR1'"):
+            self._product_cfg("TXFR1", "MTX")
 
     def test_unrecognized_tw_future_runs_with_an_explicit_cost_model(self) -> None:
         """An explicit cost model wins over every resolved cost, the fee included."""

@@ -3,7 +3,7 @@
 A small built-in registry, one entry per market type (crypto, tw_futures,
 us_equity), each holding cost parameters shared across every instrument
 traded in that market — commission rate and floor, tax, slippage, margin
-rate structure (the per-contract commission is per-product, in symbols.py), plus
+rate structure (the per-contract commission is per product, in symbols.py), plus
 tick_size as a low-stakes approximate default (it only feeds a backtest
 slippage-cost estimate, not PnL/margin sizing, so a market-wide value is an
 acceptable default for large, homogeneous universes like equities/crypto
@@ -23,13 +23,13 @@ take a caller-built registry that bypasses this one entirely.
 
 multiplier is NOT here — mirrors mainstream frameworks (e.g. QuantConnect
 LEAN's symbol-properties-database.csv, which uses a market-wide wildcard
-row for equities but requires an explicit row per specific futures
-contract): it directly scales PnL/notional/margin, and for a market with
-heterogeneous contracts (e.g. tw_futures: TXF=200 vs MXF=50 vs TMF=10) a
-single market-level number is actively wrong for most of them. See
-librae/config/symbols.py — spot instruments default to 1.0 automatically
-(a mathematical invariant, not a guess); contract_* instruments require it
-explicit, no fallback.
+row for equities but an explicit row per futures root): it directly scales
+PnL/notional/margin, and for a market with heterogeneous products (e.g.
+tw_futures: TX=200 vs MTX=50 vs TMF=10) a single market-level number is
+actively wrong for most of them. See librae/config/symbols.py — spot
+instruments default to 1.0 automatically (a mathematical invariant, not a
+guess); contract_* instruments require it from their product or symbol, no
+fallback.
 
 Per-instrument details (symbol, min_qty, exchange) belong to the broker layer.
 """
@@ -56,7 +56,7 @@ class MarketConfig:
     Used by CostModel.from_market() to build a cost model, along with the
     per-symbol multiplier (always) and tick_size (when overridden) from
     librae/config/symbols.py's SymbolInfo, and the per-product
-    commission_per_contract from default_commission_per_contract there.
+    commission_per_contract from its ProductInfo.
     """
 
     name: str
@@ -100,8 +100,7 @@ _BUILTIN_MARKETS: dict[str, MarketConfig] = {
     "tw_futures": MarketConfig(
         name="tw_futures",
         # Broker commission is charged per contract and differs by product,
-        # so it lives in symbols.py (default_commission_per_contract), not
-        # here. TAIFEX does not set it: taifex.com.tw's feeSchedules page
+        # so it lives on each product in symbols.py, not here. TAIFEX does not set it: taifex.com.tw's feeSchedules page
         # states the exchange only regulates its own clearing fee, and the
         # broker fee is negotiated with no exchange-mandated floor.
         commission_rate=0.0,

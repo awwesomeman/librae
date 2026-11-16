@@ -1,19 +1,23 @@
-"""Per-symbol registry — symbol -> market + data source + contract economics.
+"""Per-symbol registry: symbol -> product, data route, and contract economics.
 
 Market-level cost params (commission rate and floor, tax, slippage, margin,
 plus an approximate default tick_size — see market_config.py) are genuinely
 shared across every instrument in a market and live there (MarketConfig).
-The per-contract commission differs by product and lives here, in
-default_commission_per_contract.
+
+A product (a futures root such as TAIFEX's TX) holds what every contract of
+it shares: market, instrument type, currency, calendar, multiplier, tick and
+quantity rules, and the per-contract commission. A symbol names its product
+and adds only its own route (data source, adapter, venue symbol, which
+contract it selects), so a product's specs and fees are declared once. This
+is how LEAN's symbol-properties-database.csv keys futures (one row per market
+and root symbol, no expiry column) and how zipline's PerContract commission
+takes a cost per root symbol.
 
 multiplier does NOT get a market-level fallback: for 'spot' instruments
 it's a mathematical invariant (buying spot = 1 unit for 1 unit) and
 defaults to 1.0 automatically here; for any contract_* instrument it
-varies per contract (TXF=200 vs MXF=50 vs TMF=10, all "market: tw_futures")
-and must be declared explicitly, no default — mirrors how mainstream
-frameworks handle this (e.g. QuantConnect LEAN's
-symbol-properties-database.csv: a market-wide wildcard row for equities,
-an explicit row per specific futures contract).
+varies per product (TX=200 vs MTX=50 vs TMF=10, all "market: tw_futures")
+and must be declared explicitly, by the product or the symbol.
 
 This registry is a plain Python dict rather than a bundled symbols.yaml:
 the built wheel includes only .py files without extra packaging config, so
@@ -22,15 +26,16 @@ would raise FileNotFoundError for any built-in symbol. A handful of
 hardcoded entries needs no parser, no packaging config, and can't go
 missing from the wheel.
 
-Registering your own symbol doesn't require editing this file. Cost fields
-belong in RunConfig.symbol_cost_overrides; venue/data fields belong in
+Registering your own symbol doesn't require editing this file. A symbol of a
+built-in product names it in RunConfig.instrument_overrides[symbol]['product']
+and inherits its specs; other cost fields belong in
+RunConfig.symbol_cost_overrides and venue/data fields in
 RunConfig.instrument_overrides. Execution brokerage is deliberately absent
 from the registry and must be selected by the caller.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -98,6 +103,7 @@ INSTRUMENT_OVERRIDE_FIELDS = frozenset(
         "min_notional",
         "min_quantity",
         "price_increment",
+        "product",
         "quantity_step",
         "security_type",
         "venue_symbol",
@@ -113,6 +119,7 @@ _INSTRUMENT_TEXT_FIELDS = frozenset(
         "exchange",
         "instrument_type",
         "market",
+        "product",
         "security_type",
         "venue_symbol",
     }
@@ -221,6 +228,8 @@ def validate_instrument_overrides(
                 str(route["instrument_type"]),
                 context=f"instrument_overrides[{symbol!r}]['instrument_type']",
             )
+        if "product" in route:
+            product_of(symbol, route)
 
 
 def validate_data_source_routes(
@@ -449,6 +458,8 @@ class SymbolInfo:
 
     ``calendar_id`` is the sole trading-session identity and is intentionally
     separate from a display timezone or vendor timestamp correction.
+    ``product`` names the ProductInfo the contract specs were taken from, or
+    None for a symbol that declares its own.
 
     multiplier is always populated once loaded (never None) — either from
     an explicit value, or auto-resolved to 1.0 for 'spot' (see
@@ -481,6 +492,7 @@ class SymbolInfo:
     min_quantity: float | None = None
     price_increment: float | None = None
     min_notional: float | None = None
+    product: str | None = None
 
     def __post_init__(self) -> None:
         validate_instrument_type(self.instrument_type, context=f"{self.symbol!r} instrument_type")
@@ -587,36 +599,197 @@ class SymbolInfo:
             )
 
 
-# Per-side broker fee per contract for each TAIFEX index-futures product,
-# shared by every contract of that product. The user's broker rate
-# (大台 40 / 小台 30 / 微台 20 TWD), not an exchange rule: TAIFEX does not set
-# broker commission.
-_TW_FUTURES_COMMISSION_BY_ROOT: dict[str, float] = {"TXF": 40.0, "MXF": 30.0, "TMF": 20.0}
-# Product root plus a continuous alias (R1/R2), a YYYYMM contract month, or
-# Shioaji's own month code (month letter A-L, last digit of the year).
-_TW_FUTURES_CODE = re.compile(r"(?P<root>[A-Z]{3})(?:R[12]|\d{6}|[A-L]\d)")
+@dataclass(frozen=True)
+class ProductInfo:
+    """Contract specs and fees every symbol of one product shares.
+
+    A product is a futures root (TAIFEX's TX, MTX, TMF): its contracts, and
+    the continuous series made of them, differ only in which contract they
+    select. ``commission_per_contract`` is the per-side broker fee per
+    contract.
+    """
+
+    product: str
+    market: str
+    instrument_type: str
+    currency: str
+    multiplier: float
+    commission_per_contract: float
+    calendar_id: str | None = None
+    tick_size: float | None = None
+    price_increment: float | None = None
+    quantity_step: float | None = None
+    min_quantity: float | None = None
+
+    def __post_init__(self) -> None:
+        validate_instrument_type(
+            self.instrument_type, context=f"product {self.product!r} instrument_type"
+        )
+        for field_name in (
+            "multiplier",
+            "tick_size",
+            "price_increment",
+            "quantity_step",
+            "min_quantity",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"product {self.product!r} {field_name} must be positive")
+        fee = self.commission_per_contract
+        if isinstance(fee, bool) or not isinstance(fee, Real) or not isfinite(fee) or fee < 0:
+            raise ValueError(
+                f"product {self.product!r} commission_per_contract must be finite and >= 0"
+            )
 
 
-def default_commission_per_contract(symbol: str, market: str) -> float:
+# What a symbol of a product inherits from it. A registry entry naming a
+# product may not restate one, so each value has one home.
+_PRODUCT_SPEC_FIELDS = (
+    "market",
+    "instrument_type",
+    "currency",
+    "calendar_id",
+    "multiplier",
+    "tick_size",
+    "price_increment",
+    "quantity_step",
+    "min_quantity",
+)
+
+
+def _taifex_index_future(product: str, multiplier: float, fee: float) -> ProductInfo:
+    return ProductInfo(
+        product=product,
+        market="tw_futures",
+        instrument_type="contract_monthly",
+        currency="TWD",
+        calendar_id="XTAIFEX",
+        multiplier=multiplier,
+        commission_per_contract=fee,
+        tick_size=1.0,  # 1 index point; venue price limits remain contract-specific
+        price_increment=1.0,
+        quantity_step=1.0,
+        min_quantity=1.0,
+    )
+
+
+# Keyed by the exchange's product code, not a broker's symbol. Multipliers are
+# TAIFEX's contract specs (index x 200 / 50 / 10 TWD). Fees are the user's
+# broker rate (大台 40 / 小台 30 / 微台 20 TWD per side), not an exchange rule:
+# TAIFEX does not set broker commission.
+_BUILTIN_PRODUCTS: dict[str, ProductInfo] = {
+    "TX": _taifex_index_future("TX", 200.0, 40.0),
+    "MTX": _taifex_index_future("MTX", 50.0, 30.0),
+    "TMF": _taifex_index_future("TMF", 10.0, 20.0),
+}
+
+
+def get_product(product: str) -> ProductInfo:
+    """Get a built-in product's specs by its code."""
+    if product not in _BUILTIN_PRODUCTS:
+        raise KeyError(f"Product {product!r} not found. Available: {sorted(_BUILTIN_PRODUCTS)}")
+    return _BUILTIN_PRODUCTS[product]
+
+
+def product_of(symbol: str, route: Mapping[str, object]) -> ProductInfo | None:
+    """The product ``symbol`` belongs to: its override's, else its registered one.
+
+    A registered symbol's product is part of its identity, so an override may
+    restate it but not change it; key another product's contract under its
+    own symbol instead.
+    """
+    registered = _BUILTIN_SYMBOLS.get(symbol)
+    registered_product = registered.product if registered is not None else None
+    name = route.get("product", registered_product)
+    if name is None:
+        return None
+    if registered is not None and name != registered_product:
+        raise ValueError(
+            f"instrument_overrides[{symbol!r}]['product']={name!r} contradicts registered "
+            f"symbol {symbol!r}, whose product is {registered_product!r}; key a contract "
+            "of another product under its own symbol"
+        )
+    if not isinstance(name, str) or name not in _BUILTIN_PRODUCTS:
+        raise ValueError(
+            f"instrument_overrides[{symbol!r}]['product']={name!r} is not a known product; "
+            f"one of {sorted(_BUILTIN_PRODUCTS)}, or leave it out and set the symbol's "
+            "specs in instrument_overrides and symbol_cost_overrides"
+        )
+    return _BUILTIN_PRODUCTS[name]
+
+
+def declared_specs(symbol: str, route: Mapping[str, object]) -> SymbolInfo | ProductInfo | None:
+    """Where ``symbol``'s specs come from before overrides: its registry entry,
+    else the product its route names, else nowhere (None).
+
+    Both types carry every _PRODUCT_SPEC_FIELDS attribute.
+    """
+    registered = _BUILTIN_SYMBOLS.get(symbol)
+    if registered is not None:
+        product_of(symbol, route)
+        return registered
+    return product_of(symbol, route)
+
+
+# The product specs a cost override would set; the rest come from routes.
+_PRODUCT_COST_FIELDS = frozenset({"multiplier", "tick_size"})
+
+
+def validate_product_overrides(
+    symbols: tuple[str, ...],
+    *,
+    instrument_overrides: Mapping[str, Mapping[str, object]],
+    cost_overrides: Mapping[str, object],
+    symbol_cost_overrides: Mapping[str, Mapping[str, object]],
+) -> None:
+    """Refuse an override that changes a spec of the symbol's product.
+
+    A product's specs and fee belong together: a multiplier changed on one
+    symbol while it keeps the product's fee describes no real contract. A
+    broker fee may differ from the product's, so commission_per_contract
+    stays overridable.
+    """
+    for symbol in symbols:
+        route = instrument_overrides.get(symbol, {})
+        product = product_of(symbol, route)
+        if product is None:
+            continue
+        costs = {**cost_overrides, **symbol_cost_overrides.get(symbol, {})}
+        for name in _PRODUCT_SPEC_FIELDS:
+            where = "cost overrides" if name in _PRODUCT_COST_FIELDS else "instrument_overrides"
+            values = costs if name in _PRODUCT_COST_FIELDS else route
+            if name not in values or values[name] == getattr(product, name):
+                continue
+            raise ValueError(
+                f"{where} set {name}={values[name]!r} for {symbol!r}, whose product "
+                f"{product.product!r} has {name}={getattr(product, name)!r}; a contract with "
+                "other specs is not of that product, so key it under its own symbol without "
+                "'product' and declare its specs there"
+            )
+
+
+def default_commission_per_contract(symbol: str, market: str, product: ProductInfo | None) -> float:
     """Per-contract commission for a symbol that does not set its own.
 
-    A tw_futures symbol pays its product's fee. One whose product has no
-    known fee raises instead of paying 0, because a silent 0 understates
-    every backtest and pre-trade cost estimate; set
-    ``commission_per_contract`` in ``symbol_cost_overrides`` to trade it.
-    Other markets charge by rate and floor only (market_config.py).
+    A symbol pays its product's fee. A tw_futures symbol with no product
+    raises instead of paying 0, because a silent 0 understates every backtest
+    and pre-trade cost estimate. Other markets charge by rate and floor only
+    (market_config.py).
     """
+    if product is not None:
+        return product.commission_per_contract
     if market != "tw_futures":
         return 0.0
-    match = _TW_FUTURES_CODE.fullmatch(symbol)
-    if match is None or match["root"] not in _TW_FUTURES_COMMISSION_BY_ROOT:
-        raise ValueError(
-            f"No per-contract commission for tw_futures symbol={symbol!r}: built-in fees "
-            f"cover {sorted(_TW_FUTURES_COMMISSION_BY_ROOT)} contracts coded as R1/R2, "
-            "YYYYMM, or a Shioaji month code; set "
-            "symbol_cost_overrides[symbol]['commission_per_contract']"
-        )
-    return _TW_FUTURES_COMMISSION_BY_ROOT[match["root"]]
+    raise ValueError(
+        f"No per-contract commission for tw_futures symbol={symbol!r}: name its product "
+        f"in instrument_overrides[symbol]['product'] (one of {sorted(_BUILTIN_PRODUCTS)}) "
+        "or set symbol_cost_overrides[symbol]['commission_per_contract']"
+    )
 
 
 _REGISTRY_FIELDS = frozenset(
@@ -634,6 +807,7 @@ _REGISTRY_FIELDS = frozenset(
         "min_quantity",
         "multiplier",
         "price_increment",
+        "product",
         "quantity_step",
         "security_type",
         "tick_size",
@@ -653,13 +827,28 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             instrument is missing 'multiplier' — caught here, at build
             time, rather than letting an unvalidated/defaulted value drift
             into a PnL calculation. 'spot' instruments don't need
-            'multiplier' at all (defaults to 1.0).
+            'multiplier' at all (defaults to 1.0). An entry naming a product
+            restates one of the product's specs, or names an unknown product.
     """
     registry: dict[str, SymbolInfo] = {}
     for symbol, data in raw.items():
         unknown = sorted(set(data) - _REGISTRY_FIELDS)
         if unknown:
             raise ValueError(f"registry entry {symbol!r} has unknown keys {unknown}")
+        if "product" in data:
+            product = _BUILTIN_PRODUCTS.get(data["product"])
+            if product is None:
+                raise ValueError(
+                    f"registry entry {symbol!r} names unknown product {data['product']!r}"
+                )
+            restated = sorted(set(data) & set(_PRODUCT_SPEC_FIELDS))
+            if restated:
+                raise ValueError(
+                    f"registry entry {symbol!r} restates {restated}, which its product "
+                    f"{product.product!r} sets"
+                )
+            inherited = {name: getattr(product, name) for name in _PRODUCT_SPEC_FIELDS}
+            data = {**{k: v for k, v in inherited.items() if v is not None}, **data}
         instrument_type = str(data.get("instrument_type", ""))
         raw_multiplier = data.get("multiplier")
         if raw_multiplier is not None:
@@ -702,6 +891,7 @@ def _build_registry(raw: dict[str, dict]) -> dict[str, SymbolInfo]:
             min_notional=(
                 float(data["min_notional"]) if data.get("min_notional") is not None else None
             ),
+            product=data.get("product"),
         )
     return registry
 
@@ -737,88 +927,40 @@ _BUILTIN_SYMBOLS: dict[str, SymbolInfo] = _build_registry(
             "multiplier": 1.0,
         },
         "TXFR1": {
-            "market": "tw_futures",
+            "product": "TX",
             "data_source": "shioaji",
-            "instrument_type": "contract_monthly",
             "data_adapter": "shioaji",
-            "currency": "TWD",
-            "calendar_id": "XTAIFEX",
-            "continuous_alias": True,
-            "multiplier": 200.0,  # TAIFEX large contract — required, no safe default for contract_* types
-            "tick_size": 1.0,  # 1 index point; venue price limits remain contract-specific
-            "price_increment": 1.0,
-            "quantity_step": 1.0,
-            "min_quantity": 1.0,
+            "continuous_alias": True,  # Shioaji native alias, rank 0 (nearest); see shioaji_adapter.py
         },
         "TXFR2": {
-            "market": "tw_futures",
+            "product": "TX",
             "data_source": "shioaji",
-            "instrument_type": "contract_monthly",
             "data_adapter": "shioaji",
-            "currency": "TWD",
-            "calendar_id": "XTAIFEX",
-            "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest) — see shioaji_adapter.py
-            "multiplier": 200.0,  # same contract as TXFR1, just the next-nearest month
-            "tick_size": 1.0,
-            "price_increment": 1.0,
-            "quantity_step": 1.0,
-            "min_quantity": 1.0,
+            "continuous_alias": True,  # rank 1 (next-nearest)
         },
         "MXFR1": {
-            "market": "tw_futures",
+            "product": "MTX",
             "data_source": "shioaji",
-            "instrument_type": "contract_monthly",
             "data_adapter": "shioaji",
-            "currency": "TWD",
-            "calendar_id": "XTAIFEX",
             "continuous_alias": True,
-            "multiplier": 50.0,  # TAIFEX mini contract — contract spec: index x 50 TWD
-            "tick_size": 1.0,
-            "price_increment": 1.0,
-            "quantity_step": 1.0,
-            "min_quantity": 1.0,
         },
         "MXFR2": {
-            "market": "tw_futures",
+            "product": "MTX",
             "data_source": "shioaji",
-            "instrument_type": "contract_monthly",
             "data_adapter": "shioaji",
-            "currency": "TWD",
-            "calendar_id": "XTAIFEX",
-            "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest)
-            "multiplier": 50.0,  # same contract as MXFR1, just the next-nearest month
-            "tick_size": 1.0,
-            "price_increment": 1.0,
-            "quantity_step": 1.0,
-            "min_quantity": 1.0,
+            "continuous_alias": True,
         },
         "TMFR1": {
-            "market": "tw_futures",
+            "product": "TMF",
             "data_source": "shioaji",
-            "instrument_type": "contract_monthly",
             "data_adapter": "shioaji",
-            "currency": "TWD",
-            "calendar_id": "XTAIFEX",
             "continuous_alias": True,
-            "multiplier": 10.0,  # TAIFEX micro contract — contract spec: index x 10 TWD
-            "tick_size": 1.0,
-            "price_increment": 1.0,
-            "quantity_step": 1.0,
-            "min_quantity": 1.0,
         },
         "TMFR2": {
-            "market": "tw_futures",
+            "product": "TMF",
             "data_source": "shioaji",
-            "instrument_type": "contract_monthly",
             "data_adapter": "shioaji",
-            "currency": "TWD",
-            "calendar_id": "XTAIFEX",
-            "continuous_alias": True,  # Shioaji native alias, rank 1 (next-nearest)
-            "multiplier": 10.0,  # same contract as TMFR1, just the next-nearest month
-            "tick_size": 1.0,
-            "price_increment": 1.0,
-            "quantity_step": 1.0,
-            "min_quantity": 1.0,
+            "continuous_alias": True,
         },
         "MU": {
             "market": "us_equity",
@@ -875,17 +1017,19 @@ def resolve_symbol(
 ) -> SymbolInfo:
     """Resolve accounting and broker metadata for one configured symbol.
 
-    Registry values are authoritative for registered symbols. Run-wide
+    Registry values are authoritative for registered symbols, and an
+    unregistered symbol naming a product takes that product's specs. Run-wide
     market/data_source/calendar_id values are fallbacks for homogeneous,
     unregistered universes; ``instrument_overrides`` supplies per-symbol
     routing metadata.
     """
     registered = _BUILTIN_SYMBOLS.get(symbol)
     route = (config.instrument_overrides or {}).get(symbol, {})
+    specs = declared_specs(symbol, route)
     costs = dict(config.cost_overrides or {})
     costs.update((config.symbol_cost_overrides or {}).get(symbol, {}))
 
-    market = route.get("market") or (registered.market if registered else config.market)
+    market = route.get("market") or (specs.market if specs else config.market)
     data_source = route.get("data_source") or (
         registered.data_source if registered else config.data_source
     )
@@ -901,22 +1045,20 @@ def resolve_symbol(
     multiplier = (
         multiplier
         if multiplier is not None
-        else costs.get("multiplier", registered.multiplier if registered else None)
+        else costs.get("multiplier", specs.multiplier if specs else None)
     )
     if multiplier is None:
         raise ValueError(
             f"No multiplier for symbol={symbol!r}; set symbol_cost_overrides[symbol]['multiplier']"
         )
-    instrument_type = route.get("instrument_type") or (
-        registered.instrument_type if registered else ""
-    )
+    instrument_type = route.get("instrument_type") or (specs.instrument_type if specs else "")
     if not instrument_type:
         raise ValueError(
             f"No instrument_type for symbol={symbol!r}; set "
             "instrument_overrides[symbol]['instrument_type']"
         )
-    tick_size = costs.get("tick_size", registered.tick_size if registered else None)
-    currency = route.get("currency") or (registered.currency if registered else "")
+    tick_size = costs.get("tick_size", specs.tick_size if specs else None)
+    currency = route.get("currency") or (specs.currency if specs else "")
     if not currency:
         raise ValueError(
             f"No currency for symbol={symbol!r}; set instrument_overrides[symbol]['currency']"
@@ -934,21 +1076,10 @@ def resolve_symbol(
         )
     security_type = route.get("security_type") or (registered.security_type if registered else None)
     exchange = route.get("exchange") or (registered.exchange if registered else None)
-    calendar_id = route.get("calendar_id") or (
-        registered.calendar_id if registered else config.calendar_id
-    )
-    quantity_step = route.get(
-        "quantity_step",
-        registered.quantity_step if registered else None,
-    )
-    min_quantity = route.get(
-        "min_quantity",
-        registered.min_quantity if registered else None,
-    )
-    price_increment = route.get(
-        "price_increment",
-        registered.price_increment if registered else None,
-    )
+    calendar_id = route.get("calendar_id") or (specs.calendar_id if specs else config.calendar_id)
+    quantity_step = route.get("quantity_step", specs.quantity_step if specs else None)
+    min_quantity = route.get("min_quantity", specs.min_quantity if specs else None)
+    price_increment = route.get("price_increment", specs.price_increment if specs else None)
     min_notional = route.get(
         "min_notional",
         registered.min_notional if registered else None,
@@ -994,4 +1125,5 @@ def resolve_symbol(
         min_quantity=float(min_quantity) if min_quantity is not None else None,
         price_increment=(float(price_increment) if price_increment is not None else None),
         min_notional=float(min_notional) if min_notional is not None else None,
+        product=route.get("product") or (registered.product if registered else None),
     )

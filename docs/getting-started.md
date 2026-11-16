@@ -180,8 +180,12 @@ before promoting a strategy beyond research.
 
 A symbol already in `librae/config/symbols.py`'s registry needs no
 configuration — copy an existing entry for the same broker/asset class as a
-working example. An unregistered symbol needs `instrument_overrides` in
-`config.yaml`, resolved from three separate sources:
+working example. An unregistered contract of a built-in futures product
+(`ProductInfo` in `librae/config/symbols.py`) sets `product` in its
+`instrument_overrides` and inherits the product's specs and fee, leaving only
+its route (`data_source`, `data_adapter`, `continuous_alias` or
+`contract_month`). Any other unregistered symbol needs `instrument_overrides`
+in `config.yaml`, resolved from three separate sources:
 
 1. **The field schema** — routing and identity fields such as
    `venue_symbol`/`currency`/`security_type`/`exchange`/`continuous_alias`/

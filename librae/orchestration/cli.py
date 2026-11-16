@@ -235,7 +235,7 @@ def _resolve_market_and_data_source(
     RunConfig can check it against every symbol; returning the resolved value
     would hide a disagreement from that check.
     """
-    from librae.config.symbols import load_symbol_registry
+    from librae.config.symbols import declared_specs, load_symbol_registry
 
     registry = load_symbol_registry()
     overrides = instrument_overrides or {}
@@ -244,7 +244,8 @@ def _resolve_market_and_data_source(
     for sym in symbols:
         entry = registry.get(sym)
         route = overrides.get(sym, {})
-        symbol_market = route.get("market") or (entry.market if entry else market)
+        specs = declared_specs(sym, route)
+        symbol_market = route.get("market") or (specs.market if specs else market)
         symbol_source = route.get("data_source") or (entry.data_source if entry else data_source)
         if symbol_market is None or symbol_source is None:
             raise ValueError(
@@ -365,12 +366,12 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
         raise ValueError("strategy.initial_balance was replaced by strategy.account.initial_cash")
     account_raw = scfg.get("account")
     if account_raw is None:
-        from librae.config.symbols import load_symbol_registry
+        from librae.config.symbols import declared_specs
 
-        registry = load_symbol_registry()
+        routes = instrument_overrides or {}
         currencies = {
-            (instrument_overrides or {}).get(symbol, {}).get("currency")
-            or (registry[symbol].currency if symbol in registry else None)
+            routes.get(symbol, {}).get("currency")
+            or getattr(declared_specs(symbol, routes.get(symbol, {})), "currency", None)
             for symbol in symbols
         }
         if None in currencies or len(currencies) != 1:

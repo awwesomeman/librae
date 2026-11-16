@@ -373,8 +373,11 @@ in that catalog snapshot. Selecting such a dated result pins its
 `contract_month`; it does not roll later. A venue-native R1/R2 result has
 `continuous_alias=True` and may change its target. This distinction prevents a
 discovery convenience from silently changing live exposure. Backtests have no
-roll ledger, so they refuse a TAIFEX alias position held through its final
-settlement session rather than booking the gap between contracts (see the
+roll ledger, so they refuse a continuous-series position held through a
+contract switch rather than booking the gap between contracts: where the bars
+name their contract, the switch is where it changes; a registered TAIFEX
+alias read from its own source switches in its final settlement session; any
+other continuous series without contracts is refused (see the
 [backtest data contract](docs/guides/engine-usage.md#backtest-data-contract)).
 
 For a `RunConfig`, use `candidate.canonical_symbol`,
@@ -496,7 +499,7 @@ document scoped to layering, boundaries, and naming conventions.
 | Type | Description |
 |------|------|
 | `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioWeights` |
-| `Context` | immutable event snapshot: current bars, positions, one account snapshot, callback period index, and the TAIFEX continuous aliases whose next session is their final settlement |
+| `Context` | immutable event snapshot: current bars, positions, one account snapshot, callback period index, and the continuous series to exit before their next contract switch |
 | `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
 | `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` identifies related legs — backtest/sim stage them as one local fill-or-kill unit, while live preflights them before serial broker submission and does not claim venue atomicity (see the [related multi-leg contract](docs/guides/engine-usage.md#related-multi-leg-order-contract)); `time_in_force` (`day`/`gtc`/`ioc`/`fok`) sets the order lifetime — backtest/sim model it from bar data (eligible-event count plus whether a short fill counts, measured against the engine's own participation limits, never book depth), while live delegates the real lifetime to the broker |
@@ -601,9 +604,9 @@ cost_model = CostModel.from_config(config, markets=my_markets)
 
 #### Per-symbol overrides (`RunConfig.symbol_cost_overrides`)
 
-`CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_cost_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the built-in symbol registry (`multiplier`: `spot` auto-1.0, `contract_*` required-explicit; optional `tick_size`) and the per-product `commission_per_contract` > market-level defaults. `commission_per_contract` has no market-level value: a `tw_futures` symbol, registered or not, pays its product's fee (TXF/MXF/TMF, by code root), and an unrecognized one raises until an override sets the fee; other markets default to 0. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
+`CostModel.from_config(config, symbol=...)` resolves one symbol's cost model with priority: explicit `override=` > `config.symbol_cost_overrides[symbol]` > `config.cost_overrides` (run-wide fallback) > the symbol's registry entry or product (`multiplier`: `spot` auto-1.0, `contract_*` required-explicit; optional `tick_size`; `commission_per_contract`) > market-level defaults. `commission_per_contract` has no market-level value: a symbol pays its product's fee, and a `tw_futures` symbol with no product raises until an override sets the fee; other markets default to 0. `symbol` defaults to `config.symbol` (`symbols[0]`) when omitted.
 
-In a multi-symbol run, a run-wide `cost_overrides` `multiplier` or `tick_size` only fills in for symbols without their own value: one that differs from a registered symbol's value is refused at `RunConfig` construction unless `symbol_cost_overrides` sets that symbol's, since contracts in one run rarely share economics (TXFR1=200, MXFR1=50). A single-symbol run keeps the priority above.
+In a multi-symbol run, a run-wide `cost_overrides` `multiplier` or `tick_size` only fills in for symbols without their own value: one that differs from a registered symbol's or its product's value is refused at `RunConfig` construction unless `symbol_cost_overrides` sets that symbol's, since contracts in one run rarely share economics (TXFR1=200, MXFR1=50). A single-symbol run keeps the priority above.
 
 `Backtest.__init__` calls this once per symbol in the run (not just `config.symbol`) whenever `config=` is used and no explicit `cost_model=` override is given — a multi-asset run mixing symbols with different multipliers (e.g. `tw_futures`: TXFR1=200 + MXFR1=50 in the same run) gets each symbol's own multiplier automatically, not just the first symbol's applied to everyone.
 
@@ -612,9 +615,18 @@ config = RunConfig(
     ...,
     symbols=["TXFR1", "MXFR1"],
     market="tw_futures",
-    symbol_cost_overrides={"MXFR1": {"multiplier": 55.0}},  # override just this one symbol
+    symbol_cost_overrides={"MXFR1": {"commission_per_contract": 25.0}},  # just this one symbol
 )
 ```
+
+A futures product (a root such as TAIFEX's `TX`) declares once what all its
+contracts share: market, instrument type, currency, calendar, multiplier,
+tick and quantity rules, and the per-contract fee (`ProductInfo` in
+`librae/config/symbols.py`). A symbol of a built-in product sets
+`instrument_overrides[symbol]['product']` and only its own route; a
+registered symbol's product cannot be changed, and an override may not change
+a product's specs (its per-contract fee, a broker rate, may differ). Products are keyed by the
+exchange's code, never parsed from the symbol.
 
 This is the mechanism for registering a symbol librae doesn't know about (`pip install`ed with nothing to edit, or a one-off backtest) — `symbol_cost_overrides={"MYSYM": {"multiplier": 1.0}}` needs no file, no path parameter, nothing beyond the `RunConfig` you're already passing to `Backtest`/`LiveTrader`.
 

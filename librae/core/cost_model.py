@@ -153,10 +153,10 @@ class CostModel:
         explicit override > config.symbol_cost_overrides[symbol] > config.cost_overrides
         (run-wide fallback) > the built-in symbol registry's per-symbol
         multiplier (spot auto-1.0, contract_* required-explicit),
-        tick_size (optional override), and commission_per_contract from the
-        symbol's product (default_commission_per_contract, registered or
-        not) > market-level defaults for
-        everything else (see librae/config/symbols.py's module docstring).
+        tick_size (optional override) and commission_per_contract, taken from
+        the symbol's product when it names one (default_commission_per_contract)
+        > market-level defaults for everything else (see
+        librae/config/symbols.py's module docstring).
 
         symbol: which symbol to resolve for — defaults to config.symbol
             (symbols[0]). Pass explicitly to resolve a different symbol in
@@ -173,19 +173,19 @@ class CostModel:
                 auto-default, since we don't know the instrument_type) and
                 neither config.symbol_cost_overrides[symbol] nor config.cost_overrides
                 supplies multiplier either; or it is a tw_futures symbol
-                with no known product fee and no commission_per_contract
-                override.
+                with no product and no commission_per_contract override.
         """
         if override is not None:
             return override
         symbol = symbol if symbol is not None else config.symbol
 
-        from librae.config.symbols import default_commission_per_contract
+        from librae.config.symbols import default_commission_per_contract, product_of
 
         fields, symbol_market = _cost_fields(config, symbol, markets)
         if "commission_per_contract" not in fields:
+            route = (config.instrument_overrides or {}).get(symbol, {})
             fields["commission_per_contract"] = default_commission_per_contract(
-                symbol, symbol_market
+                symbol, symbol_market, product_of(symbol, route)
             )
         return cls(**fields)
 
@@ -334,17 +334,16 @@ def _cost_fields(
     priority, except a per-contract commission no override sets: that one is
     left out for the caller to take from default_commission_per_contract."""
     from librae.config.market_config import get_market
-    from librae.config.symbols import get_symbol
-
-    try:
-        sym = get_symbol(symbol)
-        multiplier, tick_size = sym.multiplier, sym.tick_size
-        symbol_market = sym.market
-    except KeyError:
-        multiplier, tick_size = None, None
-        symbol_market = config.market
+    from librae.config.symbols import declared_specs
 
     route = (config.instrument_overrides or {}).get(symbol, {})
+    specs = declared_specs(symbol, route)
+    if specs is not None:
+        multiplier, tick_size = specs.multiplier, specs.tick_size
+        symbol_market = specs.market
+    else:
+        multiplier, tick_size = None, None
+        symbol_market = config.market
     symbol_market = route.get("market", symbol_market)
     mc = get_market(symbol_market, markets=markets)
 
@@ -359,9 +358,9 @@ def _cost_fields(
         raise ValueError(
             f"No multiplier for symbol={symbol!r} — pass config.symbol_cost_overrides={{"
             f"{symbol!r}: {{'multiplier': ...}}}} (or config.cost_overrides for a "
-            "single-symbol run), or register it in librae/config/symbols.py's "
-            "built-in registry (spot instruments default to 1.0 automatically; "
-            "contract_* instruments need it explicit)."
+            "single-symbol run), or name its product in "
+            "instrument_overrides[symbol]['product'] (spot instruments default to "
+            "1.0 automatically; contract_* instruments need it explicit)."
         )
     fields = asdict(CostModel.from_market(mc, multiplier=multiplier, tick_size=tick_size))
     del fields["commission_per_contract"]
