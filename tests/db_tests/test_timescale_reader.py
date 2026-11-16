@@ -16,6 +16,7 @@ from librae.db.timescale_reader import (
     get_run_by_backtest_cache_key,
     load_backtest_output,
     load_run_bars,
+    load_signal_events,
     row_to_strategy_metrics,
 )
 
@@ -121,6 +122,32 @@ class TestLoadRunBars:
         mock_conn_ctx.return_value = _mock_conn(MagicMock())
 
         assert load_run_bars("backtest-without-bars").empty
+
+
+class TestLoadSignalEvents:
+    @patch("librae.db.timescale_reader.pd.read_sql")
+    @patch("librae.db.timescale_reader.get_conn")
+    def test_reads_each_signal_with_its_inputs(self, mock_conn_ctx, mock_read_sql):
+        """psycopg2 decodes JSONB, so a stored dict reads back as one."""
+        mock_conn_ctx.return_value = _mock_conn(MagicMock())
+        mock_read_sql.return_value = pd.DataFrame(
+            {
+                "_time": [datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, 1, tzinfo=UTC)],
+                "symbol": ["BTCUSDT", "BTCUSDT"],
+                "signal_type": ["entry", "exit"],
+                "signal_value": [1.0, -1.0],
+                "price": [100.0, 101.0],
+                "inputs": [{"zscore": -2.5}, None],
+            }
+        )
+
+        result = load_signal_events("run-1")
+
+        sql = " ".join(mock_read_sql.call_args.args[0].split())
+        assert "inputs FROM signal_events WHERE run_id = %s" in sql
+        assert mock_read_sql.call_args.kwargs["params"] == ["run-1"]
+        assert result["inputs"].tolist() == [{"zscore": -2.5}, None]
+        assert str(result["_time"].dt.tz) == "UTC"
 
 
 class TestRowToStrategyMetrics:

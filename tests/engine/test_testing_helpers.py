@@ -68,6 +68,36 @@ def test_validate_feature_causality_rejects_look_ahead(
         validate_feature_causality(_with(column), _bars())
 
 
+def _signal_inputs_of(zscore: Callable[[pd.Series], pd.Series]):
+    def feature_fn(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        out["zscore"] = zscore(out["close"])
+        out["signal_inputs"] = out[["zscore"]].to_dict("records")
+        return out
+
+    return feature_fn
+
+
+def _rolling_zscore(close: pd.Series) -> pd.Series:
+    return (close - close.rolling(20).mean()) / close.rolling(20).std()
+
+
+def test_signal_inputs_from_a_rolling_feature_are_causal() -> None:
+    """The documented one-liner carries the rolling window's warm-up NaN and
+    float noise into dicts; neither is look-ahead."""
+    validate_feature_causality(_signal_inputs_of(_rolling_zscore), _bars())
+
+
+def test_signal_inputs_holding_a_future_value_are_rejected() -> None:
+    def leaking(df: pd.DataFrame) -> pd.DataFrame:
+        out = _signal_inputs_of(_rolling_zscore)(df)
+        out["signal_inputs"] = [{"next_close": value} for value in out["close"].shift(-1)]
+        return out
+
+    with pytest.raises(ValueError, match=r"'signal_inputs'.*cut at"):
+        validate_feature_causality(leaking, _bars())
+
+
 def test_validate_feature_causality_names_timestamp_and_only_leaking_columns() -> None:
     def feature_fn(df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()

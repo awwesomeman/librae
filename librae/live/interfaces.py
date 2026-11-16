@@ -10,6 +10,7 @@ import pandas as pd
 
 from librae.core.executor import PositionEvent, RuntimeEvent
 from librae.core.financing import FinancingCashFlow
+from librae.core.strategy import SignalInputs
 
 
 class BarDataFetcher(Protocol):
@@ -147,4 +148,5 @@ class SignalOutcomeCallback(Protocol):
         price: float,
         *,
         signal_type: str = "entry",
+        inputs: SignalInputs | None = None,
     ) -> None: ...

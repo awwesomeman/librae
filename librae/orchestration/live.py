@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from librae.core.financing import FinancingCashFlow
     from librae.core.market_data import BatchFeatureFn, MarketDataSubscription
     from librae.core.run_config import RunConfig
-    from librae.core.strategy import Strategy
+    from librae.core.strategy import SignalInputs, Strategy
     from librae.live.state import LiveStateStore
 
 logger = logging.getLogger(__name__)
@@ -572,6 +572,7 @@ class _TimescaleCallbacks:
         signal_value: float,
         price: float,
         signal_type: str = "entry",
+        inputs: SignalInputs | None = None,
     ) -> None:
         from librae.db.timescale_writer import write_signal_event
 
@@ -586,6 +587,7 @@ class _TimescaleCallbacks:
             signal_value=signal_value,
             price=price,
             signal_type=signal_type,
+            inputs=inputs,
         )
 
     def on_performance(self, run_id: str, account_id: str) -> None:

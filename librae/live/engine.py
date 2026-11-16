@@ -91,6 +91,7 @@ from librae.core.resting_orders import (
     resting_session_of,
 )
 from librae.core.strategy import (
+    SIGNAL_INPUTS_COLUMN,
     AccountSnapshot,
     Context,
     Fill,
@@ -98,8 +99,10 @@ from librae.core.strategy import (
     PortfolioWeights,
     Position,
     PositionState,
+    SignalInputs,
     Strategy,
     StrategyDecision,
+    validate_signal_inputs,
 )
 from librae.core.taifex import final_settlement_follows
 from librae.core.trading_calendar import (
@@ -7551,16 +7554,26 @@ class LiveTrader:
 
             if self._on_signal_outcome:
                 sig = bar.get("entry_signal")
-                if sig is not None and not pd.isna(sig) and float(sig) != 0:
-                    self._on_signal_outcome(symbol, bar_ts[symbol], float(sig), price)
                 exit_sig = bar.get("exit_signal")
-                if exit_sig is not None and not pd.isna(exit_sig) and float(exit_sig) != 0:
+                has_entry = sig is not None and not pd.isna(sig) and float(sig) != 0
+                has_exit = exit_sig is not None and not pd.isna(exit_sig) and float(exit_sig) != 0
+                inputs = (
+                    self._signal_inputs(symbol, bar_ts[symbol], bar)
+                    if has_entry or has_exit
+                    else None
+                )
+                if has_entry:
+                    self._on_signal_outcome(
+                        symbol, bar_ts[symbol], float(sig), price, inputs=inputs
+                    )
+                if has_exit:
                     self._on_signal_outcome(
                         symbol,
                         bar_ts[symbol],
                         float(exit_sig),
                         price,
                         signal_type="exit",
+                        inputs=inputs,
                     )
 
         # PortfolioWeights and grouped OrderIntents must be immediately
@@ -8066,6 +8079,26 @@ class LiveTrader:
         # A restart measures drawdown from the checkpointed peak.
         if moved and not self._halted:
             self._persist_state()
+
+    @staticmethod
+    def _signal_inputs(symbol: str, ts: datetime, bar: Mapping[str, object]) -> SignalInputs | None:
+        """The inputs a signal on this bar was decided from, if the strategy gave any.
+
+        Inputs only explain a signal, so any failure to prepare them costs the
+        record its inputs, never the cycle: the strategy still decides on this
+        bar and its orders still go out.
+        """
+        try:
+            return validate_signal_inputs(bar.get(SIGNAL_INPUTS_COLUMN))
+        except Exception as exc:
+            logger.warning(
+                "Signal inputs for %s at %s are not stored: %s: %s",
+                symbol,
+                ts,
+                type(exc).__name__,
+                exc,
+            )
+            return None
 
     def _record_equity(self, ts: datetime, *, decided_at: datetime | None = None) -> None:
         """Calculate equity + drawdown, check the max-drawdown circuit

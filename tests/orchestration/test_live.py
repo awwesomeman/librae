@@ -1264,6 +1264,23 @@ def test_timescale_callbacks_writes_runtime_event() -> None:
     )
 
 
+def test_timescale_callbacks_store_a_signals_inputs() -> None:
+    config = make_test_cfg(mode="sim")
+    callbacks = _TimescaleCallbacks(config, {"BTCUSDT": resolve_symbol(config, "BTCUSDT")}, None)
+    callbacks._run_id = "run-1"
+    ts = datetime.now(UTC)
+
+    with patch("librae.db.timescale_writer.write_signal_event", autospec=True) as write:
+        callbacks.on_signal_outcome(
+            "BTCUSDT", ts, -1.0, 100.0, signal_type="exit", inputs={"zscore": 2.1}
+        )
+
+    assert callbacks._failures.get("write_signal_event", 0) == 0
+    write.assert_called_once()
+    assert write.call_args.kwargs["signal_type"] == "exit"
+    assert write.call_args.kwargs["inputs"] == {"zscore": 2.1}
+
+
 def test_timescale_callbacks_alert_after_repeated_write_failures() -> None:
     config = make_test_cfg(mode="sim")
     notifier = MagicMock(enabled=True)
