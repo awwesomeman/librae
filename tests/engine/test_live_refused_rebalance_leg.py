@@ -190,7 +190,7 @@ class TestTheBarAFailedLegWentOutOnIsNotDecidedAgain:
 
         assert trader._halted is True
         [alert] = _titled(alerts, "Order Rejected")
-        assert "halt not persisted" in alert["message"]
+        assert "not recorded yet" in alert["message"]
         assert _submitted(adapter) == ["AAA"]
         assert strategy.calls == 0
 

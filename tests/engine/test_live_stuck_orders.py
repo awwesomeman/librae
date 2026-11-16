@@ -367,7 +367,7 @@ class TestACancelAnswerRecordedInAStoreOutage:
             assert "target rebalance stopped" in alert["message"]
             assert len(_of_type(events, "group_failed")) == 1
         else:
-            assert "halt not persisted" in alert["message"]
+            assert "not recorded yet" in alert["message"]
 
 
 def _trio(adapter):
