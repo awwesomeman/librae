@@ -1180,7 +1180,9 @@ def resample_session_ohlcv(
             "high": grouped["high"].max(),
             "low": grouped["low"].min(),
             "close": grouped["close"].last(),
-            "volume": grouped["volume"].sum(),
+            # A bucket with any unreported minute has unknown volume, not a
+            # partial sum.
+            "volume": grouped["volume"].sum().mask(frame["volume"].isna().groupby(buckets).any()),
         }
     )
     result.index.name = frame.index.name

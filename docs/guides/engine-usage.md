@@ -107,8 +107,11 @@ The backtest boundary fails fast on malformed input. Index levels must be
 exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps
 are timezone-aware and increasing within each symbol; and `config.symbols`, when
 provided, exactly matches the symbols in the frame. Required OHLCV values are
-numeric and finite, prices are positive, every bar satisfies
-`low <= open/close <= high`, and volume is non-negative. Validation never
+numeric, prices are finite and positive, every bar satisfies
+`low <= open/close <= high`, and volume is non-negative and finite or missing.
+Missing (NaN) volume means the source reports none, as for an index: it is
+never read as zero, and whatever needs it (a volume cap, impact, ADV) rejects
+the fill instead. Validation never
 sorts, forward/backward-fills, clips, or otherwise repairs data because those
 operations can change the point-in-time research sample and must remain
 explicit ETL decisions. Runtime frames use the same OHLCV value validator before
@@ -871,7 +874,7 @@ exceeded `RunConfig.runtime.poll_seconds`.
   execution: the alternative, refusing to trade after any gap, is worse, and
   it caps size rather than pricing a fill. The session-level ADV cap below is
   bounded by `adv_lookback_sessions`; this one is not.
-  Missing volume rejects the fill. Constrained exits are explicit partial
+  Missing (NaN) volume rejects the fill. Constrained exits are explicit partial
   fills and retain the remaining position for a later observed bar. Once a
   bar crosses the stop or liquidation level, the remainder stays an active
   market exit, even when a take-profit crossed at the open filled first. A
@@ -881,7 +884,7 @@ exceeded `RunConfig.runtime.poll_seconds`.
   sessions before the active session; it never contains active-session volume.
   D1 treats each row as one session. Intraday aggregates observed bars using
   the symbol's `calendar_id`, which is required at startup. Missing warmup
-  rejects fills. Bar-volume and ADV usage are tracked separately, so available
+  rejects fills, as does a window containing a session with missing volume. Bar-volume and ADV usage are tracked separately, so available
   quantity is `min(bar cap - filled this bar, ADV cap - filled this session)`.
   This avoids granting the full ADV budget again on every intraday bar. No
   intraday volume-profile estimate is needed: the causal bar-volume reference

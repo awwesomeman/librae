@@ -35,9 +35,9 @@ def test_intraday_adv_aggregates_completed_sessions_before_mapping_to_bars() -> 
     assert result.iloc[5] == pytest.approx(200.0)
 
 
-@pytest.mark.parametrize("invalid_volume", [float("nan"), float("inf"), -1.0])
+@pytest.mark.parametrize("invalid_volume", [float("inf"), -1.0])
 def test_lagged_adv_rejects_invalid_volume_history(invalid_volume: float) -> None:
-    with pytest.raises(ValueError, match="finite and non-negative"):
+    with pytest.raises(ValueError, match="finite or missing, and non-negative"):
         calculate_lagged_adv(pd.Series([100.0, invalid_volume]), lookback_sessions=1)
 
 
