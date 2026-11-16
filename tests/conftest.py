@@ -76,3 +76,37 @@ def make_test_cfg(**overrides) -> RunConfig:
         )
     defaults.update(overrides)
     return RunConfig(**defaults)
+
+
+def primary_subscriptions_for(
+    data,
+    timeframe: str | None = None,
+    *,
+    calendar_id: str = "24/7",
+    data_source: str = "test",
+    instrument_type: str = "spot",
+    session_mode: str = "extended",
+):
+    """Declare one primary subscription per symbol of a direct-Backtest frame.
+
+    The timeframe is inferred from the symbol with the most bars unless given.
+    """
+    import pandas as pd
+    from librae.core.market_data import MarketDataSubscription
+    from librae.core.utils import infer_timeframe
+
+    symbols = list(dict.fromkeys(data.index.get_level_values("symbol")))
+    if timeframe is None:
+        densest = max(symbols, key=lambda symbol: len(data.xs(symbol, level="symbol")))
+        timeframe = infer_timeframe(pd.DatetimeIndex(data.xs(densest, level="symbol").index))
+    return tuple(
+        MarketDataSubscription(
+            symbol=symbol,
+            timeframe=timeframe,
+            calendar_id=calendar_id,
+            session_mode=session_mode,
+            data_source=data_source,
+            instrument_type=instrument_type,
+        )
+        for symbol in symbols
+    )

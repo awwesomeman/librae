@@ -137,9 +137,8 @@ notifier, or state store. An unused integration therefore cannot break
 `import librae`, and a selected integration's import or construction failure
 stays at the composition boundary.
 
-Static integration contracts live in `librae.integrations`; offline bar,
-order-adapter, execution-report, and feature look-ahead checks live in
-`librae.testing`. Reference
+Static integration contracts live in `librae.integrations`; the offline
+feature look-ahead check lives in `librae.testing`. Reference
 implementations live in the regular `librae.brokers`, `librae.db`,
 `librae.notifications`, `librae.orchestration`, and `librae.console` packages.
 The distribution exposes only the `librae` top-level namespace. The former
@@ -147,6 +146,19 @@ repository-level imports are intentionally unsupported and have no
 compatibility aliases. The ownership decision and migration constraints are
 recorded in
 `docs/decisions/2026-07-30-integration-discovery-and-packaging.md`.
+
+### Public import surface
+
+Applications import from:
+
+- `librae` itself: the names in its `__all__`;
+- `librae.testing` and `librae.integrations`;
+- the reference integration packages above, plus `librae.config.env`.
+
+Everything else (`librae.core`, `librae.backtest`, `librae.live`,
+`librae.config` other than `env`) is internal and moves without notice; a name
+an application needs from there is re-exported from `librae` instead.
+`tests/test_public_surface.py` lists the names applications import today.
 
 ## Data acquisition and ownership boundary
 
@@ -211,10 +223,8 @@ and production accounts cannot resolve the same checkpoint. Account ownership
 leases use the observed broker identity rather than the caller's display
 `account_id`.
 
-Backtest callers may use `librae.normalize_bars()` to explicitly map common
-DataFrame layouts into the canonical `(symbol, datetime)` UTC index. The
-helper preserves feature columns; `Backtest` itself does not infer column
-names, timestamps, symbols, or data-source semantics.
+`Backtest` does not infer column names, timestamps, symbols, or data-source
+semantics: callers pass the canonical `(symbol, datetime)` UTC index.
 
 `timeframe` defines the completed strategy bar and data-event clock.
 `poll_seconds` independently defines the runtime loop cadence: each cycle may
@@ -323,27 +333,20 @@ consume the same multiplier.
 
 ### Broker symbol discovery
 
-`librae.available_symbols()` queries the selected broker's current catalog; it
-does not copy thousands of changeable venue symbols into the built-in registry.
-It returns immutable `AvailableSymbol` values with a suggested canonical key,
-the adapter-facing and native symbols, instrument/asset class, expiry, current
-contract rank, and verified multiplier/tick metadata when the venue supplies
-them. Query matching is exact against broker id, unified symbol, base, or
-base+quote so `query="MU"` cannot silently select `MUU`.
+`BinanceStocksAdapter.available_symbols()` and `IBKRAdapter.available_symbols()`
+query the broker's current catalog; they do not copy thousands of changeable
+venue symbols into the built-in registry. They return immutable
+`AvailableSymbol` values with a suggested canonical key, the adapter-facing and
+native symbols, instrument/asset class, expiry, current contract rank, and
+verified multiplier/tick metadata when the venue supplies them. Query matching
+is exact against broker id, unified symbol, base, or base+quote so `query="MU"`
+cannot silently select `MUU`.
 
-- Binance crypto discovery uses public CCXT `load_markets()` data and needs no
-  API key. `asset_class="equity", kind="perpetual"` is the TradFi perpetual
-  pool. Binance Stocks is a separate `/sapi/v1/equity/*` product:
-  `kind="spot", asset_class="equity"` uses its API-key-authenticated
-  `exchangeInfo` catalog and plain tickers such as `MU`/`GOOGL` (the website's
-  `EQ_GOOGL` is a page route, not the API symbol). Its current REST API exposes
-  latest quotes but no historical OHLCV, so discovery does not fabricate a
-  built-in `RunConfig` bar route. Binance discovery requires an explicit
-  `kind`; spot discovery also requires `asset_class` so separate product
-  catalogs are never silently omitted.
-- Shioaji discovery uses the authenticated session's
-  `contracts.futures(root)` result, including exact contracts and native R1/R2
-  aliases.
+- Binance Stocks is a separate `/sapi/v1/equity/*` product: discovery uses its
+  API-key-authenticated `exchangeInfo` catalog and plain tickers such as
+  `MU`/`GOOGL` (the website's `EQ_GOOGL` is a page route, not the API symbol).
+  Its current REST API exposes latest quotes but no historical OHLCV, so
+  discovery does not fabricate a built-in `RunConfig` bar route.
 - IBKR discovery uses the connected read-only TWS/Gateway session's
   `reqContractDetails`. Futures require an exchange.
 
@@ -354,30 +357,7 @@ in that catalog snapshot. Selecting such a dated result pins its
 discovery convenience from silently changing live exposure. Backtests have no
 roll ledger, so they refuse a TAIFEX alias position held through its final
 settlement session rather than booking the gap between contracts (see the
-[backtest data contract](docs/guides/engine-usage.md#local-artifact-boundary)).
-
-Discovery can feed an adapter directly without YAML:
-
-```python
-from librae.brokers.crypto_adapter import CryptoAdapter
-from librae import available_symbols
-
-binance = CryptoAdapter(exchange_id="binance")
-btc = available_symbols(
-    "binance",
-    query="BTCUSDT",
-    kind="perpetual",
-    asset_class="crypto",
-    adapter=binance,
-)
-btc_perpetual = btc[0]
-bars = binance.fetch_ohlcv(
-    btc_perpetual.venue_symbol,
-    "1h",
-    limit=500,
-    **btc_perpetual.market_data_kwargs(),
-)
-```
+[backtest data contract](docs/guides/engine-usage.md#backtest-data-contract)).
 
 For a `RunConfig`, use `candidate.canonical_symbol`,
 `candidate.instrument_override()`, and `candidate.cost_override()` to build the
@@ -420,16 +400,13 @@ librae/
 │   ├── run_config.py         RunConfig + ExecutionPolicy + RiskPolicy — typed run parameters
 │   └── utils.py              generate_run_id, infer_timeframe, to_ccxt, to_canonical
 │
-├── artifacts.py              format-neutral manifest + tabular research/export boundary
-├── data.py                   explicit caller-side bar normalization
 ├── integrations.py           stable public protocols and broker value types
-├── testing.py                offline adapter and feature-causality conformance helpers
+├── testing.py                offline feature-causality check
 │
 ├── backtest/                 backtest runtime
 │   ├── engine.py             Backtest — bar-by-bar execution + optional position snapshots + build_output()
 │   ├── result.py             raw side-effect-free backtest result models
-│   ├── schema.py             BacktestOutput, RunMetadata, StrategyMetrics, PositionEventRecord, PositionSnapshotPoint
-│   └── charts.py             plot_kbars — overlays position_events entries/exits via lightweight-charts (pure rendering, no recomputation, for local research; [extra: viz])
+│   └── schema.py             BacktestOutput, RunMetadata, StrategyMetrics, PositionEventRecord, PositionSnapshotPoint
 │
 ├── live/                     real-time / sim runtime
 │   ├── engine.py             LiveTrader — data-driven multi-symbol polling events
@@ -501,7 +478,7 @@ document scoped to layering, boundaries, and naming conventions.
 | Type | Description |
 |------|------|
 | `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioWeights` |
-| `Context` | immutable event snapshot: current bars, positions, one account snapshot, and callback period index |
+| `Context` | immutable event snapshot: current bars, positions, one account snapshot, callback period index, and the TAIFEX continuous aliases whose next session is their final settlement |
 | `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
 | `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` identifies related legs — backtest/sim stage them as one local fill-or-kill unit, while live preflights them before serial broker submission and does not claim venue atomicity (see the [related multi-leg contract](docs/guides/engine-usage.md#related-multi-leg-order-contract)); `time_in_force` (`day`/`gtc`/`ioc`/`fok`) sets the order lifetime — backtest/sim model it from bar data (eligible-event count plus whether a short fill counts, measured against the engine's own participation limits, never book depth), while live delegates the real lifetime to the broker |
@@ -565,11 +542,9 @@ document scoped to layering, boundaries, and naming conventions.
 - **Optional integrations, caller-owned reporting**: core metrics use NumPy;
   exchange calendars, CLI YAML, DB, broker, and notification dependencies are
   loaded only by their opt-in features. `librae/core/metrics.py` computes
-  (DataFrames/primitives, no chart dependency); charting/HTML reports on top
-  of that are not a librae feature at all — `librae.plot_kbars` (K-line/marker
-  overlay) is the one chart librae ships, since there is essentially one
-  correct way to draw it. See `examples/trade_report.py` for the caller-owned
-  pattern and
+  (DataFrames/primitives, no chart dependency); charting and HTML reports on
+  top of that are not a librae feature. See `examples/trade_report.py` for the
+  caller-owned pattern and
   [Product position and system boundaries](#product-position-and-system-boundaries).
 - **PositionState in core**: backtest and live share the same mutable position type, tracking `total_entry_cost` to avoid float drift when scaling.
 - **Pre-computed bars**: `_precompute_bars()` converts the DataFrame to a dict-of-dicts once up front, avoiding a per-bar `to_dict()` call in the hot loop.
@@ -761,7 +736,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `adapter` | callable `adapter(symbol, timeframe, limit, *, drop_incomplete=False) -> pd.DataFrame`, a concrete object with `fetch_ohlcv`, or a per-symbol mapping; UTC `ts` + OHLCV are required and extra point-in-time columns are preserved |
 | `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return, gross_exposure, net_exposure, concentration, turnover)` |
 | `on_position_event` | `on_position_event(event, sequence)` — an `OrderEvent` plus its restart-stable sequence; fires on open/add/reduce/close, only after a checkpoint holds the fill. A failed call propagates by default. A sink that declares `durable_position_event_delivery = True` instead has a failed event kept in memory and offered again, in sequence order, every later cycle, so it must be idempotent on `sequence`; the queue is not checkpointed, so a crash drops it. The first refusal sets `position_event_delivery_degraded` and alerts once; the flag clears after `POSITION_EVENT_RECOVERY_CYCLES` clean poll cycles, and only then can it alert again. An event refused for `MAX_POSITION_EVENT_ATTEMPTS` poll cycles, or the oldest once the queue passes `MAX_PENDING_POSITION_EVENTS`, is dropped, so one event the sink never accepts cannot hold back later ones. A dropped sequence is always logged and listed in `dropped_position_event_sequences` for the process; it is also offered as a runtime event, which a runtime-event sink on the same unavailable database will not keep |
-| `on_financing_cash_flow` | `on_financing_cash_flow(cash_flow)` — a `FundingCashFlow`; simulation only |
+| `on_financing_cash_flow` | `on_financing_cash_flow(cash_flow)` — a `FinancingCashFlow`; simulation only |
 | `on_runtime_event` | `on_runtime_event(event)` — a `RuntimeEvent`; operational audit trail (state restoration, skipped decisions, halts, halt resets, group failures), not a fill. A halt, reset or group failure is offered only after it has happened, stamped with the wall clock, and a failed call for one is logged, never raised. One recorded while the checkpoint is failing is held in memory and offered once a checkpoint lands, so a sink on the same database does not drop it; shutdown offers it or logs it as dropped, and a crash before then loses it, even from a run that restores halted |
 | `on_ohlcv` | `on_ohlcv(symbol, timeframe, bar, ts)` — audit projection; `bar` includes OHLCV, `available_at`, and `observed_at`, when the engine first received that version. Best-effort by default: a failed call is logged and not retried. A sink that declares `durable_ohlcv_delivery = True` instead gets at-least-once delivery — the row is queued in the checkpoint before it is offered and dropped only once the call returns, so a failed write or a crash replays it. Sinks must be idempotent either way, and the queue is bounded: reaching the bound drops loudly — each dropped identity is recorded and `ohlcv_audit_degraded` reports it — rather than halting the book for data that is re-fetchable |
 | `on_ohlcv_batch` | `on_ohlcv_batch(symbol, timeframe, bars)` — optional many-bar path of the same sink, `bars` being `(ts, bar)` pairs in ts order; the engine uses it for a decision's unrecorded window and a restart's re-read, which can run to thousands of bars, and otherwise sends them through `on_ohlcv` one by one. Only valid with `on_ohlcv`. Best-effort: a failure is logged and the rest skipped. A durable sink's queued rows also go through it, a run of one symbol's rows per call, so it must raise on a failed write as `on_ohlcv` does, and must declare `durable_ohlcv_delivery` as well: the constructor refuses one that does not |
@@ -890,7 +865,7 @@ flowchart TD
 | `entry_at` | when a position was entered | `position_events`, `Position`, `PositionState`, `TradeResult`, `PositionEvent`, `PositionEventRecord` |
 | `exit_at` | when a trade was exited | `TradeResult` |
 | `last_heartbeat_at` | last time the running process reported itself alive | `backtest_runs` |
-| `available_at` | earliest safe observation time of one bar version; late corrections may be non-monotonic across `ts` | `run_bars`, the `on_ohlcv` bar, normalized market-data artifacts |
+| `available_at` | earliest safe observation time of one bar version; late corrections may be non-monotonic across `ts` | `run_bars`, the `on_ohlcv` bar |
 | `observed_at` | wall-clock time a sim/live engine received one bar version, kept by a queued row across retries and restarts; a bar first stored by a restart's re-read carries the restart's time; NULL for bars a backtest stored, which it replayed rather than observed | `run_bars`, the `on_ohlcv` bar |
 
 ### Current tables

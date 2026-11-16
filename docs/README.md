@@ -19,9 +19,6 @@ you need the reasoning behind a decision or the implementation history.
 | Set up the DB, the monitoring console, a broker, or a deployment | [Optional infrastructure](guides/optional-infrastructure.md) |
 | Change Librae itself: setup, doc and commit conventions | [Contributing](../CONTRIBUTING.md) |
 
-For saving data or backtest results to a local format such as Parquet or
-SQLite, see [Local artifacts](guides/local-artifacts.md).
-
 ## Document types
 
 | Location | Purpose | Maintenance rule |

@@ -7,6 +7,7 @@ import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import psycopg2
 import pytest
 from librae.core.run_config import AccountConfig, RunConfig
 from librae.orchestration.cli import (
@@ -364,7 +365,6 @@ class TestBuildRun:
         )
 
         capped, _ = build_run("test_strat", str(tmp_path / "run.py"))
-        assert capped.execution.default_fill_price == "open"
         assert capped.execution.max_bar_volume_participation_rate == 0.1
 
         config_path.write_text(
@@ -374,7 +374,6 @@ class TestBuildRun:
                   symbol: MU
                   timeframe: 1d
                   execution:
-                    default_fill_price: open
                     max_bar_volume_participation_rate: null
                     max_rebalance_delay_bars: 2
                     rebalance_residual_policy: defer_symbols
@@ -384,7 +383,6 @@ class TestBuildRun:
             )
         )
         unlimited, _ = build_run("test_strat", str(tmp_path / "run.py"))
-        assert unlimited.execution.default_fill_price == "open"
         assert unlimited.execution.max_bar_volume_participation_rate is None
         assert unlimited.execution.max_rebalance_delay_bars == 2
         assert unlimited.execution.rebalance_residual_policy == "defer_symbols"
@@ -575,6 +573,10 @@ class TestCheckExistingRun:
     the DB isn't available — an unset TIMESCALE_DSN or an unreachable
     Postgres shouldn't crash a backtest that only wanted a dedup check."""
 
+    @pytest.fixture(autouse=True)
+    def _dsn(self, monkeypatch):
+        monkeypatch.setenv("TIMESCALE_DSN", "postgresql://localhost:1/unused")
+
     def test_timescale_dsn_unset_returns_none(self, monkeypatch):
         monkeypatch.delenv("TIMESCALE_DSN", raising=False)
         monkeypatch.delitem(sys.modules, "db", raising=False)
@@ -603,9 +605,19 @@ class TestCheckExistingRun:
 
         with patch(
             "librae.db.timescale_reader.get_run_by_backtest_cache_key",
-            side_effect=OSError("connection refused"),
+            side_effect=psycopg2.OperationalError("connection refused"),
         ):
             assert check_existing_run(_make_cfg(), "revision-a") is None
+
+    def test_a_reader_bug_is_not_mistaken_for_an_unreachable_database(self):
+        with (
+            patch(
+                "librae.db.timescale_reader.get_run_by_backtest_cache_key",
+                side_effect=TypeError("the JSON object must be str, not dict"),
+            ),
+            pytest.raises(TypeError),
+        ):
+            check_existing_run(_make_cfg(), "revision-a")
 
     def test_missing_revision_disables_cache_lookup(self):
         config = _make_cfg()

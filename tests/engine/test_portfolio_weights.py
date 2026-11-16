@@ -25,6 +25,8 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 
+from tests.conftest import primary_subscriptions_for
+
 TS = datetime(2026, 7, 27, tzinfo=UTC)
 
 
@@ -452,7 +454,6 @@ class TestRebalanceExecution:
                 PortfolioWeights(weights={"A": 0.3}),
                 bars,
                 get_cost_model=lambda _symbol: CostModel.zero(),
-                default_fill="open",
                 primary_symbol="A",
                 max_bar_volume_participation_rate=0.1,
                 used_adv_quantity_by_symbol=used_adv_quantity,
@@ -482,7 +483,6 @@ class TestRebalanceExecution:
                 PortfolioWeights(weights={"A": 0.5, "B": 0.5}),
                 bars,
                 get_cost_model=lambda _symbol: CostModel.zero(),
-                default_fill="open",
                 primary_symbol="A",
                 max_bar_volume_participation_rate=None,
                 exposure_prices={"A": 100.0, "B": 100.0},
@@ -520,7 +520,6 @@ class TestRebalanceExecution:
                 PortfolioWeights(weights={"B": 1.0}),
                 bars,
                 get_cost_model=lambda _symbol: CostModel.zero(),
-                default_fill="open",
                 primary_symbol="A",
                 max_order_notional=500.0,
                 max_bar_volume_participation_rate=None,
@@ -553,7 +552,6 @@ class TestRebalanceExecution:
                 PortfolioWeights(weights={"A": 0.5}),
                 bars,
                 get_cost_model=lambda _symbol: CostModel.zero(),
-                default_fill="open",
                 primary_symbol="A",
                 max_position_notional=200.0,
                 max_bar_volume_participation_rate=None,
@@ -582,7 +580,6 @@ class TestRebalanceExecution:
             PortfolioWeights(weights={"A": 0.5}),
             bars,
             get_cost_model=lambda _symbol: CostModel.zero(),
-            default_fill="open",
             primary_symbol="A",
             max_position_notional=200.0,
             max_bar_volume_participation_rate=None,
@@ -618,6 +615,7 @@ class TestBacktestRebalance:
             initial_balance=1_000.0,
             cost_model=CostModel.zero(),
             data_source="test",
+            primary_subscriptions=primary_subscriptions_for(frame),
         )
 
         result = backtest.run()
@@ -648,6 +646,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_symbols",
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         opens = [event for event in result.position_events if event.event_type == "open"]
@@ -684,6 +683,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_symbols",
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         b_open = next(
@@ -761,6 +761,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_symbols",
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         a_open = next(event for event in result.position_events if event.symbol == "A")
@@ -868,6 +869,7 @@ class TestBacktestRebalance:
                 max_bar_volume_participation_rate=None,
                 max_rebalance_delay_bars=1,
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         open_events = [event for event in result.position_events if event.event_type == "open"]
@@ -901,6 +903,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
             ),
             record_position_snapshots=True,
+            primary_subscriptions=primary_subscriptions_for(frame),
         )
         backtest.run()
         output = backtest.build_output()
@@ -939,6 +942,7 @@ class TestBacktestRebalance:
                     max_bar_volume_participation_rate=None,
                     max_rebalance_delay_bars=1,
                 ),
+                primary_subscriptions=primary_subscriptions_for(frame),
             ).run()
 
     def test_deferred_rebalance_fails_if_the_backtest_ends(self) -> None:
@@ -968,6 +972,7 @@ class TestBacktestRebalance:
                     max_bar_volume_participation_rate=None,
                     max_rebalance_delay_bars=2,
                 ),
+                primary_subscriptions=primary_subscriptions_for(frame),
             ).run()
 
     def test_new_target_supersedes_a_deferred_rebalance(self) -> None:
@@ -1000,6 +1005,7 @@ class TestBacktestRebalance:
                 max_bar_volume_participation_rate=None,
                 max_rebalance_delay_bars=1,
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         opens = [event for event in result.position_events if event.event_type == "open"]
@@ -1034,6 +1040,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_all",
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         opens = [event for event in result.position_events if event.event_type == "open"]
@@ -1141,6 +1148,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_symbols",
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         opens = [event for event in result.position_events if event.event_type == "open"]
@@ -1186,6 +1194,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=2,
                 rebalance_residual_policy="defer_symbols",
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         entries = [event for event in result.position_events if event.event_type in ("open", "add")]
@@ -1582,6 +1591,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=2,
                 rebalance_residual_policy="defer_symbols",
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         first_slice = [
@@ -1650,6 +1660,7 @@ class TestBacktestRebalance:
             cost_model=CostModel.zero(),
             data_source="test",
             record_position_snapshots=True,
+            primary_subscriptions=primary_subscriptions_for(frame),
         )
         backtest.run()
         output = backtest.build_output()

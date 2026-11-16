@@ -17,12 +17,12 @@ from .backtest.schema import (
     BacktestOutput,
     EquityCurvePoint,
     FinancingCashFlowRecord,
+    PositionEventRecord,
     PositionSnapshotPoint,
     RunMetadata,
     StrategyMetrics,
     RUN_ID_PATTERN,
 )
-from .backtest.charts import plot_kbars
 from .backtest.engine import Backtest
 from .backtest.result import (
     AccountBacktestResult,
@@ -32,12 +32,7 @@ from .backtest.result import (
     PortfolioSnapshot,
     PositionSnapshot,
 )
-from .core.cost_model import (
-    CostModel,
-    SymbolDescription,
-    describe_symbols,
-    margin_rate_from_absolute,
-)
+from .core.cost_model import CostModel
 from .core.strategy import (
     AccountSnapshot,
     OrderIntent,
@@ -52,6 +47,7 @@ from .core.strategy import (
     StrategyDecision,
 )
 from .core.executor import (
+    REASON_FORCE_CLOSE,
     TradePnL,
     TradeResult,
     calc_equity,
@@ -62,7 +58,10 @@ from .core.executor import (
 from .core.financing import (
     BORROW_RATE_MAX_AGE_QUOTING_PERIODS,
     FinancingCashFlow,
+    FinancingLifecycleEvent,
     attach_borrow_rate,
+    attach_funding_rate,
+    attribute_financing_to_closes,
 )
 from .core.metrics import (
     DEFAULT_SERIES_METRICS,
@@ -76,7 +75,6 @@ from .core.metrics import (
     compute_trade_entry_outcomes,
     compute_trade_lifecycle_outcomes,
     split_lifecycle_by_oos_start,
-    summarize_signal_mae_mfe,
     summarize_performance,
     summarize_trade_entry_outcomes,
     summarize_trade_lifecycle_outcomes,
@@ -92,16 +90,25 @@ from .core.run_config import (
     RunMode,
     RuntimePolicy,
 )
-from .core.utils import generate_run_id, infer_timeframe, to_ccxt, to_canonical
-from .config.market_config import MarketConfig, get_market
-from .config.symbols import AvailableSymbol, available_symbols
-from .artifacts import (
-    ARTIFACT_SCHEMA_VERSION,
-    TabularArtifact,
-    build_backtest_artifact,
-    build_market_data_artifact,
+from .core.taifex import taifex_final_settlement_day
+from .core.trading_calendar import (
+    TAIFEX_INDEX_CALENDAR,
+    next_segment_open_after,
+    period_close,
+    period_start,
+    session_label,
+    session_labels,
+    validate_session_mode,
 )
-from .data import normalize_bars
+from .core.utils import (
+    generate_run_id,
+    infer_timeframe,
+    interval_to_timedelta,
+    to_ccxt,
+    to_canonical,
+)
+from .config.market_config import MarketConfig, get_market
+from .config.symbols import AvailableSymbol, resolve_symbol
 
 __all__ = [
     "__version__",
@@ -111,6 +118,7 @@ __all__ = [
     "AllocationSnapshotPoint",
     "EquityCurvePoint",
     "FinancingCashFlowRecord",
+    "PositionEventRecord",
     "PositionSnapshotPoint",
     "RunMetadata",
     "StrategyMetrics",
@@ -118,9 +126,6 @@ __all__ = [
     "CostModel",
     "AccountConfig",
     "AccountSnapshot",
-    "SymbolDescription",
-    "describe_symbols",
-    "margin_rate_from_absolute",
     "MarketConfig",
     "MarketDataSubscription",
     "MarketDataView",
@@ -128,12 +133,7 @@ __all__ = [
     "BatchFeatureFn",
     "get_market",
     "AvailableSymbol",
-    "available_symbols",
-    "ARTIFACT_SCHEMA_VERSION",
-    "TabularArtifact",
-    "build_backtest_artifact",
-    "build_market_data_artifact",
-    "normalize_bars",
+    "resolve_symbol",
     "OrderIntent",
     "OrderAction",
     "PortfolioWeights",
@@ -147,7 +147,11 @@ __all__ = [
     "TradePnL",
     "BORROW_RATE_MAX_AGE_QUOTING_PERIODS",
     "FinancingCashFlow",
+    "FinancingLifecycleEvent",
     "attach_borrow_rate",
+    "attach_funding_rate",
+    "attribute_financing_to_closes",
+    "REASON_FORCE_CLOSE",
     "calc_trade_pnl",
     "side_multiplier",
     "simulate_fill",
@@ -168,13 +172,11 @@ __all__ = [
     "summarize_performance",
     "compute_performance_series",
     "compute_signal_outcomes",
-    "summarize_signal_mae_mfe",
     "compute_trade_lifecycle_outcomes",
     "summarize_trade_lifecycle_outcomes",
     "compute_trade_entry_outcomes",
     "summarize_trade_entry_outcomes",
     "split_lifecycle_by_oos_start",
-    "plot_kbars",
     "RunConfig",
     "ExecutionPolicy",
     "RiskPolicy",
@@ -184,6 +186,15 @@ __all__ = [
     "RebalanceResidualPolicy",
     "generate_run_id",
     "infer_timeframe",
+    "interval_to_timedelta",
     "to_ccxt",
     "to_canonical",
+    "TAIFEX_INDEX_CALENDAR",
+    "next_segment_open_after",
+    "period_close",
+    "period_start",
+    "session_label",
+    "session_labels",
+    "validate_session_mode",
+    "taifex_final_settlement_day",
 ]

@@ -9,13 +9,23 @@ Naming convention:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import fields
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from librae.backtest.schema import RunMetadata, StrategyMetrics
+from librae.backtest.schema import (
+    AccountPerformance,
+    BacktestOutput,
+    EquityCurvePoint,
+    FinancingCashFlowRecord,
+    PositionEventRecord,
+    RunMetadata,
+    StrategyMetrics,
+)
 from librae.core.market_data import MarketDataSubscription
 from librae.db import get_conn
 
@@ -55,38 +65,10 @@ def get_run_by_backtest_cache_key(
         return None
     return {
         "run_id": row[0],
-        "params": json.loads(row[1]) if row[1] else None,
-        "execution_policy": json.loads(row[2]) if row[2] else None,
-        "risk_policy": json.loads(row[3]) if row[3] else None,
-        "session_mode": row[4],
-    }
-
-
-def get_run_by_config_hash(
-    config_hash: str,
-    dsn: str | None = None,
-) -> dict[str, Any] | None:
-    """Find the most recent run with the given config_hash.
-
-    Returns run configuration metadata, or None if not found.
-    Existing old runs (config_hash=NULL) are not affected.
-    """
-    sql = """SELECT run_id, params, execution_policy, risk_policy, session_mode
-             FROM backtest_runs
-             WHERE config_hash = %s
-             ORDER BY run_at DESC LIMIT 1"""
-    with get_conn(dsn) as conn:
-        cur = conn.cursor()
-        cur.execute(sql, (config_hash,))
-        row = cur.fetchone()
-        cur.close()
-    if not row:
-        return None
-    return {
-        "run_id": row[0],
-        "params": json.loads(row[1]) if row[1] else None,
-        "execution_policy": json.loads(row[2]) if row[2] else None,
-        "risk_policy": json.loads(row[3]) if row[3] else None,
+        # psycopg2 decodes jsonb columns itself.
+        "params": row[1],
+        "execution_policy": row[2],
+        "risk_policy": row[3],
         "session_mode": row[4],
     }
 
@@ -97,7 +79,7 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
     Returns the run's RunMetadata (strategy_name/symbols/timeframe/data_source/
     started_at/ended_at/run_at/mode) — the identity fields a caller needs to
     label a report or chart. For the resolved config used to decide backtest
-    cache reuse, see get_run_by_config_hash()/get_run_by_backtest_cache_key().
+    cache reuse, see get_run_by_backtest_cache_key().
     """
     sql = """SELECT run_id, strategy_name, symbols, timeframe, data_source,
                      started_at, ended_at, run_at, mode, session_mode,
@@ -124,22 +106,6 @@ def get_run(run_id: str, dsn: str | None = None) -> RunMetadata | None:
         session_mode=row[9],
         primary_subscriptions=_parse_primary_subscriptions(row[10]),
     )
-
-
-def get_latest_run_id(strategy_name: str | None = None, dsn: str | None = None) -> str | None:
-    """Return the most recent run_id, optionally filtered by strategy."""
-    sql = "SELECT run_id FROM backtest_runs"
-    params: list = []
-    if strategy_name:
-        sql += " WHERE strategy_name = %s"
-        params.append(strategy_name)
-    sql += " ORDER BY run_at DESC LIMIT 1"
-    with get_conn(dsn) as conn:
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        row = cur.fetchone()
-        cur.close()
-    return row[0] if row else None
 
 
 def load_runs(limit: int = 20, dsn: str | None = None) -> pd.DataFrame:
@@ -292,32 +258,6 @@ def row_to_strategy_metrics(row: Mapping[str, Any]) -> StrategyMetrics:
     return StrategyMetrics(**{name: row[name] for name in field_names})
 
 
-def derive_trade_signals(run_id: str, dsn: str | None = None) -> pd.DataFrame:
-    """Derive a synthetic entry/exit signal series from position_events (open=entry,
-    close/reduce=exit) — i.e. the strategy_name's actual executed fills, NOT a read of
-    the separate signal_events table (which stores raw pre-execution signals for
-    quality monitoring)."""
-    sql = """
-        SELECT ts AS _time, account_id, currency, symbol,
-               CASE WHEN event_type IN ('open', 'add') THEN 'entry' ELSE 'exit' END AS signal_type,
-               price,
-               CASE WHEN side='long' AND event_type IN ('open','add') THEN 1.0
-                    WHEN side='short' AND event_type IN ('open','add') THEN -1.0
-                    WHEN side='long' AND event_type IN ('reduce','close') THEN -1.0
-                    ELSE 1.0
-               END AS signal_strength,
-               run_id
-        FROM position_events
-        WHERE run_id = %s
-        ORDER BY ts
-    """
-    with get_conn(dsn) as conn:
-        df = pd.read_sql(sql, conn, params=[run_id])
-    if not df.empty and "_time" in df.columns:
-        df["_time"] = pd.to_datetime(df["_time"], utc=True)
-    return df
-
-
 def load_run_bars(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     """Load the bars one run stored, the latest version of each.
 
@@ -343,3 +283,88 @@ def load_run_bars(run_id: str, dsn: str | None = None) -> pd.DataFrame:
         for column in ("_time", "available_at", "observed_at"):
             df[column] = pd.to_datetime(df[column], utc=True)
     return df
+
+
+def load_backtest_output(run_id: str) -> BacktestOutput:
+    """Rebuild one stored run as the ``BacktestOutput`` it was saved from.
+
+    Metrics are the stored ``strategy_performance`` row, not recomputed, so a
+    report agrees with every other reader of that row. A sim or live run still
+    going ends at its last equity point. Position and allocation snapshots and
+    runtime events are not part of the result.
+
+    Raises ``ValueError`` for an unknown run, one with no performance row yet
+    (a sim or live run gets one at its first close or settlement), or one
+    with more than one account.
+    """
+    run = get_run(run_id)
+    if run is None:
+        raise ValueError(f"no stored run {run_id!r}")
+    performance = load_performance(run_id)
+    if performance.empty:
+        raise ValueError(f"run {run_id!r} has no strategy_performance row")
+    if len(performance) > 1:
+        raise ValueError(f"run {run_id!r} has {len(performance)} accounts; expected one")
+    row = {key: _plain(value) for key, value in performance.iloc[0].items()}
+    account_id = row["account_id"]
+    equity = load_equity_curve(run_id, account_id=account_id)
+    if equity.empty:
+        raise ValueError(f"run {run_id!r} has no equity curve")
+    if run.ended_at is None:
+        run = dataclasses.replace(run, ended_at=equity["_time"].iloc[-1].to_pydatetime())
+    return BacktestOutput(
+        run_metadata=run,
+        account=AccountPerformance(
+            account_id=account_id,
+            currency=row["currency"],
+            initial_cash=float(row["initial_cash"]),
+            final_equity=float(row["final_equity"]),
+            net_pnl=float(row["net_pnl"]),
+            equity_curve=_records(equity, EquityCurvePoint),
+            metrics=row_to_strategy_metrics(row),
+        ),
+        position_events=_records(
+            load_position_events(run_id, account_id=account_id), PositionEventRecord
+        ),
+        position_snapshots=(),
+        allocation_snapshots=(),
+        financing_cash_flows=_records(
+            load_financing_cash_flows(run_id, account_id=account_id), FinancingCashFlowRecord
+        ),
+    )
+
+
+def _plain(value: Any) -> Any:
+    """A DataFrame cell as the builtin value the record types hold; NULL is None."""
+    if value is None or (not isinstance(value, (list, tuple, dict)) and pd.isna(value)):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+    if hasattr(value, "item") and not isinstance(value, datetime):
+        return value.item()
+    return value
+
+
+def _records(frame: pd.DataFrame, record_type: type) -> tuple:
+    """Rows of a ``load_*`` frame as ``record_type``; a NULL takes the field's default."""
+    record_fields = dataclasses.fields(record_type)
+    names = {field.name for field in record_fields}
+    with_default = {
+        field.name
+        for field in record_fields
+        if field.default is not dataclasses.MISSING
+        or field.default_factory is not dataclasses.MISSING
+    }
+    records = []
+    for row in frame.rename(columns={"_time": "ts"}).to_dict("records"):
+        values = {key: _plain(value) for key, value in row.items() if key in names}
+        records.append(
+            record_type(
+                **{
+                    key: value
+                    for key, value in values.items()
+                    if value is not None or key not in with_default
+                }
+            )
+        )
+    return tuple(records)

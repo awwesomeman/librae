@@ -1295,7 +1295,6 @@ def liquidate_all(
 def resolve_fill_price(
     bar: dict[str, float],
     intent: OrderIntent,
-    default_fill: str,
     *,
     position_side: PositionSide | None = None,
 ) -> float | None:
@@ -1304,22 +1303,17 @@ def resolve_fill_price(
     Args:
         bar: Next bar's OHLCV dict (the bar where the fill happens).
         intent: The order intent whose fill-price specification to use.
-        default_fill: Engine-level built-in mode. Only ``"open"`` is causal
-            under Librae's bar-start timestamp contract.
         position_side: Required to infer the order direction for a close.
 
     Returns:
         Resolved price, or None if the order should be rejected
         (limit not reachable, field missing/zero).
 
-    Numeric fill_spec models a resting limit order with full bar liquidity.
+    A limit price models a resting limit order with full bar liquidity.
     A buy fills when low reaches the limit; a sell fills when high reaches it.
     A gap through the limit receives the opening price, otherwise the limit.
     The intent is good for this eligible bar only.
     """
-    if default_fill != "open":
-        raise ValueError("default_fill supports only causal next-bar 'open'")
-    fill_spec: float | str = intent.limit_price if intent.limit_price is not None else default_fill
     order_side = _intent_order_side(intent, position_side)
     if order_side is None:
         logger.warning("Order rejected: cannot infer order side for %s", intent.action)
@@ -1332,8 +1326,8 @@ def resolve_fill_price(
         )
         return None
 
-    if isinstance(fill_spec, (int, float)):
-        limit = float(fill_spec)
+    if intent.limit_price is not None:
+        limit = float(intent.limit_price)
         if not isfinite(limit) or limit <= 0:
             return None
 
@@ -1365,11 +1359,10 @@ def resolve_fill_price(
             return None
         return min(open_price, limit) if order_side == "buy" else max(open_price, limit)
 
-    if isinstance(fill_spec, str):
-        val = bar.get(fill_spec)
-        if val is not None and float(val) > 0:
-            return float(val)
-        logger.warning("fill_price='%s' not found or zero in bar, order rejected", fill_spec)
+    val = bar.get("open")
+    if val is not None and float(val) > 0:
+        return float(val)
+    logger.warning("open price not found or zero in bar, order rejected")
     return None
 
 
@@ -3673,7 +3666,6 @@ def refused_short_symbols(
 def _intent_fill_timing(
     intent: OrderIntent,
     bar: dict[str, float],
-    default_fill: str,
     *,
     position_side: PositionSide | None = None,
 ) -> Literal["open", "intrabar"] | None:
@@ -3687,7 +3679,6 @@ def _intent_fill_timing(
         resolve_fill_price(
             bar,
             intent,
-            default_fill,
             position_side=position_side,
         )
         is None
@@ -3709,7 +3700,6 @@ def _intent_fill_timing(
 def _intent_executes_at_open(
     intent: OrderIntent,
     bar: dict[str, float],
-    default_fill: str,
     *,
     position_side: PositionSide | None = None,
 ) -> bool:
@@ -3718,7 +3708,6 @@ def _intent_executes_at_open(
         _intent_fill_timing(
             intent,
             bar,
-            default_fill,
             position_side=position_side,
         )
         == "open"
@@ -3798,7 +3787,6 @@ def _resting_fill_candidates(
     positions: dict[str, PositionState],
     bars: dict[str, dict[str, float]],
     *,
-    default_fill: str,
     primary_symbol: str,
     rebalance_state: PortfolioRebalanceState | None = None,
 ) -> list[_RestingFillCandidate]:
@@ -3821,7 +3809,6 @@ def _resting_fill_candidates(
             _intent_fill_timing(
                 intent,
                 bars.get(symbol, {}),
-                default_fill,
                 position_side=position.side,
             )
             != "intrabar"
@@ -3931,7 +3918,6 @@ def execute_pending_decision_and_stops(
     bars: dict[str, dict[str, float]],
     *,
     get_cost_model: Callable[[str], CostModel],
-    default_fill: str,
     primary_symbol: str,
     max_position_notional: float | None = None,
     max_order_notional: float | None = None,
@@ -3964,9 +3950,6 @@ def execute_pending_decision_and_stops(
 
     Returns (updated cash, combined ExecutionResult for both steps).
     """
-    if default_fill != "open":
-        raise ValueError("default_fill supports only causal next-bar 'open'")
-
     trades: list[TradeResult] = []
     events: list[PositionEvent] = []
     runtime_events: list[RuntimeEvent] = []
@@ -3986,7 +3969,6 @@ def execute_pending_decision_and_stops(
             pending_decision,
             positions,
             bars,
-            default_fill=default_fill,
             primary_symbol=primary_symbol,
             rebalance_state=rebalance_state,
         )
@@ -4021,7 +4003,6 @@ def execute_pending_decision_and_stops(
                 if intent.action in ("long", "short") and _intent_executes_at_open(
                     intent,
                     bars.get(symbol, {}),
-                    default_fill,
                 ):
                     same_bar_protection_symbols.add(symbol)
 
@@ -4029,7 +4010,6 @@ def execute_pending_decision_and_stops(
             return resolve_fill_price(
                 bars.get(sym, {}),
                 action,
-                default_fill=default_fill,
                 position_side=(
                     execution_positions[sym].side if sym in execution_positions else None
                 ),
@@ -4070,7 +4050,7 @@ def execute_pending_decision_and_stops(
                     execution_positions,
                     cash,
                     ts,
-                    get_reference_price=lambda sym: bars.get(sym, {}).get(default_fill),
+                    get_reference_price=lambda sym: bars.get(sym, {}).get("open"),
                     used_bar_quantity_by_symbol=used_bar_quantity_by_symbol,
                     used_adv_quantity_by_symbol=adv_quantities,
                     **common_kwargs,

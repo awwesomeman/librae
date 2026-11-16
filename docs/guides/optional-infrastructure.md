@@ -9,7 +9,6 @@ execution, notifications, monitoring, or deployment.
 | Component | Directory | Engine boundary |
 |---|---|---|
 | TimescaleDB analytics and runtime state | `librae/db/` | callbacks and `state_store` |
-| Local research artifacts | `librae/artifacts.py` | format-neutral manifest and tables |
 | Broker market data and order routing | `librae/brokers/` | `adapter` and `order_adapter` |
 | Telegram notifications | `librae/notifications/` | `notifier` |
 | Strategy CLI/config wiring | `librae/orchestration/` | strategy-owned `run.py` helpers |
@@ -64,7 +63,8 @@ instead reads `TRADE_TIMESCALE_DSN` and passes it into the trade container as
 
 Normal integrations call the high-level functions in
 `librae.db.timescale_writer` and `librae.db.timescale_reader`; upper layers should not issue
-ad hoc SQL. The repository runner skips database writes when
+ad hoc SQL. `timescale_reader.load_backtest_output(run_id)` rebuilds a stored run as the
+`BacktestOutput` it was saved from. The repository runner skips database writes when
 `RunOptions.database_enabled` is false.
 
 `instrument_type` values are validated in Python against
@@ -125,12 +125,7 @@ mismatch the runner does refuse — that guard lives inside checkpoint restore
 and cannot see a key that no longer resolves.
 
 With repository database wiring disabled, local research remains free of
-implicit persistence. Call
-`build_backtest_artifact()` or `build_market_data_artifact()` explicitly, then
-use pandas to write the returned tables to Parquet, SQLite, DuckDB, or another
-format. See `docs/guides/local-artifacts.md`. Librae defines the table and
-manifest shape; the caller owns file paths, overwrite policy, transactions,
-partitioning, and retention.
+implicit persistence; saving `BacktestOutput` elsewhere is caller-owned.
 
 Live execution is different: it requires durable runtime state. When
 constructing `LiveTrader` directly, inject your own durable `state_store`; the
@@ -312,23 +307,6 @@ Use the same non-empty name in `instrument_overrides.<symbol>.data_adapter`
 or `broker`. Registration is explicit; installing a package does not execute
 or discover plugin code automatically.
 
-Third-party packages can validate fixtures without connecting to a venue:
-
-```python
-from librae.testing import (
-    normalize_broker_report,
-    validate_bar_data,
-    validate_order_adapter,
-)
-
-validate_order_adapter(adapter)
-validate_bar_data(sample_bars)
-normalized = normalize_broker_report(sample_request, sample_broker_report)
-```
-
-Pass `adapter=` to `normalize_broker_report` when the adapter declares a compact
-`broker_client_order_id` form, so the client id check matches live execution.
-
 Every live order adapter must expose `execution_identity() ->
 ExecutionIdentity`. The value identifies the broker, environment class
 (`sandbox`, `paper`, or `production`), a sanitized endpoint/venue label, and an
@@ -352,10 +330,10 @@ independent options. You can instead inject your own notifier or persistence
 callbacks without installing that extra.
 
 See the LiveTrader callback signatures in `architecture.md` for the exact
-callable contracts. Callbacks such as `on_bar`, `on_order_event`, and `on_heartbeat` can feed an existing
-observability stack.
-`on_funding_cash_flow` receives each applied shadow-simulation funding event;
-live broker balances remain authoritative.
+callable contracts. Callbacks such as `on_bar`, `on_position_event`, and
+`on_heartbeat` can feed an existing observability stack.
+`on_financing_cash_flow` receives each applied shadow-simulation financing
+event; live broker balances remain authoritative.
 
 ## Deployment examples
 

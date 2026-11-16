@@ -72,7 +72,6 @@ Install only the integration you use:
 | `us-live` | IBKR US stocks and futures adapter |
 | `stocks-data` | Binance Stocks catalog and latest quotes |
 | `telegram` | Telegram notifications |
-| `viz` | Local trade-chart viewer |
 | `console` | Read-only Streamlit monitoring console over the database |
 
 For example:
@@ -111,7 +110,7 @@ repository `examples` package or enable a database, UI, notifier, or broker:
 ```python
 import pandas as pd
 
-from librae import Backtest, Context, OrderIntent, Strategy
+from librae import Backtest, Context, CostModel, OrderIntent, Strategy
 
 
 class BuyOnce(Strategy):
@@ -147,6 +146,7 @@ backtest = Backtest(
     data=data,
     strategy=BuyOnce(),
     initial_balance=10_000.0,
+    cost_model=CostModel.zero(),
     data_source="synthetic",
 )
 backtest.run()

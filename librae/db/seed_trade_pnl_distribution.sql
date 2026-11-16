@@ -28,7 +28,7 @@ VALUES
        {"symbol":"SOLUSDT","timeframe":"H1","calendar_id":"24/7","session_mode":"extended","data_source":"binance_spot","instrument_type":"spot"}]'::jsonb,
      NOW() - INTERVAL '200 hours', NOW(), NOW(),
      'backtest', NULL, '{}'::jsonb,
-     '{"default_fill_price": "open", "max_bar_volume_participation_rate": 0.1, "warmup_periods": 720}'::jsonb,
+     '{"max_bar_volume_participation_rate": 0.1, "warmup_periods": 720}'::jsonb,
      '{"max_position_weight": 0.3}'::jsonb,
      md5('seed_pnl_dist_run'))
 ON CONFLICT (run_id) DO NOTHING;

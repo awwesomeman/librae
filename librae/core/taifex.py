@@ -8,7 +8,12 @@ from __future__ import annotations
 from datetime import date, timedelta
 from functools import cache
 
-from librae.core.trading_calendar import TAIFEX_INDEX_CALENDAR, session_bounds
+from librae.core.trading_calendar import (
+    TAIFEX_INDEX_CALENDAR,
+    next_session_open,
+    session_bounds,
+    session_label,
+)
 from librae.core.utils import validate_contract_month
 
 
@@ -45,3 +50,22 @@ def taifex_final_settlement_day(contract_month: str) -> date:
             day += timedelta(days=1)
             continue
         return day
+
+
+@cache
+def final_settlement_follows(session: date) -> bool:
+    """Whether the TAIFEX session after ``session`` is a final settlement session.
+
+    A continuous alias switches contracts during that session, so a position
+    in it must be closed no later than that session's first open: a strategy
+    exits on a bar of ``session`` for which this is true.
+    """
+    following = session_label(
+        next_session_open(session, TAIFEX_INDEX_CALENDAR), TAIFEX_INDEX_CALENDAR
+    )
+    # A closure can defer the previous month's settlement into this month.
+    month_index = following.year * 12 + following.month - 1
+    return any(
+        taifex_final_settlement_day(f"{index // 12}{index % 12 + 1:02d}") == following
+        for index in (month_index - 1, month_index)
+    )

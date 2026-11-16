@@ -40,21 +40,7 @@ Callers must not pre-shift prices or signals to model that delay; doing so
 delays execution twice. Feature construction remains the caller's
 responsibility and must not use information unavailable at T.
 
-## Local artifact boundary
-
-`RunOptions(database_enabled=False)` tells repository orchestration not to
-attach TimescaleDB; it never selects another backend or writes a file
-implicitly.
-`build_market_data_artifact()` and
-`build_backtest_artifact()` expose versioned metadata plus logical pandas
-tables. Librae owns validation and table shape. The caller owns Parquet,
-SQLite, DuckDB, or other serialization details, including paths, overwrite
-policy, transactions, partitioning, and retention. There is intentionally no
-storage registry or sink hierarchy. See the
-[local artifact guide](local-artifacts.md).
-
-Artifacts are for research/export and do not satisfy live mode's durable
-state-store, active-order, reconciliation, or lease requirements.
+## Backtest data contract
 
 **Unshifted is a timing contract, not a price-adjustment flag.** The engine
 cannot infer whether OHLCV is adjusted. Execution-oriented tests should
@@ -75,10 +61,12 @@ limit reached inside the bar may be priced on the next contract), or when a
 position is carried over the session and the session has no bar. Only the
 session's first open still belongs to the old contract: exit by then and
 re-enter after the session if the strategy wants to stay exposed. When to roll
-stays a strategy decision.
-`librae.core.taifex.taifex_final_settlement_day` gives the settlement day of a
-contract month. Exact contracts (`contract_month`) and other venues'
-continuous aliases are not checked.
+stays a strategy decision: `Context.settles_next_session` holds the aliases
+whose next session is that settlement session, so a close decided on a bar
+where the symbol is in it fills by the session's first open.
+`taifex_final_settlement_day` gives the settlement day of a contract month.
+Exact contracts (`contract_month`) and other venues' continuous aliases are not
+checked.
 
 The backtest boundary fails fast on malformed input. Index levels must be
 exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps
@@ -94,11 +82,8 @@ entering the cache; an invalid refresh is logged and cannot create a new event.
 For an `OrderIntent`, `limit_price` is a one-eligible-bar limit order. A
 buy fills when the bar's low reaches the limit and a sell fills when its high
 does; a gap through receives the opening price. An unreached limit expires
-after that bar and is logged. Simulated market orders use
-`ExecutionPolicy.default_fill_price`, whose only supported value is `"open"`.
-This is the next eligible bar's open, available at Librae's bar-start event.
-Close/high/low and feature-column fills are rejected until the engine has an
-explicit value-availability timestamp contract. A strategy never embeds a
+after that bar and is logged. Simulated market orders fill at the next
+eligible bar's open, the first price available after the decision. A strategy never embeds a
 historical bar field in its decision. `PortfolioWeights` uses the same
 next-open policy; use per-symbol `OrderIntent`s for limits.
 
@@ -164,41 +149,12 @@ Librae engine per account and coordinates them outside the engine. Librae does
 not provide FX conversion, transfer, borrowing, settlement, cross-account
 netting, or atomic execution across runs.
 
-`librae.orchestration.supervisor` defines the optional boundary for that outer
-coordination. A `DeploymentSpec` gives one process a stable `deployment_id`
-bound to one `account_id`, currency, mode, strategy configuration, entry point,
-and account-specific credential reference. The deployment identity survives
-process restarts and is distinct from the engine's `run_id`.
-`validate_deployments()` rejects duplicate deployment identities and rejects
-two live deployments that claim the same account within one submitted
-manifest. The engine independently holds a durable account lease before any
-broker reconciliation or order work, so separate manifests and launch paths
-cannot concurrently control the same declared `account_id`.
-
-The `Supervisor` protocol exposes only `start`, `stop`, `inspect`, `restart`,
-`halt`, which asks a running process to halt trading without stopping it, and
-`reset_halt`, which asks it to reset that halt. Docker, systemd, Kubernetes, or another concrete process manager
-implements those operations and remains the lifecycle source of truth.
-`DeploymentStatus` carries observed identity, phase, timestamp, and optional
-process, run, exit, and failure facts; it is not a second state store.
-`librae.orchestration.docker_supervisor.DockerSupervisor` is the optional
-reference adapter for `deploy/trade.sh`; it reconstructs status from Docker
-rather than retaining a coordinator cache.
-
-| Owner | Responsibility |
-|---|---|
-| Engine | One account ledger, strategy execution, orders, risk, and restart-safe trading state |
-| External supervisor | Process lifecycle, restart/backoff policy, and resource isolation |
-| Deployment adapter | Translation between the `Supervisor` protocol and one concrete process manager |
-| DB, UI, monitoring, notifications | Read-only aggregation of account- and currency-labelled status |
-
-An orchestration process that restarts must recover status by inspecting the
-external supervisor and durable engine state. It must not infer status from an
-in-memory coordinator cache. One failed or unknown deployment remains an
-account-specific fact and cannot change the lifecycle of another deployment.
+Process lifecycle, restart policy and resource isolation belong to an external
+process manager (Docker, systemd, Kubernetes); the engine holds a durable
+account lease before any broker reconciliation or order work, so separate
+launch paths cannot concurrently control the same declared `account_id`.
 Readiness is published only after restored state, durable ownership, and
-startup broker reconciliation have completed. Normal stop is bounded and
-graceful; forced termination is an explicit operator action.
+startup broker reconciliation have completed.
 
 These identities have deliberately separate meanings:
 
@@ -562,7 +518,7 @@ night). `validate_session_mode` in `librae/core/trading_calendar.py` says which
 calendar takes which mode. It is part of `config_hash`, so backtest caches cannot reuse a
 run built from another bar set. The implicit/default `extended` value retains
 the legacy hash so an unchanged live run can recover its existing checkpoint.
-Market-data artifacts and stored run bars carry all six
+Stored run bars carry all six
 dimensions; run metadata stores the exact primary identities so readers never
 fall back to a broad run-level source/type match. Built-in IBKR wiring maps
 the generic session value to IBKR's `useRTH` request
@@ -571,9 +527,10 @@ whether its RTH is the TAIFEX day segment is unverified. Other concrete adapters
 `extended` until they can honor it; an
 injected callable is caller-owned and must already return bars matching the
 configured mode.
-Direct `Backtest(...)` construction may declare the same identity with its
-`primary_subscriptions` keyword. When `config` is supplied, the resolved
-instrument routes are authoritative and a competing supplied identity is
+Direct `Backtest(...)` construction declares the same identity with its
+`primary_subscriptions` keyword, which a multi-symbol frame requires: whether
+the symbols' bars start on one grid is read from their calendars. When
+`config` is supplied, the resolved instrument routes are authoritative and a competing supplied identity is
 rejected. The present event loop accepts one primary timeframe only; auxiliary
 frontier ordering is intentionally outside this foundation.
 
@@ -758,34 +715,6 @@ daily/session correctness over high-frequency throughput; lower strategy
 frequency reduces load but does not remove clock/order-state synchronization
 requirements.
 
-## Local trade-chart viewer
-
-Use after `pip install -e ".[viz]"`. It renders the OHLCV and
-`position_events` already present in `BacktestOutput`; it does not re-simulate
-fills or recompute PnL. The plotted markers therefore reflect those event
-records directly, while aggregate metrics remain owned by
-`librae/core/metrics.py`.
-
-```python
-from librae import plot_kbars
-from librae.db.charts import plot_trades_by_run_id
-
-ohlcv = df.xs(symbol, level="symbol")  # a single symbol's OHLCV
-plot_kbars(
-    ohlcv, output.position_events, symbol
-)  # right after a backtest run, output already in hand
-
-plot_trades_by_run_id(
-    run_id
-)  # or: skip rerunning the backtest, read a persisted run straight from the DB
-```
-
-`librae.db.charts.plot_trades_by_run_id` reads persisted `position_events` and the
-run's `run_bars` through `librae.db.timescale_reader`. The database adapter then calls
-the same format-neutral renderer as the in-memory form and does not rerun the strategy.
-A backtest stores bars only when saved with `store_bars=True`; without them the call
-returns `None`.
-
 ## Trade outcome analysis
 
 `librae/core/metrics.py` is the SSOT for reconstructing analytics lifecycles
@@ -809,9 +738,8 @@ fact/summary split is:
 already-reconstructed lifecycle/entry-outcome tables by `closed_at`/`anchor_ts`
 into in-sample/out-of-sample — split the computed tables, not `position_events`,
 so a lifecycle straddling the cutoff is not misclassified as incomplete.
-Charting or reporting on any of these DataFrames is caller-owned — librae only
-ships `plot_kbars` (the K-line/marker overlay); see `examples/trade_report.py`
-for the compute → tabular-report pattern.
+Charting or reporting on any of these DataFrames is caller-owned; see
+`examples/trade_report.py` for the compute → tabular-report pattern.
 
 MFE/MAE are gross, direction-adjusted percentage-point price excursions;
 costs and notional-weighted portfolio risk remain separate metrics. Adds
@@ -844,7 +772,6 @@ config = RunConfig(
     reconciliation_interval_seconds=300,
     market_data_workers=1,
     execution=ExecutionPolicy(
-        default_fill_price="open",
         max_bar_volume_participation_rate=0.1,
         # Optional session-level cap; both fields must be set together.
         adv_lookback_sessions=20,
@@ -892,9 +819,6 @@ concurrency. `LiveTrader.last_cycle_diagnostics` reports per-symbol fetch time,
 strategy time, broker-order time, total cycle time, and whether the cycle
 exceeded `RunConfig.runtime.poll_seconds`.
 
-- `default_fill_price`: backtest/sim fallback for market decisions. Only the
-  causal next-bar `"open"` is supported. It is not used to manufacture live
-  executions.
 - `max_bar_volume_participation_rate`: one cumulative per-symbol volume budget per
   simulated data event across entries, additions, reductions, ordinary
   closes, stops, modeled liquidation, drawdown exits, and terminal exits.
@@ -1303,12 +1227,26 @@ Backtest and shadow-simulation bars may contain a `funding_rate` observation,
 expressed as a decimal rate for that payment. `funding_mark_price` is optional;
 the same event's raw `close` is used when it is absent. Missing rates mean no
 payment: the engine never forward-fills or fetches them.
-When rates come from a stored factor series, the caller's data pipeline
-exact-joins each value as `funding_rate` on symbol and payment timestamp; an
-as-of join or forward fill would turn one payment into repeated charges.
+
+`attach_funding_rate(bars, settlements, timeframe=...)` builds the columns, and
+the live market-data binding uses it too, so both modes charge a settlement on
+the same bar: the bar whose `[ts, ts + timeframe)` contains it, summed when a
+bar holds several, or the next bar when it falls in a gap. It also writes
+`funding_settled_at`, the bar's latest settlement. A backtest refuses:
+
+- a `funding_rate` without `funding_settled_at`, or one settlement on more
+  than one bar (what an as-of join or forward fill produces);
+- `funding_rate` on a symbol whose `instrument_type` is not
+  `contract_perpetual`;
+- a perpetual with no `funding_rate` at all. Running one without funding
+  cost means attaching settlements whose rate is `0`.
 
 Funding is applied after the event's confirmed simulated fills and stops, and
-before its equity snapshot and strategy decision. Positive rates mean longs
+before its equity snapshot and strategy decision. Every fill of the bar comes
+first, a stop, take-profit or limit reached inside it included, so the position
+left after them pays a settlement in that bar wherever inside it the
+settlement fell; backtest and sim order it the same way. A settlement published
+after sim processed its bar is paid on the next one. Positive rates mean longs
 pay shorts:
 
 `cash_flow = -side_sign * quantity * mark_price * multiplier * funding_rate`
@@ -1724,9 +1662,8 @@ financial/execution fact.
   state and emits a diagnostic. Missing/invalid configuration and missing
   accounting, risk, position, or execution facts raise an explicit error.
   Catch-and-default behavior at those boundaries is prohibited.
-- Direct `Backtest(...)` construction without a config or cost model uses
-  `CostModel.zero()` and next-open fills as a documented research default.
-  Production-like research should pass an explicit cost model.
+- Direct `Backtest(...)` construction without a config requires a
+  `cost_model`; a cost-free run passes `CostModel.zero()` explicitly.
 - A registered spot instrument may derive multiplier `1.0`; contract
   multipliers, broker routes, currencies, and unresolved execution prices are
   never guessed.

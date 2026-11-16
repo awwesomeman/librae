@@ -91,7 +91,6 @@ separate namespaces:
 ```yaml
 strategy:
   execution:
-    default_fill_price: open
     max_bar_volume_participation_rate: 0.05
     adv_lookback_sessions: 20
     max_adv_participation_rate: 0.01

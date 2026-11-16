@@ -171,6 +171,18 @@ def test_a_backtest_refuses_a_24_7_day_against_an_xnys_day() -> None:
         )
 
 
+def test_a_direct_backtest_cannot_skip_the_grid_check_by_omitting_subscriptions() -> None:
+    days = ["2026-01-05", "2026-01-06", "2026-01-07"]
+    data = pd.concat(
+        [
+            _frame("A", days, [100, 150, 150]),
+            _frame("B", [f"{day} 14:30" for day in days], [100, 100, 100]),
+        ]
+    )
+    with pytest.raises(ValueError, match="requires primary_subscriptions"):
+        Backtest(data, _Idle(), strategy_name="grid", cost_model=CostModel.zero())
+
+
 def test_live_refuses_misaligned_grids_at_construction() -> None:
     symbols = ["A", "B"]
     calendars = {"A": "24/7", "B": "XNYS"}

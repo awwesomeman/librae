@@ -12,9 +12,9 @@ what it is           a discrete settlement            a rate that stays in
                                                       force until repriced
 who pays             both sides, sign follows the     the short only
                      position
-joined onto bars     nearest match, tight tolerance   backward as-of, bounded
-                     (the payment owns one bar)       carry (see
-                                                      attach_borrow_rate)
+joined onto bars     the one bar containing the       backward as-of, bounded
+                     settlement (see                  carry (see
+                     attach_funding_rate)             attach_borrow_rate)
 quoted per           contract                         borrowed currency
 endpoint             public                           signed -- needs
                                                       credentials, and its
@@ -41,6 +41,7 @@ from librae.core.strategy import PositionEventType, PositionSide, PositionState
 from librae.core.utils import interval_to_timedelta
 
 FUNDING_RATE_FIELD = "funding_rate"
+FUNDING_SETTLED_AT_FIELD = "funding_settled_at"
 FUNDING_MARK_PRICE_FIELD = "funding_mark_price"
 BORROW_RATE_FIELD = "borrow_rate"
 
@@ -326,7 +327,8 @@ def calculate_funding_cash_flows(
 
     ``funding_rate`` is a decimal rate per payment. A positive rate means
     longs pay shorts. ``funding_mark_price`` is optional and otherwise falls
-    back to the same event's raw close. Missing rates are not forward-filled.
+    back to the same event's raw close. Missing rates are not forward-filled;
+    ``attach_funding_rate`` places each settlement on the bar it is paid in.
 
     Returns the symbols whose observations were consumed and the payments for
     symbols with confirmed open positions.
@@ -373,6 +375,80 @@ def calculate_borrow_cash_flows(
         kind="borrow",
         mark_price_field=None,
     )
+
+
+def attach_funding_rate(
+    bars: pd.DataFrame,
+    rates: pd.DataFrame,
+    *,
+    timeframe: str,
+) -> pd.DataFrame:
+    """Put each funding settlement on the one bar it is paid in.
+
+    Use this wherever a perpetual's bars are assembled -- a caller's backtest
+    data layer as much as the live market-data binding -- so both charge the
+    same position the same payments. The settlements may come from any
+    source:
+
+    - A settlement belongs to the bar whose ``[ts, ts + timeframe)`` contains
+      it, so the position held at that moment pays it whatever the bar size.
+      Several settlements in one bar are summed; a settlement in a gap between
+      bars is paid on the next bar rather than dropped.
+    - ``funding_settled_at`` records the bar's latest settlement. The backtest
+      refuses a frame in which one settlement is charged on more than one bar,
+      which is what an as-of join or a forward fill produces.
+
+    Args:
+        bars: Bars with a ``ts`` column (bar start), ascending.
+        rates: One row per settlement: ``ts``, the settlement time, and
+            ``funding_rate``, the decimal rate paid then. A missing rate or a
+            repeated settlement time raises: unknown is not free, and one
+            settlement is paid once.
+        timeframe: The bars' interval, in either ccxt or canonical form.
+
+    Returns ``bars`` with ``funding_rate`` and ``funding_settled_at`` columns,
+    NaN/NaT on bars with no settlement. Settlements before the first bar or
+    after the last one's end are left out.
+    """
+    out = bars.assign(
+        **{
+            FUNDING_RATE_FIELD: float("nan"),
+            FUNDING_SETTLED_AT_FIELD: pd.Series(
+                pd.NaT, index=bars.index, dtype="datetime64[ns, UTC]"
+            ),
+        }
+    )
+    if bars.empty or rates.empty:
+        return out
+    starts = pd.DatetimeIndex(bars["ts"])
+    ends = starts + interval_to_timedelta(timeframe)
+    settled = rates.sort_values("ts")
+    settled_at = pd.DatetimeIndex(settled["ts"])
+    if settled[FUNDING_RATE_FIELD].isna().any():
+        raise ValueError("funding settlements must all carry a funding_rate")
+    if not settled_at.is_unique:
+        raise ValueError("funding settlement times must be unique")
+    # The first bar ending after the settlement: the bar containing it, or the
+    # next bar when it fell in a gap.
+    positions = ends.searchsorted(settled_at, side="right")
+    keep = (settled_at >= starts[0]) & (positions < len(starts))
+    if not keep.any():
+        return out
+    per_bar = (
+        pd.DataFrame(
+            {
+                "position": positions[keep],
+                FUNDING_RATE_FIELD: settled[FUNDING_RATE_FIELD].astype(float).to_numpy()[keep],
+                FUNDING_SETTLED_AT_FIELD: settled_at[keep],
+            }
+        )
+        .groupby("position")
+        .agg({FUNDING_RATE_FIELD: "sum", FUNDING_SETTLED_AT_FIELD: "max"})
+    )
+    rows = out.index[per_bar.index.to_numpy()]
+    out.loc[rows, FUNDING_RATE_FIELD] = per_bar[FUNDING_RATE_FIELD].to_numpy()
+    out.loc[rows, FUNDING_SETTLED_AT_FIELD] = per_bar[FUNDING_SETTLED_AT_FIELD].to_numpy()
+    return out
 
 
 def attach_borrow_rate(

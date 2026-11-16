@@ -8,7 +8,6 @@ from librae.config.symbols import (
     AvailableSymbol,
     SymbolInfo,
     _build_registry,
-    available_symbols,
     canonicalize_price_to_increment,
     get_symbol,
     load_symbol_registry,
@@ -105,84 +104,6 @@ class TestAvailableSymbol:
             "multiplier": 2.0,
             "tick_size": 0.25,
         }
-
-    def test_dispatcher_forwards_filters_to_injected_adapter(self):
-        expected = (
-            AvailableSymbol(
-                broker="binance",
-                canonical_symbol="MUUSDT_PERP",
-                venue_symbol="MU/USDT:USDT",
-                native_symbol="MUUSDT",
-                name="MUUSDT",
-                kind="perpetual",
-                asset_class="equity",
-                currency="USDT",
-                instrument_type="contract_perpetual",
-                multiplier=1.0,
-            ),
-        )
-
-        class Adapter:
-            def available_symbols(self, **kwargs):
-                assert kwargs == {
-                    "query": "MU",
-                    "kind": "perpetual",
-                    "asset_class": "equity",
-                }
-                return expected
-
-        result = available_symbols(
-            "binance",
-            query="MU",
-            kind="perpetual",
-            asset_class="equity",
-            adapter=Adapter(),
-        )
-
-        assert result == expected
-
-    def test_dispatcher_routes_binance_stock_filters_to_injected_adapter(self):
-        expected = (
-            AvailableSymbol(
-                broker="binance",
-                canonical_symbol="MU",
-                venue_symbol="MU",
-                native_symbol="MU",
-                name="Micron Technology Inc.",
-                kind="spot",
-                asset_class="equity",
-                currency="USD",
-                instrument_type="spot",
-                security_type="STK",
-                exchange="NASDAQ",
-                multiplier=1.0,
-            ),
-        )
-
-        class Adapter:
-            def available_symbols(self, **kwargs):
-                assert kwargs == {
-                    "query": "MU",
-                    "kind": "spot",
-                    "asset_class": "equity",
-                }
-                return expected
-
-        result = available_symbols(
-            "binance",
-            query="MU",
-            kind="spot",
-            asset_class="equity",
-            adapter=Adapter(),
-        )
-
-        assert result == expected
-
-    def test_binance_requires_explicit_product_dimensions(self):
-        with pytest.raises(ValueError, match="requires kind"):
-            available_symbols("binance", query="BTCUSDT", asset_class="crypto")
-        with pytest.raises(ValueError, match="requires asset_class"):
-            available_symbols("binance", query="BTCUSDT", kind="spot")
 
 
 class TestInstrumentTypeValidation:

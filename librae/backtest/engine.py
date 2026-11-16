@@ -76,6 +76,8 @@ from librae.core.executor import (
     validate_strategy_decision,
 )
 from librae.core.financing import (
+    FUNDING_RATE_FIELD,
+    FUNDING_SETTLED_AT_FIELD,
     FinancingCashFlow,
     FinancingLifecycleEvent,
     attribute_financing_to_closes,
@@ -114,7 +116,7 @@ from librae.core.strategy import (
     Strategy,
     StrategyDecision,
 )
-from librae.core.taifex import taifex_final_settlement_day
+from librae.core.taifex import final_settlement_follows, taifex_final_settlement_day
 from librae.core.trading_calendar import (
     ALWAYS_OPEN_CALENDAR,
     TAIFEX_INDEX_CALENDAR,
@@ -1124,6 +1126,67 @@ def _resolve_data_timeframe(
     return data_timeframe
 
 
+def _validate_funding(
+    data: pd.DataFrame,
+    instrument_types: Mapping[str, str | None],
+    timeframe: str,
+) -> None:
+    """Refuse funding that would be charged on the wrong bars or instruments.
+
+    Every bar carrying a ``funding_rate`` is charged, so the frame alone
+    decides what a perpetual pays: a forward-filled rate charges every bar,
+    and a rate on a non-perpetual charges a position that pays no funding.
+    """
+    has_rates = FUNDING_RATE_FIELD in data.columns
+    period = interval_to_timedelta(timeframe)
+    for symbol, instrument_type in instrument_types.items():
+        if has_rates:
+            rows = data.xs(symbol, level="symbol")
+            charged = rows[rows[FUNDING_RATE_FIELD].notna()]
+        else:
+            charged = data.iloc[:0]
+        is_perpetual = instrument_type == "contract_perpetual"
+        if charged.empty:
+            if is_perpetual:
+                raise ValueError(
+                    f"{symbol!r} is a perpetual with no funding_rate observations; attach "
+                    "its settlements with attach_funding_rate. To run it without funding "
+                    "cost, attach settlements whose funding_rate is 0"
+                )
+            continue
+        if not is_perpetual:
+            raise ValueError(
+                f"{symbol!r} carries funding_rate but its instrument_type is "
+                f"{instrument_type!r}; only a contract_perpetual pays funding"
+            )
+        if FUNDING_SETTLED_AT_FIELD not in charged.columns:
+            raise ValueError(
+                f"{symbol!r} funding_rate has no {FUNDING_SETTLED_AT_FIELD}; build the "
+                "columns with attach_funding_rate"
+            )
+        settled_at = pd.to_datetime(charged[FUNDING_SETTLED_AT_FIELD], utc=True).to_numpy()
+        starts = pd.DatetimeIndex(rows.index)
+        # A settlement belongs to the bar containing it, or to the bar after a
+        # gap: after the previous bar's end and before its own bar's end.
+        previous_end = (
+            pd.Series(starts + period, index=starts)
+            .shift(1)
+            .fillna(pd.Series(starts, index=starts))
+        )
+        charged_starts = pd.DatetimeIndex(charged.index)
+        if (
+            pd.isna(settled_at).any()
+            or len(set(settled_at)) != len(settled_at)
+            or bool((settled_at >= (charged_starts + period).to_numpy()).any())
+            or bool((settled_at < previous_end.loc[charged_starts].to_numpy()).any())
+        ):
+            raise ValueError(
+                f"{symbol!r} funding settlements must each sit on the bar they are paid "
+                "in; a forward-filled, rounded or as-of-joined rate puts one on the wrong "
+                "bar or on many. Build the columns with attach_funding_rate"
+            )
+
+
 def _attribute_financing_to_trades(
     trades: Sequence[TradeResult],
     trade_notionals: Sequence[float],
@@ -1261,13 +1324,11 @@ class Backtest:
             raise TypeError("batch_feature_fn must be callable or None")
         data = _canonicalize_backtest_timestamps(data)
         normalized_auxiliary_data = _normalize_auxiliary_data(auxiliary_data)
-        if config is not None and config.auxiliary_subscriptions:
+        if config is not None:
             # Backtest is handed its auxiliary frames; live fetches them. A
-            # RunConfig that DECLARES them must therefore mean the same thing
-            # in both, or the same config silently yields a different
-            # ctx.market_data per mode. Passing frames without declaring them
-            # stays supported: that is the Python-API mixed-frequency path,
-            # which predates the declaration and never claimed live parity.
+            # RunConfig must therefore declare exactly the frames it is given,
+            # or the same config silently yields a different ctx.market_data
+            # per mode.
             declared = {
                 (auxiliary.symbol, auxiliary.timeframe)
                 for auxiliary in config.auxiliary_subscriptions
@@ -1360,6 +1421,14 @@ class Backtest:
             self._symbols = [item.symbol for item in supplied_subscriptions]
         else:
             self._symbols = data.index.get_level_values(0).unique().tolist()
+            if len(self._symbols) > 1:
+                # Whether the symbols' bars start on one grid is read from their
+                # calendars, which only subscriptions declare; without the check
+                # a decision on one symbol's bar can fill another's before it.
+                raise ValueError(
+                    "direct multi-symbol Backtest requires primary_subscriptions "
+                    "(or config) so their bar grids can be checked for alignment"
+                )
         self._timeline = sorted(data.index.get_level_values("datetime").unique())
         from librae.config.symbols import load_symbol_registry, resolve_symbol
 
@@ -1381,7 +1450,13 @@ class Backtest:
             self._initial_cash = initial_balance
             self._data_source = data_source
             resolved_name = None
-            resolved_cm = cost_model if cost_model is not None else CostModel.zero()
+            if cost_model is None:
+                # A run with no costs overstates every result; make it a choice.
+                raise ValueError(
+                    "direct Backtest requires cost_model; pass CostModel.zero() "
+                    "for a deliberately cost-free run"
+                )
+            resolved_cm = cost_model
         if config is not None:
             resolved_subscriptions = tuple(
                 subscription_from_instrument(
@@ -1448,7 +1523,6 @@ class Backtest:
                 if sym != config.symbol:
                     self._cost_models[sym] = CostModel.from_config(config, symbol=sym)
         resolved_execution = config.execution if config else execution or ExecutionPolicy()
-        self._fill_price = resolved_execution.default_fill_price
         self._max_bar_volume_participation_rate = (
             resolved_execution.max_bar_volume_participation_rate
         )
@@ -1554,7 +1628,6 @@ class Backtest:
             decision,
             bars,
             get_cost_model=self._get_cost_model,
-            default_fill=self._fill_price,
             primary_symbol=primary_symbol,
             max_position_notional=max_position_notional,
             max_order_notional=self._risk_policy.max_order_notional,
@@ -1630,6 +1703,18 @@ class Backtest:
                 self._data,
                 self._primary_subscriptions,
             )
+        subscription_types = {
+            item.symbol: item.instrument_type for item in self._primary_subscriptions
+        }
+        _validate_funding(
+            self._data,
+            {
+                symbol: subscription_types.get(symbol)
+                or (instrument.instrument_type if instrument is not None else None)
+                for symbol, instrument in self._instruments.items()
+            },
+            self._timeframe,
+        )
         market_data_replay = (
             _MarketDataReplay(
                 self._data,
@@ -1685,7 +1770,8 @@ class Backtest:
         rebalance_delay_bars = 0
         unavailable_rebalance_symbols: tuple[str, ...] = ()
         drawdown_exit_origins: dict[str, pd.Timestamp] = {}
-        roll_guard = _TaifexRollGuard(self._taifex_alias_session_labels())
+        alias_session_labels = self._taifex_alias_session_labels()
+        roll_guard = _TaifexRollGuard(alias_session_labels)
 
         available_by = self._availability_frontier() if market_data_replay is None else {}
         for ts in self._timeline:
@@ -2013,6 +2099,11 @@ class Backtest:
                     period_index=decision_index,
                     decision_at=(decision_at.to_pydatetime() if decision_at is not None else None),
                     market_data=market_data_view,
+                    settles_next_session=frozenset(
+                        symbol
+                        for symbol, labels in alias_session_labels.items()
+                        if ts in labels and final_settlement_follows(labels[ts])
+                    ),
                 )
                 new_decision = self._strategy.on_bar(ctx)
                 validate_strategy_decision(

@@ -8,7 +8,7 @@ execution and position sizing are introduced.
 ## Basic workflow
 
 ```python
-from librae import compute_signal_outcomes, summarize_signal_mae_mfe
+from librae import compute_signal_outcomes
 
 symbol_ohlcv = df.xs(symbol, level="symbol")
 signal_ts = symbol_ohlcv.index[
@@ -22,13 +22,10 @@ outcomes = compute_signal_outcomes(
     direction="long",
     price_col="open",
 )
-summary = summarize_signal_mae_mfe(
-    signal_ts,
-    symbol_ohlcv,
-)
 ```
 
-Charting `summary` (e.g. median/p75 MFE-MAE by horizon) is caller-owned. See
+Summarizing and charting `outcomes` (e.g. median/p75 MFE-MAE by horizon) is
+caller-owned. See
 `examples/trade_report.py` for the corresponding compute → tabular-report
 pattern.
 

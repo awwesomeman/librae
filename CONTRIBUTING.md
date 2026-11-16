@@ -13,7 +13,7 @@ uv sync --extra test --extra dev --extra db --extra crypto-live
 git config core.hooksPath .githooks
 ```
 
-Add `--extra tw-live`, `--extra us-live`, or `--extra viz` only when needed.
+Add `--extra tw-live` or `--extra us-live` only when needed.
 Standard editable installation also works when the caller does not use the
 repository's `uv` environment: `python -m pip install --editable .`
 

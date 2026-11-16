@@ -26,7 +26,6 @@ strategy:
       currency: USD
       security_type: STK
   execution:
-    default_fill_price: open
     max_bar_volume_participation_rate: 0.10
   risk:
     max_position_weight: 0.60

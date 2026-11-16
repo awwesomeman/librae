@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from functools import cached_property
 from math import isfinite
 from numbers import Real
@@ -30,7 +30,6 @@ LiveMode = Literal["sim", "live"]
 MarketDataSessionMode = Literal["regular", "extended", "overnight"]
 MARKET_DATA_SESSION_MODES: tuple[str, ...] = get_args(MarketDataSessionMode)
 RebalanceResidualPolicy = Literal["discard", "fail", "defer_all", "defer_symbols"]
-SimulatedFillPrice = Literal["open"]
 DEFAULT_POLL_SECONDS = 60
 # A runtime is stale after three missed poll-cycle heartbeats. Consumers use
 # the persisted poll_seconds rather than inferring cadence from the bar timeframe.
@@ -92,13 +91,9 @@ class AccountConfig:
 class ExecutionPolicy:
     """Run-wide matching and pre-trade liquidity assumptions.
 
-    ``default_fill_price`` is used by backtest and simulation when an intent
-    has no explicit limit. The only built-in mode is ``open``: it uses the
-    next bar's first observed price, whose availability matches Librae's
-    bar-start execution timestamp. Close/high/low and custom feature columns
-    are deliberately unsupported until the engine has a separate
-    ``available_at`` contract. Live market orders are filled by the broker and
-    do not use this bar field.
+    Backtest and simulation fill an intent without an explicit limit at the
+    next bar's open, the first price observed after the decision. Live market
+    orders are filled by the broker.
 
     ``max_bar_volume_participation_rate`` caps the cumulative filled quantity for
     one symbol in one bar. ``None`` disables the cap. With a cap enabled,
@@ -139,7 +134,6 @@ class ExecutionPolicy:
     invalidate recursive features, ADV, or strategy inputs.
     """
 
-    default_fill_price: SimulatedFillPrice = "open"
     max_bar_volume_participation_rate: float | None = 0.1
     adv_lookback_sessions: int | None = None
     max_adv_participation_rate: float | None = None
@@ -149,8 +143,6 @@ class ExecutionPolicy:
     rebalance_residual_policy: RebalanceResidualPolicy = "discard"
 
     def __post_init__(self) -> None:
-        if self.default_fill_price != "open":
-            raise ValueError("default_fill_price supports only causal next-bar 'open'")
         for field_name in (
             "max_bar_volume_participation_rate",
             "max_adv_participation_rate",
@@ -556,40 +548,24 @@ class RunConfig:
             not isinstance(self.calendar_id, str) or not self.calendar_id
         ):
             raise ValueError("calendar_id must be a non-empty string or None")
-        legacy_execution_keys = {
-            "fill_price",
-            "max_volume_participation_pct",
-            "max_volume_participation_rate",
-            "max_bar_volume_participation_rate",
-            "adv_lookback_sessions",
-            "max_adv_participation_rate",
-            "max_rebalance_delay_bars",
-            "rebalance_residual_policy",
-            "live_order_timeout_seconds",
-            "warmup_periods",
-        }
-        invalid_keys = sorted(legacy_execution_keys & set(self.params or {}))
-        if invalid_keys:
+        # A run setting under params would be read by nothing but the strategy.
+        misplaced = sorted(
+            set(self.params or {})
+            & {
+                item.name
+                for section in (
+                    RunConfig,
+                    AccountConfig,
+                    ExecutionPolicy,
+                    RiskPolicy,
+                    RuntimePolicy,
+                )
+                for item in fields(section)
+            }
+        )
+        if misplaced:
             raise ValueError(
-                "execution settings no longer belong in params; move "
-                f"{invalid_keys} to RunConfig.execution"
-            )
-        legacy_risk_keys = {
-            "max_position_pct",
-            "max_drawdown_pct",
-            "max_gross_exposure_pct",
-            "max_net_exposure_pct",
-            "max_position_weight",
-            "max_drawdown_rate",
-            "max_gross_exposure",
-            "max_net_exposure",
-            "max_order_notional",
-            "max_limit_price_deviation_rate",
-        }
-        invalid_keys = sorted(legacy_risk_keys & set(self.params or {}))
-        if invalid_keys:
-            raise ValueError(
-                f"risk settings no longer belong in params; move {invalid_keys} to RunConfig.risk"
+                f"params {misplaced} name run settings; set them in their RunConfig section"
             )
 
     def _refuse_run_wide_contract_economics_over_registered(self) -> None:
