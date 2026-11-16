@@ -198,8 +198,10 @@ def test_resampled_taifex_hours_run_through_a_real_backtest() -> None:
         def on_bar(self, ctx):
             return []
 
+    bars = _panel(resampled.index)
+    bars["contract"] = "TX202612"  # a continuous series names each bar's contract
     result = Backtest(
-        _panel(resampled.index),
+        bars,
         DoNothing(),
         config=config,
         cost_model=CostModel.zero(),

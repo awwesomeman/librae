@@ -48,10 +48,13 @@ class _NegativeWeight(Strategy):
         return PortfolioWeights({ctx.symbol: -0.5}) if ctx.period_index == 1 else []
 
 
-def _run(symbol: str, strategy: Strategy, **kwargs):
+def _run(symbol: str, strategy: Strategy, *, contract: str | None = None, **kwargs):
     kwargs.setdefault("cost_model", CostModel.zero())
     kwargs.setdefault("data_source", "test")
-    return Backtest(_bars(symbol), strategy, **kwargs).run()
+    bars = _bars(symbol)
+    if contract is not None:
+        bars["contract"] = contract
+    return Backtest(bars, strategy, **kwargs).run()
 
 
 def _events(result) -> list[tuple[str, str]]:
@@ -161,7 +164,12 @@ class TestOtherInstrumentsStillShort:
         assert _events(result) == [("open", "short"), ("close", "short")]
 
     def test_a_crypto_contract_can_be_shorted(self) -> None:
-        result = _run("BTCUSDT_QUARTERLY", _EnterThenClose("short"), currency="USDT")
+        result = _run(
+            "BTCUSDT_QUARTERLY",
+            _EnterThenClose("short"),
+            contract="BTCUSDT_260327",
+            currency="USDT",
+        )
 
         assert _events(result) == [("open", "short"), ("close", "short")]
 

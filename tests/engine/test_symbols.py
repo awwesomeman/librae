@@ -400,6 +400,39 @@ class TestMultiplierTickSizeValidation:
         )
         assert registry["GOODSYM"].tick_size is None
 
+    def test_an_entry_naming_a_product_inherits_its_specs(self):
+        registry = _build_registry(
+            {
+                "TXF202612": {
+                    "product": "TX",
+                    "data_source": "shioaji",
+                    "data_adapter": "shioaji",
+                    "contract_month": "202612",
+                }
+            }
+        )
+        entry = registry["TXF202612"]
+        assert (entry.product, entry.market, entry.multiplier, entry.calendar_id) == (
+            "TX",
+            "tw_futures",
+            200.0,
+            "XTAIFEX",
+        )
+
+    def test_an_entry_restating_its_products_spec_raises(self):
+        with pytest.raises(ValueError, match=r"restates \['multiplier'\], which its product 'TX'"):
+            _build_registry(
+                {
+                    "TXF202612": {
+                        "product": "TX",
+                        "data_source": "shioaji",
+                        "data_adapter": "shioaji",
+                        "contract_month": "202612",
+                        "multiplier": 200.0,
+                    }
+                }
+            )
+
 
 class TestGetSymbol:
     def test_get_btcusdt(self):
