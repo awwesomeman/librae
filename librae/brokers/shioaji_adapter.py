@@ -36,9 +36,6 @@ import pandas as pd
 
 from librae.config.env import CredentialConfig, Secret
 from librae.config.symbols import (
-    AssetClass,
-    AvailableSymbol,
-    InstrumentKind,
     canonicalize_price_to_increment,
 )
 from librae.core.trading_calendar import (
@@ -288,83 +285,6 @@ class ShioajiAdapter:
                     )
                 ),
             ),
-        )
-
-    def available_symbols(
-        self,
-        *,
-        query: str,
-        kind: InstrumentKind | None = None,
-        asset_class: AssetClass | None = None,
-    ) -> tuple[AvailableSymbol, ...]:
-        """List every Shioaji futures contract under one product root."""
-        root = query.strip().upper()
-        if not root:
-            raise ValueError("Shioaji available_symbols requires a futures product root")
-        if kind not in (None, "future"):
-            return ()
-        raw_contracts = self._api.contracts.futures(root)
-        contracts = list(raw_contracts or [])
-        alias_ranks: dict[str, int] = {}
-        for contract in contracts:
-            code = str(getattr(contract, "code", "") or "")
-            target_code = str(getattr(contract, "target_code", "") or "")
-            if code.endswith("R1") and target_code:
-                alias_ranks[target_code] = 0
-            elif code.endswith("R2") and target_code:
-                alias_ranks[target_code] = 1
-
-        results: list[AvailableSymbol] = []
-        index_roots = {"TXF", "MXF", "TMF"}
-        for contract in contracts:
-            code = str(getattr(contract, "code", "") or "")
-            if not code:
-                raise ValueError(f"Shioaji returned a {root} contract without code")
-            target_code = str(getattr(contract, "target_code", "") or "")
-            is_alias = bool(target_code) or code.endswith(("R1", "R2"))
-            delivery_month = validate_contract_month(
-                str(getattr(contract, "delivery_month", "") or "") or None
-            )
-            if is_alias:
-                contract_rank = 0 if code.endswith("R1") else 1
-                contract_month = None
-            else:
-                contract_rank = alias_ranks.get(code)
-                contract_month = delivery_month
-            resolved_asset_class: AssetClass = "index" if root in index_roots else "equity"
-            if asset_class is not None and asset_class != resolved_asset_class:
-                continue
-            raw_multiplier = getattr(contract, "unit", None)
-            multiplier = float(raw_multiplier) if raw_multiplier is not None else None
-            results.append(
-                AvailableSymbol(
-                    broker="shioaji",
-                    canonical_symbol=code,
-                    venue_symbol=code,
-                    native_symbol=code,
-                    name=str(getattr(contract, "name", "") or code),
-                    kind="future",
-                    asset_class=resolved_asset_class,
-                    currency=str(getattr(contract, "currency", "") or "TWD"),
-                    instrument_type="contract_monthly",
-                    security_type="FUT",
-                    exchange="TAIFEX",
-                    contract_month=contract_month,
-                    delivery_month=delivery_month,
-                    contract_rank=contract_rank,
-                    continuous_alias=is_alias,
-                    multiplier=multiplier,
-                )
-            )
-        return tuple(
-            sorted(
-                results,
-                key=lambda item: (
-                    item.delivery_month or "",
-                    item.continuous_alias,
-                    item.native_symbol,
-                ),
-            )
         )
 
     # ------------------------------------------------------------------

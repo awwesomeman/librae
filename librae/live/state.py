@@ -49,13 +49,14 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 31
+_STATE_SCHEMA_VERSION = 32
 # The one exception: previous versions that lack only fields no build writing
 # them recorded, which load empty, as that build's own restart would. Version
-# 30 lacks ``rebalance_stopped_at`` and ``failed_rebalance_symbols``; version
-# 29 lacks ``pending_flatten`` too. A later bump decides afresh which of its
-# previous versions are additive in the same way; most are not.
-_ADDITIVE_PREVIOUS_SCHEMA_VERSIONS = (29, 30)
+# 31 lacks ``last_funding_settled_at``; version 30 lacks
+# ``rebalance_stopped_at`` and ``failed_rebalance_symbols`` too. A later bump
+# decides afresh which of its previous versions are additive in the same way;
+# most are not.
+_ADDITIVE_PREVIOUS_SCHEMA_VERSIONS = (30, 31)
 
 
 def normalize_runtime_revision(
@@ -304,6 +305,7 @@ class LiveRuntimeState:
     last_feature_as_of: datetime | None = None
     last_bar_ts: dict[str, datetime] = field(default_factory=dict)
     last_financing_ts: dict[str, datetime] = field(default_factory=dict)
+    last_funding_settled_at: dict[str, datetime] = field(default_factory=dict)
     pending_decision: StrategyDecision = field(default_factory=list)
     # Bar timestamp each pending intent FIRST rested on, keyed by symbol
     # (validate_strategy_decision allows at most one intent per symbol). A
@@ -397,6 +399,10 @@ class LiveRuntimeState:
                 symbol: timestamp.isoformat()
                 for symbol, timestamp in self.last_financing_ts.items()
             },
+            "last_funding_settled_at": {
+                symbol: timestamp.isoformat()
+                for symbol, timestamp in self.last_funding_settled_at.items()
+            },
             "pending_decision": _pending_decision_to_dict(self.pending_decision),
             "pending_ohlcv": [pending.to_dict() for pending in self.pending_ohlcv],
             "pending_resting_since": {
@@ -479,6 +485,13 @@ class LiveRuntimeState:
                 raw["last_financing_ts"],
                 field="last_financing_ts",
             ),
+            last_funding_settled_at=(
+                _timestamps_from_dict(
+                    raw["last_funding_settled_at"], field="last_funding_settled_at"
+                )
+                if schema_version == _STATE_SCHEMA_VERSION
+                else {}
+            ),
             pending_decision=_pending_decision_from_dict(raw["pending_decision"]),
             pending_ohlcv=[PendingOhlcvDelivery.from_dict(item) for item in raw["pending_ohlcv"]],
             pending_resting_since=_timestamps_from_dict(
@@ -500,7 +513,7 @@ class LiveRuntimeState:
             halted=bool(raw["halted"]),
             pending_flatten=(
                 PendingFlatten.from_dict(raw["pending_flatten"])
-                if schema_version != 29 and raw["pending_flatten"] is not None
+                if raw["pending_flatten"] is not None
                 else None
             ),
             rebalance_stopped_at=(

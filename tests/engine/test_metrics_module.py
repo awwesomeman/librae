@@ -26,7 +26,6 @@ from librae.core.metrics import (
     compute_signal_outcomes,
     compute_trade_entry_outcomes,
     summarize_performance,
-    summarize_signal_mae_mfe,
 )
 from librae.core.strategy import OrderIntent, Strategy
 
@@ -44,7 +43,6 @@ def test_signal_outcome_functions_are_public() -> None:
     import librae
 
     assert librae.compute_signal_outcomes is compute_signal_outcomes
-    assert librae.summarize_signal_mae_mfe is summarize_signal_mae_mfe
 
 
 def test_performance_functions_are_public() -> None:
@@ -729,49 +727,6 @@ class TestComputeSignalOutcomes:
     def test_nat_signal_fails(self):
         with pytest.raises(ValueError, match="must not be NaT"):
             compute_signal_outcomes([pd.NaT], _signal_fixture_ohlcv(), max_periods=1)
-
-
-class TestSummarizeSignalMaeMfe:
-    def test_empty_horizons(self):
-        df = summarize_signal_mae_mfe(
-            [datetime(2026, 3, 1, tzinfo=UTC)], _signal_fixture_ohlcv(), horizons=()
-        )
-        assert df.empty
-
-    def test_single_signal_matches_hand_computed_curve(self):
-        ohlcv = _signal_fixture_ohlcv()
-        summary = summarize_signal_mae_mfe(
-            [ohlcv.index[0]], ohlcv, horizons=(1, 2, 3), direction="long"
-        )
-
-        assert list(summary["horizon"]) == [1, 2, 3]
-        assert (summary["n"] == 1).all()
-        # n=1 -> median == p75 == the single observation.
-        assert np.allclose(summary["median_forward_return"], [5.0, 2.0, 0.0])
-        assert np.allclose(summary["median_mfe"], [10.0, 10.0, 10.0])
-        assert np.allclose(summary["p75_mfe"], summary["median_mfe"])
-        assert np.allclose(summary["median_mae"], [5.0, 5.0, 5.0])
-        assert np.allclose(summary["p75_mae"], summary["median_mae"])
-
-    def test_horizon_beyond_available_data_is_dropped(self):
-        ohlcv = _signal_fixture_ohlcv()
-        # Only 3 forward bars exist after the fill bar; horizon 10 has no data.
-        summary = summarize_signal_mae_mfe([ohlcv.index[0]], ohlcv, horizons=(1, 10))
-        assert list(summary["horizon"]) == [1]
-
-    def test_sample_count_is_reported_per_horizon(self):
-        ohlcv = _signal_fixture_ohlcv()
-        summary = summarize_signal_mae_mfe([ohlcv.index[0], ohlcv.index[3]], ohlcv, horizons=(1, 3))
-        assert list(summary["n"]) == [2, 1]
-
-    @pytest.mark.parametrize("horizons", [(0,), (1, 1)])
-    def test_invalid_horizons_fail(self, horizons):
-        with pytest.raises(ValueError, match="horizon"):
-            summarize_signal_mae_mfe(
-                [_signal_fixture_ohlcv().index[0]],
-                _signal_fixture_ohlcv(),
-                horizons=horizons,
-            )
 
 
 def test_kernel_shared_by_trade_entry_and_signal_outcomes():

@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from librae import Backtest, FeatureBatch, MarketDataSubscription
 from librae.core.cost_model import CostModel
-from librae.core.run_config import ExecutionPolicy
+from librae.core.run_config import AuxiliarySubscription, ExecutionPolicy
 from librae.core.strategy import Context, OrderIntent, Strategy
 from librae.live.engine import LiveTrader
 
@@ -228,7 +228,7 @@ def test_backtest_and_live_share_the_configured_batch_history_window() -> None:
     ] = {}
     observed_auxiliary: list[tuple[pd.Timestamp, ...]] = []
     final_ts = timestamps[-1].to_pydatetime()
-    auxiliary_subscription = _subscription("MACRO", "D1")
+    auxiliary_subscription = _subscription("A", "D1")
     auxiliary_index = pd.date_range("2025-12-27T00:00Z", periods=4, freq="D", name="datetime")
     auxiliary_data = pd.DataFrame(
         {
@@ -269,6 +269,7 @@ def test_backtest_and_live_share_the_configured_batch_history_window() -> None:
     backtest_config = make_test_cfg(
         mode="backtest",
         symbols=["A", "B"],
+        auxiliary_subscriptions=(AuxiliarySubscription(symbol="A", timeframe="D1"),),
         instrument_overrides=instrument_overrides,
         symbol_cost_overrides={symbol: {"multiplier": 1.0} for symbol in ("A", "B")},
         execution=execution,

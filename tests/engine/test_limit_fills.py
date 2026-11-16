@@ -76,7 +76,6 @@ def test_limit_fill_is_side_correct(action, position_side, bar, expected) -> Non
     assert resolve_fill_price(
         bar,
         action,
-        default_fill="open",
         position_side=position_side,
     ) == pytest.approx(expected)
 
@@ -88,7 +87,6 @@ def test_unreached_limit_expires_with_observable_log(caplog) -> None:
         fill = resolve_fill_price(
             _bar(open_=105.0, high=106.0, low=101.0),
             action,
-            default_fill="open",
         )
 
     assert fill is None
@@ -129,7 +127,6 @@ def test_untradable_order_side_rejects_fill(
         resolve_fill_price(
             bar,
             action,
-            default_fill="open",
             position_side=position_side,
         )
         is None
@@ -144,7 +141,6 @@ def test_partial_side_tradability_fails_instead_of_defaulting() -> None:
         resolve_fill_price(
             bar,
             OrderIntent(action="long", symbol="X"),
-            default_fill="open",
         )
 
 
@@ -181,7 +177,6 @@ def test_opposite_order_side_remains_tradable(
     assert resolve_fill_price(
         bar,
         action,
-        default_fill="open",
         position_side=position_side,
     ) == pytest.approx(bar["open"])
 

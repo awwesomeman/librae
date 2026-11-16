@@ -8,11 +8,11 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import pytest
-from librae import Backtest, MarketDataSubscription, build_backtest_artifact
+from librae import Backtest, MarketDataSubscription
 from librae.core import market_data as market_data_module
 from librae.core.cost_model import CostModel
 from librae.core.executor import REASON_DRAWDOWN_BREACH, REASON_STOP_LOSS
-from librae.core.run_config import ExecutionPolicy, RiskPolicy
+from librae.core.run_config import AuxiliarySubscription, ExecutionPolicy, RiskPolicy
 from librae.core.strategy import Context, OrderIntent, PortfolioWeights, Strategy
 from librae.core.trading_calendar import period_close
 from librae.db.timescale_writer import save_backtest_output
@@ -956,7 +956,10 @@ def test_config_mixed_backtest_reuses_resolved_primary_identity() -> None:
     )
     auxiliary_subscription = _subscription("BTCUSDT", "D1", source="daily")
     strategy = _Capture()
-    config = make_test_cfg(mode="backtest")
+    config = make_test_cfg(
+        mode="backtest",
+        auxiliary_subscriptions=(AuxiliarySubscription(symbol="BTCUSDT", timeframe="D1"),),
+    )
 
     backtest = Backtest(
         primary,
@@ -991,11 +994,6 @@ def test_context_and_view_snapshots_are_metadata_safe() -> None:
 
     assert output.run_metadata.auxiliary_subscriptions == (auxiliary_subscription,)
     assert output.to_dict()["run_metadata"]["auxiliary_subscriptions"] == [
-        auxiliary_subscription.to_dict()
-    ]
-    artifact = build_backtest_artifact(output, config_hash="mixed-config")
-    assert artifact.manifest["artifact_schema_version"] == 4
-    assert artifact.manifest["run_metadata"]["auxiliary_subscriptions"] == [
         auxiliary_subscription.to_dict()
     ]
     with pytest.raises(ValueError, match="does not yet store auxiliary_subscriptions"):

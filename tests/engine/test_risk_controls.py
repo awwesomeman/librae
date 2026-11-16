@@ -30,7 +30,7 @@ from librae.core.strategy import (
     Strategy,
 )
 
-from tests.conftest import make_test_cfg
+from tests.conftest import make_test_cfg, primary_subscriptions_for
 
 # ---------------------------------------------------------------------------
 # Helpers — mirrors tests/engine/test_stop_targets.py / test_position_scaling.py
@@ -438,7 +438,6 @@ class TestPortfolioExposureLimits:
                 ],
                 bars,
                 get_cost_model=lambda _symbol: _leveraged_zero_cost(),
-                default_fill="open",
                 primary_symbol="AAA",
                 max_gross_exposure=1.0,
                 exposure_prices={"AAA": 100.0, "BBB": 100.0},
@@ -467,7 +466,6 @@ class TestPortfolioExposureLimits:
                 [OrderIntent(action="long", symbol="AAA", quantity=1.5)],
                 bars,
                 get_cost_model=lambda _symbol: _leveraged_zero_cost(),
-                default_fill="open",
                 primary_symbol="AAA",
                 max_adv_participation_rate=1.0,
                 get_lagged_adv=lambda _symbol: 100.0,
@@ -493,7 +491,6 @@ class TestPortfolioExposureLimits:
                 [OrderIntent(action="long", symbol="AAA", quantity=1.5)],
                 bars,
                 get_cost_model=lambda _symbol: _leveraged_zero_cost(),
-                default_fill="open",
                 primary_symbol="AAA",
                 max_net_exposure=0.5,
                 exposure_prices={"AAA": 100.0},
@@ -520,7 +517,6 @@ class TestPortfolioExposureLimits:
                 decision,
                 bars,
                 get_cost_model=lambda _symbol: _leveraged_zero_cost(),
-                default_fill="open",
                 primary_symbol="AAA",
                 max_gross_exposure=1.0,
                 exposure_prices={"AAA": 100.0, "BBB": 100.0},
@@ -541,7 +537,6 @@ class TestPortfolioExposureLimits:
             [OrderIntent(action="close", symbol="TEST", quantity=0.5)],
             bars,
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
             max_gross_exposure=0.5,
             exposure_prices={"TEST": 100.0},
@@ -563,7 +558,6 @@ class TestPortfolioExposureLimits:
             PortfolioWeights(weights={"TEST": 0.75}),
             bars,
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
             max_gross_exposure=0.5,
             exposure_prices={"TEST": 100.0},
@@ -585,7 +579,6 @@ class TestPortfolioExposureLimits:
             [OrderIntent(action="close", symbol="TEST", quantity=0.5)],
             bars,
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
             max_gross_exposure=0.5,
             exposure_prices={"TEST": 100.0},
@@ -887,6 +880,7 @@ class TestMaxPositionCap:
             initial_balance=10_000.0,
             cost_model=_zero_cost(),
             risk=RiskPolicy(max_position_weight=0.5),
+            primary_subscriptions=primary_subscriptions_for(data),
         ).run()
 
         b_open = next(
@@ -959,7 +953,6 @@ class TestMaxVolumeParticipation:
                 }
             },
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
             max_bar_volume_participation_rate=0.5,
             get_previous_volume=lambda _symbol: 20.0,
@@ -985,7 +978,6 @@ class TestMaxVolumeParticipation:
                 }
             },
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
             max_bar_volume_participation_rate=0.5,
             get_previous_volume=lambda _symbol: None,
@@ -1021,7 +1013,6 @@ class TestMaxVolumeParticipation:
                 }
             },
             get_cost_model=lambda _symbol: cost_model,
-            default_fill="open",
             primary_symbol="TEST",
             max_bar_volume_participation_rate=None,
             get_previous_volume=lambda _symbol: None,
@@ -1029,13 +1020,6 @@ class TestMaxVolumeParticipation:
 
         assert positions == {}
         assert [event.detail["reason"] for event in result.runtime_events] == ["volume_unavailable"]
-
-    def test_noncausal_close_fill_mode_is_rejected(self):
-        with pytest.raises(ValueError, match="causal next-bar"):
-            ExecutionPolicy(
-                default_fill_price="close",
-                max_bar_volume_participation_rate=0.5,
-            )
 
 
 class TestDynamicSlippage:

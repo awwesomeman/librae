@@ -288,7 +288,6 @@ def test_defer_all_preflights_minimum_notional_before_selling() -> None:
         PortfolioWeights({"B": 0.1}),
         bars,
         get_cost_model=lambda _symbol: CostModel.zero(),
-        default_fill="open",
         primary_symbol="A",
         rebalance_residual_policy="defer_all",
         get_executable_quantity=_normalizer(instruments),

@@ -149,7 +149,7 @@ def test_market_data_session_mode_is_validated_and_part_of_cache_identity() -> N
     assert extended.session_mode == "extended"
     # Extended was the implicit pre-contract behavior; preserve its durable
     # cache/checkpoint identity across upgrades.
-    assert extended.config_hash == "d084869e34febd7fd71bea8ecf6bf3a8"
+    assert extended.config_hash == "19d994051956369c94ca5d21bf71a8f0"
     assert extended.config_hash != regular.config_hash
     with pytest.raises(ValueError, match="session_mode"):
         _config(session_mode="premarket")
@@ -250,19 +250,13 @@ def test_execution_policy_is_validated_and_part_of_config_hash() -> None:
         )
     )
     assert intraday_adv.execution.adv_lookback_sessions == 20
-    with pytest.raises(ValueError, match="causal next-bar"):
-        ExecutionPolicy(default_fill_price="")
-    for unsupported in ("close", "high", "low", "feature_price"):
-        with pytest.raises(ValueError, match="causal next-bar"):
-            ExecutionPolicy(default_fill_price=unsupported)
     with pytest.raises(TypeError, match="ExecutionPolicy"):
         _config(execution={"max_bar_volume_participation_rate": 0.1})
 
 
 def test_execution_policy_preserves_existing_positional_argument_order() -> None:
-    policy = ExecutionPolicy("open", 0.2, 10, 0.03, 4, 90, 1_440)
+    policy = ExecutionPolicy(0.2, 10, 0.03, 4, 90, 1_440)
 
-    assert policy.default_fill_price == "open"
     assert policy.max_bar_volume_participation_rate == 0.2
     assert policy.adv_lookback_sessions == 10
     assert policy.max_adv_participation_rate == 0.03
@@ -330,48 +324,15 @@ def test_run_config_rejects_ambiguous_scalar_types(override, message: str) -> No
         _config(**override)
 
 
-@pytest.mark.parametrize(
-    "legacy_key",
-    [
-        "fill_price",
-        "max_volume_participation_pct",
-        "max_bar_volume_participation_rate",
-        "adv_lookback_sessions",
-        "max_adv_participation_rate",
-        "max_rebalance_delay_bars",
-        "rebalance_residual_policy",
-        "live_order_timeout_seconds",
-        "warmup_periods",
-    ],
-)
-def test_execution_settings_are_rejected_from_strategy_params(
-    legacy_key: str,
-) -> None:
-    with pytest.raises(ValueError, match=r"RunConfig\.execution"):
-        _config(params={legacy_key: 0.1})
-
-
-@pytest.mark.parametrize(
-    "legacy_key",
-    [
-        "max_position_pct",
-        "max_drawdown_pct",
-        "max_gross_exposure_pct",
-        "max_net_exposure_pct",
-        "max_position_weight",
-        "max_drawdown_rate",
-        "max_gross_exposure",
-        "max_net_exposure",
-        "max_order_notional",
-        "max_limit_price_deviation_rate",
-    ],
-)
-def test_risk_settings_are_rejected_from_strategy_params(legacy_key: str) -> None:
-    with pytest.raises(ValueError, match=r"RunConfig\.risk"):
-        _config(params={legacy_key: 0.1})
-
-
 @pytest.mark.parametrize("initial_cash", [0.0, -1.0, float("nan")])
 def test_initial_cash_must_be_positive_and_finite(initial_cash: float) -> None:
     with pytest.raises(ValueError, match="initial_cash"):
         AccountConfig(currency="USD", initial_cash=initial_cash)
+
+
+@pytest.mark.parametrize(
+    "name", ["warmup_periods", "max_drawdown_rate", "poll_seconds", "timeframe"]
+)
+def test_a_run_setting_under_params_is_refused(name: str) -> None:
+    with pytest.raises(ValueError, match=f"params \\['{name}'\\] name run settings"):
+        _config(params={name: 1})

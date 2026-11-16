@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 from librae.backtest.schema import RunMetadata, StrategyMetrics
 from librae.core.market_data import MarketDataSubscription
-from librae.db.timescale_reader import get_run, load_run_bars, row_to_strategy_metrics
+from librae.db.timescale_reader import (
+    get_run,
+    get_run_by_backtest_cache_key,
+    load_backtest_output,
+    load_run_bars,
+    row_to_strategy_metrics,
+)
 
 
 def _mock_conn(mock_cur: MagicMock) -> MagicMock:
@@ -179,3 +187,107 @@ class TestRowToStrategyMetrics:
             total_slippage=0.5,
             total_tax=0.0,
         )
+
+
+class TestGetRunByBacktestCacheKey:
+    @patch("librae.db.timescale_reader.get_conn")
+    def test_reads_the_jsonb_columns_psycopg2_already_decoded(self, mock_conn_ctx):
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (
+            "run-1",
+            {"window": 20},
+            {"warmup_periods": 720},
+            None,
+            "extended",
+        )
+        mock_conn_ctx.return_value = _mock_conn(mock_cur)
+
+        assert get_run_by_backtest_cache_key("cache-a") == {
+            "run_id": "run-1",
+            "params": {"window": 20},
+            "execution_policy": {"warmup_periods": 720},
+            "risk_policy": None,
+            "session_mode": "extended",
+        }
+
+
+def _stored_output():
+    """A real backtest output with an open, a close and a NULL-able field."""
+    from librae import Backtest, Context, CostModel, OrderIntent, Strategy
+
+    class OpenThenClose(Strategy):
+        def on_bar(self, ctx: Context) -> list[OrderIntent]:
+            if ctx.period_index == 0:
+                return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+            if ctx.period_index == 2:
+                return [OrderIntent(action="close", symbol=ctx.symbol)]
+            return []
+
+    timestamps = pd.date_range("2026-01-01", periods=6, freq="h", tz="UTC")
+    data = pd.DataFrame(
+        {
+            "open": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+            "high": 106.0,
+            "low": 99.0,
+            "close": [101.0, 102.0, 103.0, 104.0, 105.0, 106.0],
+            "volume": 1_000.0,
+        },
+        index=pd.MultiIndex.from_arrays(
+            [["BTCUSDT"] * 6, timestamps], names=["symbol", "datetime"]
+        ),
+    )
+    backtest = Backtest(data, OpenThenClose(), cost_model=CostModel.zero(), data_source="fixture")
+    backtest.run()
+    return backtest.build_output()
+
+
+def _frame(records) -> pd.DataFrame:
+    return pd.DataFrame([asdict(record) for record in records]).rename(columns={"ts": "_time"})
+
+
+class TestLoadBacktestOutput:
+    def test_rebuilds_the_stored_output(self):
+        output = _stored_output()
+        account = output.account
+        performance = pd.DataFrame(
+            [
+                {
+                    "account_id": account.account_id,
+                    "currency": account.currency,
+                    "initial_cash": account.initial_cash,
+                    "final_equity": account.final_equity,
+                    "net_pnl": account.net_pnl,
+                    **asdict(account.metrics),
+                }
+            ]
+        )
+        with (
+            patch("librae.db.timescale_reader.get_run", return_value=output.run_metadata),
+            patch("librae.db.timescale_reader.load_performance", return_value=performance),
+            patch(
+                "librae.db.timescale_reader.load_equity_curve",
+                return_value=_frame(output.equity_curve),
+            ),
+            patch(
+                "librae.db.timescale_reader.load_position_events",
+                return_value=_frame(output.position_events),
+            ),
+            patch(
+                "librae.db.timescale_reader.load_financing_cash_flows",
+                return_value=pd.DataFrame(),
+            ),
+        ):
+            loaded = load_backtest_output(output.run_metadata.run_id)
+
+        assert loaded.run_metadata == output.run_metadata
+        assert loaded.metrics == output.metrics
+        assert loaded.equity_curve == output.equity_curve
+        assert loaded.position_events == tuple(output.position_events)
+        assert loaded.financing_cash_flows == ()
+
+    def test_an_unknown_run_is_refused(self):
+        with (
+            patch("librae.db.timescale_reader.get_run", return_value=None),
+            pytest.raises(ValueError, match="no stored run"),
+        ):
+            load_backtest_output("missing")

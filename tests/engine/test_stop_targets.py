@@ -23,6 +23,8 @@ from librae.core.executor import (
 from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import Context, OrderIntent, PortfolioWeights, PositionState, Strategy
 
+from tests.conftest import primary_subscriptions_for
+
 # ---------------------------------------------------------------------------
 # Helpers — naming mirrors tests/engine/test_position_scaling.py and
 # tests/engine/test_backtest_engine.py so the shared fixtures stay recognizable
@@ -435,49 +437,6 @@ class TestResolveStopExit:
 
 class TestPendingFillStopOrdering:
     @pytest.mark.parametrize(
-        "decision",
-        [
-            [OrderIntent(action="close", symbol="TEST")],
-            [OrderIntent(action="long", symbol="TEST", quantity=1.0)],
-            PortfolioWeights(weights={"TEST": 0.5}),
-        ],
-    )
-    def test_unsafe_default_fill_is_rejected_before_mutation(
-        self,
-        decision,
-    ):
-        position = _make_pos(side="long", stop=95.0)
-        positions = {"TEST": position}
-        adv_usage = {"TEST": 3.0}
-        bar = {
-            "open": 100.0,
-            "high": 101.0,
-            "low": 90.0,
-            "close": 99.0,
-            "volume": 100.0,
-        }
-
-        with pytest.raises(ValueError, match="only causal next-bar 'open'"):
-            execute_pending_decision_and_stops(
-                datetime(2026, 1, 2, tzinfo=UTC),
-                positions,
-                1_000.0,
-                decision,
-                {"TEST": bar},
-                get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="close",
-                primary_symbol="TEST",
-                max_adv_participation_rate=0.1,
-                get_lagged_adv=lambda _symbol: 100.0,
-                used_adv_quantity_by_symbol=adv_usage,
-            )
-
-        assert positions == {"TEST": position}
-        assert position.quantity == pytest.approx(1.0)
-        assert position.pending_market_exit_reason is None
-        assert adv_usage == {"TEST": 3.0}
-
-    @pytest.mark.parametrize(
         "intent",
         [
             OrderIntent(action="close", symbol="TEST", limit_price=105.0),
@@ -505,7 +464,6 @@ class TestPendingFillStopOrdering:
                 [intent],
                 {"TEST": bar},
                 get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="open",
                 primary_symbol="TEST",
                 max_adv_participation_rate=0.1,
                 get_lagged_adv=lambda _symbol: 100.0,
@@ -561,7 +519,6 @@ class TestPendingFillStopOrdering:
                 ],
                 bars,
                 get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="open",
                 primary_symbol="TEST",
                 max_adv_participation_rate=0.1,
                 get_lagged_adv=lambda _symbol: 100.0,
@@ -614,7 +571,6 @@ class TestPendingFillStopOrdering:
                 ],
                 {"TEST": bar},
                 get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="open",
                 primary_symbol="TEST",
                 max_adv_participation_rate=0.1,
                 get_lagged_adv=lambda _symbol: 100.0,
@@ -662,7 +618,6 @@ class TestPendingFillStopOrdering:
                 ],
                 {"TEST": bar},
                 get_cost_model=lambda _symbol: _leveraged_cost(),
-                default_fill="open",
                 primary_symbol="TEST",
             )
 
@@ -715,7 +670,6 @@ class TestPendingFillStopOrdering:
                 ],
                 bars,
                 get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="open",
                 primary_symbol="TEST",
                 max_adv_participation_rate=0.1,
                 get_lagged_adv=lambda _symbol: 100.0,
@@ -763,7 +717,6 @@ class TestPendingFillStopOrdering:
                     }
                 },
                 get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="open",
                 primary_symbol="TEST",
                 rebalance_state=state,
                 rebalance_residual_policy="defer_symbols",
@@ -796,7 +749,6 @@ class TestPendingFillStopOrdering:
             [intent],
             {"TEST": bar},
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
         )
 
@@ -827,7 +779,6 @@ class TestPendingFillStopOrdering:
             [intent],
             {"TEST": bar},
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
         )
 
@@ -886,7 +837,6 @@ class TestPendingFillStopOrdering:
             [intent],
             {"TEST": bar},
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
         )
 
@@ -939,7 +889,6 @@ class TestPendingFillStopOrdering:
                 }
             },
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
             used_adv_quantity_by_symbol=adv_usage,
             **kwargs,
@@ -992,7 +941,6 @@ class TestPendingFillStopOrdering:
                     }
                 },
                 get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="open",
                 primary_symbol="TEST",
                 used_adv_quantity_by_symbol=adv_usage,
                 **kwargs,
@@ -1020,7 +968,6 @@ class TestPendingFillStopOrdering:
             PortfolioWeights(weights={"TEST": 0.0}),
             {"TEST": bar},
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
         )
 
@@ -1071,7 +1018,6 @@ class TestPendingFillStopOrdering:
                     }
                 },
                 get_cost_model=lambda _symbol: _zero_cost(),
-                default_fill="open",
                 primary_symbol="TEST",
                 max_bar_volume_participation_rate=0.1,
                 max_adv_participation_rate=0.1,
@@ -1106,7 +1052,6 @@ class TestPendingFillStopOrdering:
                 }
             },
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
         )
 
@@ -1137,7 +1082,6 @@ class TestPendingFillStopOrdering:
             PortfolioWeights(weights={"OTHER": 1.0}),
             {"TEST": bar, "OTHER": bar},
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
         )
 
@@ -1160,7 +1104,6 @@ class TestPendingFillStopOrdering:
             [OrderIntent(action="close", symbol="TEST")],
             {"TEST": bar},
             get_cost_model=lambda _symbol: _zero_cost(),
-            default_fill="open",
             primary_symbol="TEST",
         )
 
@@ -1222,6 +1165,7 @@ class TestPendingFillStopOrdering:
                 max_bar_volume_participation_rate=None,
                 max_rebalance_delay_bars=2,
             ),
+            primary_subscriptions=primary_subscriptions_for(frame),
         ).run()
 
         stop_exits = [event for event in result.position_events if event.reason == REASON_STOP_LOSS]

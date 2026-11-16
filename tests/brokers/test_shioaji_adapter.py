@@ -77,62 +77,6 @@ def test_missing_shioaji_names_install_extra(monkeypatch):
         _require_shioaji()
 
 
-def test_available_symbols_lists_tmf_exact_front_and_next_contracts():
-    adapter = _make_adapter()
-    adapter._api.contracts.futures.return_value = [
-        SimpleNamespace(
-            code="TMFH6",
-            target_code="",
-            name="微型臺指 202608",
-            delivery_month="202608",
-            currency="TWD",
-            unit=10,
-        ),
-        SimpleNamespace(
-            code="TMFR1",
-            target_code="TMFH6",
-            name="微型臺指 近月",
-            delivery_month="202608",
-            currency="TWD",
-            unit=10,
-        ),
-        SimpleNamespace(
-            code="TMFI6",
-            target_code="",
-            name="微型臺指 202609",
-            delivery_month="202609",
-            currency="TWD",
-            unit=10,
-        ),
-        SimpleNamespace(
-            code="TMFR2",
-            target_code="TMFI6",
-            name="微型臺指 次月",
-            delivery_month="202609",
-            currency="TWD",
-            unit=10,
-        ),
-    ]
-
-    results = adapter.available_symbols(
-        query="TMF",
-        kind="future",
-        asset_class="index",
-    )
-
-    assert {(item.native_symbol, item.contract_rank) for item in results} == {
-        ("TMFH6", 0),
-        ("TMFR1", 0),
-        ("TMFI6", 1),
-        ("TMFR2", 1),
-    }
-    front_alias = next(item for item in results if item.native_symbol == "TMFR1")
-    assert front_alias.continuous_alias is True
-    assert front_alias.contract_month is None
-    assert front_alias.delivery_month == "202608"
-    adapter._api.contracts.futures.assert_called_once_with("TMF")
-
-
 def _make_adapter(*, ca_activated: bool = False):
     """Build a ShioajiAdapter with mocked internals (no real login)."""
     from librae.brokers.shioaji_adapter import ShioajiAdapter

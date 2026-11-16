@@ -56,7 +56,10 @@ from librae.core.executor import (
     validate_strategy_decision,
 )
 from librae.core.financing import (
+    FUNDING_RATE_FIELD,
+    FUNDING_SETTLED_AT_FIELD,
     attach_borrow_rate,
+    attach_funding_rate,
     calculate_borrow_cash_flows,
     calculate_funding_cash_flows,
 )
@@ -89,7 +92,9 @@ from librae.core.strategy import (
     Strategy,
     StrategyDecision,
 )
+from librae.core.taifex import final_settlement_follows
 from librae.core.trading_calendar import (
+    TAIFEX_INDEX_CALENDAR,
     execution_session_label,
     period_start,
     session_label,
@@ -151,11 +156,6 @@ if TYPE_CHECKING:
     from librae.core.run_config import MarketDataSessionMode, RunConfig
 
 logger = logging.getLogger(__name__)
-
-# Max distance a funding settlement may sit from a bar timestamp and still
-# be attributed to it — far above exchange millisecond jitter, far below any
-# supported bar interval.
-_FUNDING_TS_TOLERANCE = pd.Timedelta("1min")
 
 
 @dataclass(frozen=True)
@@ -302,9 +302,8 @@ def _bind_market_data_source(
             if bars.empty:
                 return bars
             # By time, never by bar count: a warmup spans far more bars than
-            # the endpoint accepts as a limit. Start one merge tolerance early
-            # so a settlement stamped just before the first bar still lands.
-            first_bar = pd.Timestamp(bars["ts"].iloc[0]) - _FUNDING_TS_TOLERANCE
+            # the endpoint accepts as a limit.
+            first_bar = pd.Timestamp(bars["ts"].iloc[0])
             funding = _rates_or_none(
                 fetch_funding_rate_history,
                 "funding",
@@ -314,17 +313,8 @@ def _bind_market_data_source(
             )
             if funding is None or funding.empty:
                 return bars
-            # A settlement is a discrete payment, so it attaches to the one bar
-            # it lands on. Timestamps jitter off the bar grid by milliseconds
-            # (Binance fundingTime 08:00:00.003), so an exact-equality merge
-            # silently drops roughly half of all payments.
-            return pd.merge_asof(
-                bars,
-                funding.sort_values("ts"),
-                on="ts",
-                direction="nearest",
-                tolerance=_FUNDING_TS_TOLERANCE,
-            )
+            # One placement rule for backtest and live; see attach_funding_rate.
+            return attach_funding_rate(bars, funding, timeframe=tf)
 
         return _with_funding
 
@@ -1001,6 +991,7 @@ class LiveTrader:
         self._last_feature_as_of: datetime | None = None
         self._last_bar_ts: dict[str, datetime] = {}
         self._last_financing_ts: dict[str, datetime] = {}
+        self._last_funding_settled_at: dict[str, datetime] = {}
         self._stale_alerted: dict[MarketDataSubscription, bool] = {}
         self._data_gap_alerted = False
         self._auxiliary_never_delivered: set[MarketDataSubscription] = set()
@@ -1169,7 +1160,6 @@ class LiveTrader:
         self._warmup_fetcher = warmup_fetcher
         self._notifier = notifier
 
-        self._fill_price = config.execution.default_fill_price
         self._max_bar_volume_participation_rate = config.execution.max_bar_volume_participation_rate
         self._adv_lookback_sessions = config.execution.adv_lookback_sessions
         self._max_adv_participation_rate = config.execution.max_adv_participation_rate
@@ -1318,6 +1308,7 @@ class LiveTrader:
             last_feature_as_of=self._last_feature_as_of,
             last_bar_ts=dict(self._last_bar_ts),
             last_financing_ts=dict(self._last_financing_ts),
+            last_funding_settled_at=dict(self._last_funding_settled_at),
             pending_decision=deepcopy(self._pending_decision),
             pending_resting_since=dict(self._pending_resting_since),
             pending_ohlcv=list(self._pending_ohlcv),
@@ -1384,6 +1375,7 @@ class LiveTrader:
         self._last_feature_as_of = state.last_feature_as_of
         self._last_bar_ts = state.last_bar_ts
         self._last_financing_ts = state.last_financing_ts
+        self._last_funding_settled_at = state.last_funding_settled_at
         self._pending_decision = state.pending_decision
         self._pending_resting_since = dict(state.pending_resting_since)
         self._pending_ohlcv = list(state.pending_ohlcv)
@@ -4113,7 +4105,16 @@ class LiveTrader:
                 )
             # A revision replaces the version it revises; any other tie keeps
             # the cached row, whose extra columns a fetch may lack.
-            cached = cached.loc[~cached["ts"].isin(fetched.loc[revised, "ts"])]
+            cached = cached.loc[~cached["ts"].isin(fetched.loc[revised, "ts"])].copy()
+            # A kept row still takes what it lacked, such as a funding
+            # settlement published after the bar was first fetched.
+            tied = cached["ts"].isin(fetched["ts"])
+            if tied.any():
+                fresh = fetched.set_index("ts").loc[cached.loc[tied, "ts"]]
+                for column in cached.columns.intersection(fresh.columns):
+                    cached.loc[tied, column] = cached.loc[tied, column].fillna(
+                        fresh[column].set_axis(cached.index[tied])
+                    )
             cached = cached.assign(_librae_source_priority=0)
             fetched = fetched.assign(_librae_source_priority=1)
             merged = pd.concat([cached, fetched], ignore_index=True)
@@ -6927,7 +6928,6 @@ class LiveTrader:
                     ready_decision,
                     raw_bars,
                     get_cost_model=self._get_cost_model,
-                    default_fill=self._fill_price,
                     primary_symbol=primary_symbol,
                     max_position_notional=max_position_notional,
                     max_order_notional=self._risk_policy.max_order_notional,
@@ -6959,7 +6959,7 @@ class LiveTrader:
                 )
                 self._record_resting_since(resting, ts, primary_symbol=primary_symbol)
             self._prune_pending_submissions(primary_symbol=primary_symbol)
-            self._apply_financing_cash_flows(ts, raw_bars)
+            self._apply_financing_cash_flows(ts, raw_bars, raw_frames)
         elif ready_decision and not self._execute_live_decision(
             ready_decision,
             raw_bars,
@@ -7114,6 +7114,13 @@ class LiveTrader:
             period_index=self._period_index,
             decision_at=feature_batch.as_of if feature_batch is not None else None,
             market_data=market_data_view,
+            settles_next_session=frozenset(
+                symbol
+                for symbol in bars
+                if self._instruments[symbol].continuous_alias
+                and self._instruments[symbol].calendar_id == TAIFEX_INDEX_CALENDAR
+                and final_settlement_follows(session_label(ts, TAIFEX_INDEX_CALENDAR))
+            ),
         )
         strategy_started = perf_counter()
         try:
@@ -7237,6 +7244,7 @@ class LiveTrader:
         self,
         ts: datetime,
         bars: Mapping[str, Mapping[str, object]],
+        frames: Mapping[str, pd.DataFrame],
     ) -> None:
         """Apply each simulation financing observation at most once.
 
@@ -7244,7 +7252,7 @@ class LiveTrader:
         per-symbol gate: both are consumed together or not at all.
         """
         eligible_bars = {
-            symbol: bar
+            symbol: self._unpaid_funding(symbol, ts, bar, frames.get(symbol))
             for symbol, bar in bars.items()
             if ts
             > self._last_financing_ts.get(
@@ -7267,12 +7275,42 @@ class LiveTrader:
         cash_flows.extend(borrow_cash_flows)
         for symbol in (*observed_symbols, *borrow_symbols):
             self._last_financing_ts[symbol] = ts
+        for symbol in observed_symbols:
+            settled_at = eligible_bars[symbol].get(FUNDING_SETTLED_AT_FIELD)
+            if settled_at is not None and not pd.isna(settled_at):
+                self._last_funding_settled_at[symbol] = pd.Timestamp(settled_at).to_pydatetime()
         for cash_flow in cash_flows:
             self._cash += cash_flow.cash_flow
             if self._on_financing_cash_flow:
                 self._on_financing_cash_flow(cash_flow)
         if cash_flows:
             self._performance_dirty = True
+
+    def _unpaid_funding(
+        self,
+        symbol: str,
+        ts: datetime,
+        bar: Mapping[str, object],
+        frame: pd.DataFrame | None,
+    ) -> Mapping[str, object]:
+        """The bar, carrying every settlement through it not yet paid.
+
+        A settlement published after the bar it falls in was processed lands
+        on that bar on a later fetch; it is paid on this bar instead of never,
+        as a backtest pays one that fell in a gap.
+        """
+        paid_through = self._last_funding_settled_at.get(symbol)
+        if paid_through is None or frame is None or FUNDING_SETTLED_AT_FIELD not in frame.columns:
+            return bar
+        settled_at = pd.to_datetime(frame[FUNDING_SETTLED_AT_FIELD], utc=True)
+        unpaid = frame[(settled_at > pd.Timestamp(paid_through)) & (frame["ts"] <= ts)]
+        if unpaid.empty:
+            return {**bar, FUNDING_RATE_FIELD: float("nan"), FUNDING_SETTLED_AT_FIELD: pd.NaT}
+        return {
+            **bar,
+            FUNDING_RATE_FIELD: float(unpaid[FUNDING_RATE_FIELD].sum()),
+            FUNDING_SETTLED_AT_FIELD: settled_at[unpaid.index].max(),
+        }
 
     def _calc_account_snapshot(self) -> tuple[float, dict[str, Position]]:
         return calc_equity(

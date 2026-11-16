@@ -124,6 +124,7 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         last_feature_as_of=datetime(2025, 1, 2, 0, 5, tzinfo=UTC),
         last_bar_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
         last_financing_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
+        last_funding_settled_at={"BTC/USDT": datetime(2025, 1, 2, 0, 0, 0, 3000, tzinfo=UTC)},
         pending_decision=[OrderIntent(action="close", symbol="BTC/USDT")],
         active_orders=[_order()],
         equity_peak=1_050.0,
@@ -152,8 +153,8 @@ def test_runtime_state_round_trip_preserves_restart_fields():
 @pytest.mark.parametrize(
     ("versions_back", "missing"),
     [
-        (1, ("rebalance_stopped_at", "failed_rebalance_symbols")),
-        (2, ("pending_flatten", "rebalance_stopped_at", "failed_rebalance_symbols")),
+        (1, ("last_funding_settled_at",)),
+        (2, ("last_funding_settled_at", "rebalance_stopped_at", "failed_rebalance_symbols")),
     ],
 )
 def test_an_additive_previous_schema_loads_with_its_missing_fields_empty(versions_back, missing):

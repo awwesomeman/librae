@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import functools
 import logging
+import os
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -323,7 +324,6 @@ def build_run(strategy_name: str, run_file: str) -> tuple[RunConfig, RunOptions]
     if not isinstance(execution_raw, dict):
         raise ValueError("strategy.execution must be a mapping")
     unknown_execution_keys = set(execution_raw) - {
-        "default_fill_price",
         "max_bar_volume_participation_rate",
         "adv_lookback_sessions",
         "max_adv_participation_rate",
@@ -535,6 +535,8 @@ def check_existing_run(
         return None
 
     try:
+        import psycopg2
+
         from librae.db.timescale_reader import get_run_by_backtest_cache_key
     except ImportError as exc:
         logger.warning(
@@ -545,9 +547,17 @@ def check_existing_run(
         )
         return None
 
+    if not os.getenv("TIMESCALE_DSN"):
+        logger.warning(
+            "backtest cache check skipped: TIMESCALE_DSN is not set. Pass --no-db "
+            "to suppress this check entirely."
+        )
+        return None
     try:
         existing = get_run_by_backtest_cache_key(cache_key)
-    except Exception:
+    except psycopg2.OperationalError:
+        # Only an unreachable database may skip dedup; any other error is a
+        # bug that would make every run miss the cache.
         logger.warning(
             "backtest cache check failed (TimescaleDB unreachable?) — "
             "skipping dedup and running the backtest. Pass --no-db to "

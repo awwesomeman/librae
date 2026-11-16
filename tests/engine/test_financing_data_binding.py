@@ -67,9 +67,10 @@ def test_perpetual_instrument_gets_funding_rate_merged_onto_bars():
 
     assert bars["funding_rate"].isna().tolist() == [True, False]
     assert bars["funding_rate"].iloc[1] == 0.0001
-    # By time from the window's first bar, less the merge tolerance; never the bar count.
+    assert bars["funding_settled_at"].iloc[1] == pd.Timestamp("2026-01-01T08:00:00Z")
+    # By time from the window's first bar; never the bar count.
     first_bar_ms = int(pd.Timestamp("2026-01-01T00:00:00Z").timestamp() * 1000)
-    assert adapter.funding_calls == [("BTC/USDT:USDT", first_bar_ms - 60_000, None)]
+    assert adapter.funding_calls == [("BTC/USDT:USDT", first_bar_ms, None)]
 
 
 def test_spot_instrument_does_not_fetch_funding():
@@ -106,16 +107,17 @@ def test_millisecond_jittered_funding_still_merges_onto_its_bar():
     assert bars["funding_rate"].iloc[1] == 0.0001
 
 
-def test_funding_settling_just_before_the_bar_merges_onto_that_bar():
+def test_funding_settling_just_before_a_bar_is_paid_in_the_bar_it_falls_in():
+    """The position held when the settlement happens pays it."""
     adapter = _EarlyJitteredFundingAdapter()
     fetcher = _bind_market_data_source(adapter, _instrument("contract_perpetual"))
 
     bars = fetcher("BTC-PERP", "8h", 2)
 
-    assert bars["funding_rate"].isna().tolist() == [True, False]
+    assert bars["funding_rate"].isna().tolist() == [False, True]
 
 
-def test_funding_settling_just_before_the_first_bar_is_still_requested():
+def test_funding_settling_before_the_first_bar_is_left_out():
     class _BeforeFirstBarAdapter(_FakeCryptoAdapter):
         funding_ts = "2025-12-31T23:59:59.997Z"
 
@@ -123,19 +125,19 @@ def test_funding_settling_just_before_the_first_bar_is_still_requested():
 
     bars = fetcher("BTC-PERP", "8h", 2)
 
-    assert bars["funding_rate"].isna().tolist() == [False, True]
+    assert "funding_rate" not in bars.columns
 
 
-def test_funding_far_from_any_bar_is_not_attributed():
-    class _StaleFundingAdapter(_FakeCryptoAdapter):
+def test_funding_inside_a_bar_is_paid_in_that_bar():
+    class _MidBarFundingAdapter(_FakeCryptoAdapter):
         funding_ts = "2026-01-01T07:00:00Z"
 
-    adapter = _StaleFundingAdapter()
+    adapter = _MidBarFundingAdapter()
     fetcher = _bind_market_data_source(adapter, _instrument("contract_perpetual"))
 
     bars = fetcher("BTC-PERP", "8h", 2)
 
-    assert bars["funding_rate"].isna().all()
+    assert bars["funding_rate"].isna().tolist() == [False, True]
 
 
 # ---------------------------------------------------------------------------

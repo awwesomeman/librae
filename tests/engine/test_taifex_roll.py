@@ -10,7 +10,7 @@ from librae.backtest.engine import Backtest
 from librae.core.cost_model import CostModel
 from librae.core.run_config import AccountConfig, RunConfig
 from librae.core.strategy import Context, OrderIntent, Strategy
-from librae.core.taifex import taifex_final_settlement_day
+from librae.core.taifex import final_settlement_follows, taifex_final_settlement_day
 from librae.core.trading_calendar import period_start, session_bounds, session_label
 
 pytest.importorskip("exchange_calendars")
@@ -229,3 +229,48 @@ def test_limit_exit_marketable_at_the_settlement_open_is_allowed() -> None:
     }
 
     assert _run(_settlement_bar_trades_both_contracts(), actions) == pytest.approx(INITIAL_CASH)
+
+
+class HoldUntilSettlementFollows(Strategy):
+    """Hold the alias and exit on the flag, re-entering after the settlement session."""
+
+    def __init__(self) -> None:
+        self.flagged: list[date] = []
+
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
+        session = session_label(ctx.ts, CALENDAR)
+        if ctx.symbol in ctx.settles_next_session:
+            self.flagged.append(session)
+            return [OrderIntent(action="close", symbol=ctx.symbol)] if ctx.positions else []
+        if not ctx.positions and session != SETTLEMENT:
+            return [OrderIntent(action="long", symbol=ctx.symbol, quantity=1.0)]
+        return []
+
+
+@pytest.mark.parametrize("stamps", [D1, _h1_stamps(DAYS)], ids=["D1", "H1"])
+def test_a_strategy_exiting_on_the_flag_never_holds_through_settlement(
+    stamps: pd.DatetimeIndex,
+) -> None:
+    strategy = HoldUntilSettlementFollows()
+    Backtest(
+        _frame("TXFR1", stamps),
+        strategy,
+        initial_balance=INITIAL_CASH,
+        cost_model=CostModel.zero(),
+        data_source="test",
+    ).run()
+
+    assert set(strategy.flagged) == {date(2026, 11, 17)}
+
+
+@pytest.mark.parametrize(
+    ("session", "expected"),
+    [
+        (date(2026, 11, 17), True),
+        (date(2026, 11, 16), False),
+        (SETTLEMENT, False),
+        (date(2023, 1, 17), True),  # 01-18 was closed; settlement moved to 01-30
+    ],
+)
+def test_final_settlement_follows(session: date, expected: bool) -> None:
+    assert final_settlement_follows(session) is expected

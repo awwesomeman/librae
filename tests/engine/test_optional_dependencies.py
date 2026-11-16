@@ -19,7 +19,6 @@ blocked = {
     "exchange_calendars",
     "httpx",
     "ib_async",
-    "lightweight_charts",
     "matplotlib",
     "psycopg2",
     "shioaji",

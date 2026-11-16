@@ -80,9 +80,7 @@ state, costs, and output. The [examples](examples/README.md) show the complete
   and owns their validation, sizing, sequencing, execution, and diagnostics.
 - **Outputs:** `BacktestOutput` contains run metadata, currency-labeled trade
   and funding events, one equity/PnL/metrics result per account, and optional
-  position/allocation snapshots. For caller-owned Parquet, SQLite, or other
-  local storage, use the format-neutral
-  [artifact tables](docs/guides/local-artifacts.md). Build benchmark,
+  position/allocation snapshots. Build benchmark,
   active-return, and cross-run comparisons with the
   [performance analysis guide](docs/guides/performance-analysis.md).
 

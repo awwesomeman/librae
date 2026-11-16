@@ -15,6 +15,7 @@ from librae.core.financing import (
     FinancingCashFlow,
     FinancingLifecycleEvent,
     attach_borrow_rate,
+    attach_funding_rate,
     attribute_financing_to_closes,
     calculate_borrow_cash_flows,
     calculate_funding_cash_flows,
@@ -24,7 +25,7 @@ from librae.core.strategy import PositionState
 from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
 
-from tests.conftest import make_test_cfg
+from tests.conftest import make_test_cfg, primary_subscriptions_for
 
 
 def _cost_model(multiplier: float = 10.0) -> CostModel:
@@ -79,9 +80,17 @@ def _backtest_frame(
         },
         index=index,
     )
+    if rate_field == "funding_rate":
+        data["funding_settled_at"] = timestamps.where(data["funding_rate"].notna().to_numpy())
     if mark_prices is not None:
         data["funding_mark_price"] = mark_prices
     return data
+
+
+def _subscriptions(data: pd.DataFrame):
+    """A frame carrying funding is a perpetual's; any other one is spot."""
+    instrument_type = "contract_perpetual" if "funding_rate" in data.columns else "spot"
+    return primary_subscriptions_for(data, "H1", instrument_type=instrument_type)
 
 
 class _OpenOnce(Strategy):
@@ -190,6 +199,7 @@ def test_backtest_applies_only_same_timestamp_observations() -> None:
         initial_balance=10_000.0,
         cost_model=_cost_model(),
         data_source="test",
+        primary_subscriptions=_subscriptions(data),
     )
 
     result = backtest.run()
@@ -214,6 +224,7 @@ def test_backtest_uses_explicit_funding_mark_price_and_multiplier() -> None:
         initial_balance=10_000.0,
         cost_model=_cost_model(multiplier=5.0),
         data_source="test",
+        primary_subscriptions=_subscriptions(data),
     ).run()
 
     assert len(result.financing_cash_flows) == 1
@@ -246,6 +257,7 @@ def test_funding_accrued_while_held_is_folded_into_the_closed_trade_stats() -> N
         initial_balance=10_000.0,
         cost_model=_cost_model(),
         data_source="test",
+        primary_subscriptions=_subscriptions(data),
     )
     backtest.run()
     output = backtest.build_output()
@@ -267,6 +279,7 @@ def test_backtest_metrics_assign_later_funding_only_to_remaining_quantity() -> N
         initial_balance=10_000.0,
         cost_model=_cost_model(),
         data_source="test",
+        primary_subscriptions=_subscriptions(data),
     )
     backtest.run()
 
@@ -300,6 +313,7 @@ def test_financing_on_the_final_bar_reaches_the_end_of_run_forced_close(
         initial_balance=10_000.0,
         cost_model=_cost_model(),
         data_source="test",
+        primary_subscriptions=_subscriptions(data),
     )
     result = backtest.run()
     output = backtest.build_output()
@@ -335,6 +349,7 @@ def test_a_liquidity_capped_terminal_close_releases_its_share_of_the_last_accrua
         initial_balance=10_000.0,
         cost_model=_cost_model(),
         data_source="test",
+        primary_subscriptions=_subscriptions(data),
     )
     result = backtest.run()
     backtest.build_output()
@@ -856,6 +871,7 @@ def test_borrow_cost_is_charged_to_the_short_and_folded_into_the_closed_trade() 
         initial_balance=10_000.0,
         cost_model=_cost_model(),
         data_source="test",
+        primary_subscriptions=_subscriptions(data),
     )
     backtest.run()
     output = backtest.build_output()
@@ -877,6 +893,7 @@ def test_a_long_pays_no_borrow_interest_over_a_whole_backtest() -> None:
         initial_balance=10_000.0,
         cost_model=_cost_model(),
         data_source="test",
+        primary_subscriptions=_subscriptions(data),
     )
     backtest.run()
 
@@ -941,3 +958,176 @@ def test_attach_borrow_rate_leaves_bars_alone_when_there_are_no_rates() -> None:
     attached = attach_borrow_rate(bars, empty, timeframe="1d")
 
     assert "borrow_rate" not in attached.columns
+
+
+def _settlements(*times: str, rate: float = 0.001) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"ts": pd.to_datetime(list(times), utc=True, format="ISO8601"), "funding_rate": rate}
+    )
+
+
+def test_every_settlement_inside_a_coarse_bar_is_paid_in_it() -> None:
+    """A daily bar spans three 8h settlements; none may be dropped."""
+    bars = pd.DataFrame({"ts": pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")})
+    rates = _settlements("2026-01-01T00:00:00.003Z", "2026-01-01T08:00:00Z", "2026-01-01T16:00:00Z")
+
+    attached = attach_funding_rate(bars, rates, timeframe="1d")
+
+    assert attached["funding_rate"].iloc[0] == pytest.approx(0.003)
+    assert attached["funding_settled_at"].iloc[0] == pd.Timestamp("2026-01-01T16:00:00Z")
+    assert attached["funding_rate"].iloc[1:].isna().all()
+
+
+def test_a_settlement_is_never_charged_on_two_one_minute_bars() -> None:
+    bars = pd.DataFrame({"ts": pd.date_range("2026-01-01T07:59", periods=3, freq="min", tz="UTC")})
+
+    attached = attach_funding_rate(bars, _settlements("2026-01-01T08:00:00.003Z"), timeframe="1m")
+
+    assert attached["funding_rate"].notna().tolist() == [False, True, False]
+
+
+def test_a_settlement_in_a_bar_gap_is_paid_on_the_next_bar() -> None:
+    bars = pd.DataFrame(
+        {"ts": pd.to_datetime(["2026-01-01T06:00Z", "2026-01-01T09:00Z"], utc=True)}
+    )
+
+    attached = attach_funding_rate(bars, _settlements("2026-01-01T08:00Z"), timeframe="1h")
+
+    assert attached["funding_rate"].notna().tolist() == [False, True]
+
+
+def test_backtest_refuses_a_forward_filled_funding_rate() -> None:
+    data = _backtest_frame([0.01] * 5)
+    data["funding_settled_at"] = data["funding_settled_at"].iloc[0]
+
+    with pytest.raises(ValueError, match="forward-filled"):
+        Backtest(
+            data,
+            _OpenOnce(),
+            cost_model=_cost_model(),
+            primary_subscriptions=_subscriptions(data),
+        ).run()
+
+
+def test_backtest_refuses_a_rate_without_its_settlement_time() -> None:
+    data = _backtest_frame([0.01] * 5).drop(columns=["funding_settled_at"])
+
+    with pytest.raises(ValueError, match="attach_funding_rate"):
+        Backtest(
+            data,
+            _OpenOnce(),
+            cost_model=_cost_model(),
+            primary_subscriptions=_subscriptions(data),
+        ).run()
+
+
+def test_backtest_refuses_funding_on_a_non_perpetual() -> None:
+    data = _backtest_frame([np.nan, 0.01, np.nan, np.nan, np.nan])
+
+    with pytest.raises(ValueError, match="only a contract_perpetual pays funding"):
+        Backtest(
+            data,
+            _OpenOnce(),
+            cost_model=_cost_model(),
+            primary_subscriptions=primary_subscriptions_for(data, "H1"),
+        ).run()
+
+
+def test_backtest_refuses_an_unfunded_perpetual() -> None:
+    """Running without funding cost is a visible data choice: zero rates."""
+    unfunded = _backtest_frame([np.nan] * 5).drop(columns=["funding_rate", "funding_settled_at"])
+    subscriptions = primary_subscriptions_for(unfunded, "H1", instrument_type="contract_perpetual")
+
+    with pytest.raises(ValueError, match="no funding_rate observations"):
+        Backtest(
+            unfunded, _OpenOnce(), cost_model=_cost_model(), primary_subscriptions=subscriptions
+        ).run()
+
+    zero = _backtest_frame([0.0] * 5)
+    result = Backtest(
+        zero, _OpenOnce(), cost_model=_cost_model(), primary_subscriptions=subscriptions
+    ).run()
+    assert {item.cash_flow for item in result.financing_cash_flows} == {0.0}
+
+
+def test_a_missing_rate_or_a_repeated_settlement_is_refused() -> None:
+    bars = pd.DataFrame({"ts": pd.date_range("2026-01-01", periods=2, freq="h", tz="UTC")})
+    missing = _settlements("2026-01-01T00:30Z", rate=np.nan)
+    repeated = _settlements("2026-01-01T00:30Z", "2026-01-01T00:30Z")
+
+    with pytest.raises(ValueError, match="must all carry a funding_rate"):
+        attach_funding_rate(bars, missing, timeframe="1h")
+    with pytest.raises(ValueError, match="must be unique"):
+        attach_funding_rate(bars, repeated, timeframe="1h")
+
+
+def test_backtest_refuses_a_settlement_placed_a_bar_late() -> None:
+    """Rounding 07:59:59.997 to the hour moves it onto the next bar."""
+    data = _backtest_frame([np.nan, 0.01, np.nan, np.nan, np.nan])
+    late = data.index.get_level_values("datetime")[1] - pd.Timedelta(minutes=30)
+    data.loc[data["funding_rate"].notna(), "funding_settled_at"] = late
+
+    with pytest.raises(ValueError, match="on the wrong bar"):
+        Backtest(
+            data,
+            _OpenOnce(),
+            cost_model=_cost_model(),
+            primary_subscriptions=_subscriptions(data),
+        ).run()
+
+
+def test_shadow_simulation_pays_a_late_published_settlement_on_the_next_bar() -> None:
+    """The venue publishes the 02:59:59.997 settlement after the 02:00 bar was
+    processed; it is paid at 03:00 instead of never."""
+    timestamps = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
+    settlements = _settlements("2026-01-01T01:10Z", "2026-01-01T02:59:59.997Z")
+    settlements["funding_rate"] = [0.01, -0.005]
+    published = [0, 1, 1, 2]
+
+    def frame(index: int) -> pd.DataFrame:
+        bars = pd.DataFrame(
+            {
+                "ts": timestamps[: index + 1],
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0,
+                "volume": 1_000.0,
+            }
+        )
+        return attach_funding_rate(bars, settlements.iloc[: published[index]], timeframe="1h")
+
+    responses = iter([frame(index) for index in range(4)])
+    recorded = []
+    runner = LiveTrader(
+        _OpenOnce(),
+        lambda frame: frame,
+        config=make_test_cfg(
+            symbols=["PERP"],
+            execution=ExecutionPolicy(max_bar_volume_participation_rate=None, warmup_periods=1),
+            instrument_overrides={
+                "PERP": {
+                    "instrument_type": "contract_perpetual",
+                    "currency": "USDT",
+                    "calendar_id": "24/7",
+                }
+            },
+        ),
+        adapter=lambda *_args, **_kwargs: next(responses),
+        cost_model=_cost_model(),
+        state_store=MemoryLiveStateStore(),
+        on_bar=None,
+        on_position_event=None,
+        on_ohlcv=None,
+        on_heartbeat=None,
+        on_signal_outcome=None,
+        on_financing_cash_flow=recorded.append,
+        warmup_fetcher=None,
+        notifier=None,
+        clock=lambda: datetime(2026, 1, 1, 4, tzinfo=UTC),
+    )
+    runner._sleep = lambda _seconds: None
+    runner.run(max_iterations=4)
+
+    assert [item.cash_flow for item in recorded] == pytest.approx([-20.0, 10.0])
+    assert [item.ts for item in recorded] == [timestamps[1], timestamps[3]]

@@ -88,7 +88,6 @@ def test_run_metadata_persists_execution_policy_separately_from_params(_mock_sch
         ),
         params={"window": 20},
         execution_policy={
-            "default_fill_price": "open",
             "max_bar_volume_participation_rate": 0.1,
         },
         risk_policy={"max_drawdown_rate": 0.2},
@@ -107,7 +106,6 @@ def test_run_metadata_persists_execution_policy_separately_from_params(_mock_sch
     assert values[7] == "regular"
     assert json.loads(values[13]) == {"window": 20}
     assert json.loads(values[14]) == {
-        "default_fill_price": "open",
         "max_bar_volume_participation_rate": 0.1,
     }
     assert json.loads(values[15]) == {"max_drawdown_rate": 0.2}
@@ -706,7 +704,6 @@ class TestPersistBacktest:
         assert len(signal_series) == 4
         assert all(v == 1.0 for v in signal_series.values.tolist())
         assert call_kwargs.kwargs["execution_policy"] == {
-            "default_fill_price": "open",
             "max_bar_volume_participation_rate": None,
             "adv_lookback_sessions": None,
             "max_adv_participation_rate": None,

@@ -81,6 +81,10 @@ class Context:
             ``None`` preserves the legacy single-frame contract.
         market_data: Immutable, exact-subscription as-of history. ``None``
             preserves the legacy single-frame contract.
+        settles_next_session: TAIFEX continuous aliases whose next session is
+            their contract's final settlement session. The alias switches
+            contracts during it and positions are not rolled, so close them on
+            this bar or an earlier one.
     """
 
     ts: datetime
@@ -94,8 +98,10 @@ class Context:
     period_index: int
     decision_at: datetime | None = None
     market_data: MarketDataView | None = None
+    settles_next_session: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "settles_next_session", frozenset(self.settles_next_session))
         object.__setattr__(self, "symbols", tuple(self.symbols))
         object.__setattr__(self, "bar", MappingProxyType(dict(self.bar)))
         object.__setattr__(

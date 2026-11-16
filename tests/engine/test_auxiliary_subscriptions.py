@@ -297,10 +297,9 @@ class TestBacktestLiveParity:
             auxiliary_data={subscription: frame},
         )
 
-    def test_undeclared_frames_stay_supported(self) -> None:
-        """The Python-API mixed-frequency path predates the declaration and
-        never claimed live parity, so passing frames without declaring them
-        must keep working."""
+    def test_undeclared_frames_are_refused(self) -> None:
+        """A config that declares no auxiliary must not be handed one: live
+        would never fetch it, so the strategy would see different data."""
         import pandas as pd
         from librae.core.market_data import MarketDataSubscription
 
@@ -323,7 +322,8 @@ class TestBacktestLiveParity:
             }
         ).set_index("ts")
 
-        self._build((), auxiliary_data={subscription: frame})
+        with pytest.raises(ValueError, match="exactly the identities"):
+            self._build((), auxiliary_data={subscription: frame})
 
 
 class TestAuxiliaryCannotBreakTheCycle:

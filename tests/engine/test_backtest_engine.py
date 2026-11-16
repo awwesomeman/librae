@@ -7,14 +7,14 @@ import librae
 import numpy as np
 import pandas as pd
 import pytest
-from librae import MarketDataSubscription, normalize_bars
+from librae import MarketDataSubscription
 from librae.backtest.engine import Backtest
 from librae.backtest.result import BacktestResult
 from librae.core.cost_model import CostModel
 from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy
 from librae.core.strategy import Context, OrderIntent, Strategy
 
-from tests.conftest import make_test_cfg
+from tests.conftest import make_test_cfg, primary_subscriptions_for
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -415,6 +415,7 @@ class TestBacktestBasics:
             _make_multiindex_df([100.0] * 5, symbol="UNREGISTERED"),
             HoldStrategy(),
             execution=policy,
+            cost_model=CostModel.zero(),
         )
 
         with pytest.raises(ValueError, match=r"calendar_id.*UNREGISTERED"):
@@ -579,7 +580,7 @@ class TestBacktestDataContract:
         with pytest.raises(ValueError, match="must exactly match data symbols"):
             Backtest(df, HoldStrategy(), config=cfg, cost_model=_zero_cost())
 
-    def test_timeframe_is_inferred_per_symbol_not_from_staggered_event_union(self) -> None:
+    def test_staggered_bars_off_the_declared_grid_are_refused(self) -> None:
         aaa = _make_multiindex_df([100.0] * 5, symbol="AAA")
         bbb = _make_multiindex_df([200.0] * 5, symbol="BBB")
         shifted = bbb.index.get_level_values("datetime") + pd.Timedelta(minutes=30)
@@ -587,16 +588,17 @@ class TestBacktestDataContract:
             [bbb.index.get_level_values("symbol"), shifted],
             names=["symbol", "datetime"],
         )
+        data = pd.concat([aaa, bbb])
         backtest = Backtest(
-            pd.concat([aaa, bbb]),
+            data,
             HoldStrategy(),
             initial_balance=1_000.0,
             cost_model=_zero_cost(),
+            primary_subscriptions=primary_subscriptions_for(data, "H1"),
         )
 
-        backtest.run()
-
-        assert backtest._timeframe == "H1"
+        with pytest.raises(ValueError, match="not the canonical timeframe=H1 start"):
+            backtest.run()
 
     def test_rejects_inconsistent_per_symbol_timeframes(self) -> None:
         hourly = _make_multiindex_df([100.0] * 5, symbol="AAA")
@@ -607,12 +609,14 @@ class TestBacktestDataContract:
             names=["symbol", "datetime"],
         )
 
+        data = pd.concat([hourly, two_hour])
         with pytest.raises(ValueError, match="inconsistent timeframes"):
             Backtest(
-                pd.concat([hourly, two_hour]),
+                data,
                 HoldStrategy(),
                 initial_balance=1_000.0,
                 cost_model=_zero_cost(),
+                primary_subscriptions=primary_subscriptions_for(data, "H1"),
             ).run()
 
     def test_rejects_configured_timeframe_that_disagrees_with_data(self) -> None:
@@ -657,31 +661,6 @@ class TestBacktestDataContract:
 
         assert str(backtest._data.index.get_level_values("datetime").tz) == "UTC"
         assert str(frame.index.get_level_values("datetime").tz) == "Asia/Taipei"
-
-    def test_normalized_input_keeps_the_same_canonical_utc_boundary(self) -> None:
-        timestamps = pd.date_range(
-            "2026-01-01",
-            periods=5,
-            freq="h",
-            tz="Asia/Taipei",
-        )
-        frame = pd.DataFrame(
-            {
-                "open": [100.0] * 5,
-                "high": [101.0] * 5,
-                "low": [99.0] * 5,
-                "close": [100.0] * 5,
-                "volume": [100.0] * 5,
-            },
-            index=timestamps,
-        )
-
-        normalized = normalize_bars(frame, symbol="BTCUSDT")
-        backtest = Backtest(normalized, HoldStrategy(), cost_model=_zero_cost())
-        backtest.run()
-
-        assert backtest._data is normalized
-        assert str(backtest._timeline[0].tz) == "UTC"
 
     def test_config_resolves_exact_primary_subscription_identity(self) -> None:
         frame = _make_multiindex_df([100.0] * 5)
@@ -852,29 +831,20 @@ class TestBacktestDataContract:
         assert all(ctx.symbols == ("AAA", "BBB") for ctx in contexts)
         assert all(tuple(ctx.bars) == ("AAA", "BBB") for ctx in contexts)
 
-    def test_legacy_direct_universe_keeps_data_first_seen_order(self) -> None:
+    def test_direct_multi_symbol_frame_requires_primary_subscriptions(self) -> None:
         data = pd.concat(
             [
                 _make_multiindex_df([200.0] * 5, symbol="BBB"),
                 _make_multiindex_df([100.0] * 5, symbol="AAA"),
             ]
         )
-        contexts: list[Context] = []
 
-        class CaptureUniverse(Strategy):
-            def on_bar(self, ctx: Context) -> list[OrderIntent]:
-                contexts.append(ctx)
-                return []
+        with pytest.raises(ValueError, match="requires primary_subscriptions"):
+            Backtest(data, HoldStrategy(), cost_model=_zero_cost())
 
-        backtest = Backtest(data, CaptureUniverse(), cost_model=_zero_cost())
-
-        backtest.run()
-
-        assert backtest.primary_subscriptions == ()
-        assert contexts
-        assert all(ctx.symbol == "BBB" for ctx in contexts)
-        assert all(ctx.symbols == ("BBB", "AAA") for ctx in contexts)
-        assert all(tuple(ctx.bars) == ("BBB", "AAA") for ctx in contexts)
+    def test_direct_backtest_requires_an_explicit_cost_model(self) -> None:
+        with pytest.raises(ValueError, match="requires cost_model"):
+            Backtest(_make_multiindex_df([100.0] * 5), HoldStrategy())
 
     def test_direct_primary_subscriptions_type_check_precedes_field_access(self) -> None:
         frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
@@ -1760,7 +1730,12 @@ class TestMultiAsset:
                 return actions
 
         bt = Backtest(
-            df, BuyBothBar2(), initial_balance=100_000, cost_model=_zero_cost(), data_source="test"
+            df,
+            BuyBothBar2(),
+            initial_balance=100_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+            primary_subscriptions=primary_subscriptions_for(df),
         )
         result = bt.run()
 
@@ -1800,6 +1775,7 @@ class TestMultiAsset:
             initial_balance=1_000.0,
             cost_model=_zero_cost(),
             data_source="test",
+            primary_subscriptions=primary_subscriptions_for(df),
         ).run()
 
         assert available == [
@@ -1852,6 +1828,7 @@ class TestMultiAsset:
             initial_balance=100_000,
             cost_model=_zero_cost(),
             data_source="test",
+            primary_subscriptions=primary_subscriptions_for(df),
         ).run()
 
         symbols_traded = {t.symbol for t in result.trades}
@@ -1896,6 +1873,7 @@ class TestMultiAsset:
             initial_balance=100_000,
             cost_model=_zero_cost(),
             data_source="test",
+            primary_subscriptions=primary_subscriptions_for(df),
         ).run()
 
         events_by_symbol = {e.symbol: e for e in result.position_events if e.event_type == "open"}
@@ -1965,6 +1943,7 @@ class TestMultiAsset:
             initial_balance=1_000.0,
             cost_model=_zero_cost(),
             data_source="test",
+            primary_subscriptions=primary_subscriptions_for(df),
         ).run()
 
         open_event = next(event for event in result.position_events if event.event_type == "open")
@@ -2020,6 +1999,7 @@ class TestMultiAsset:
             initial_balance=1_000.0,
             cost_model=_zero_cost(),
             data_source="test",
+            primary_subscriptions=primary_subscriptions_for(df),
         ).run()
 
         assert result.equity_curve[2].equity == pytest.approx(1_020.0)
@@ -2060,6 +2040,7 @@ class TestMultiAsset:
             initial_balance=1_000.0,
             cost_model=_zero_cost(),
             data_source="test",
+            primary_subscriptions=primary_subscriptions_for(df),
         )
         result = backtest.run()
 
