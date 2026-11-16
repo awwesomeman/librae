@@ -276,7 +276,13 @@ Within those events:
   market or a later publication does not hold the rest. The event waits
   `LiveTrader.COHORT_HOLD` for such a bar's arrival jitter; a bar arriving
   later is decided at its own start, or off one grid its own availability,
-  when it arrives, ordered by its symbol's watermark alone.
+  when it arrives, ordered by its symbol's watermark alone. On one grid,
+  sim decides that start again with its bars already decided, the new
+  decision replacing what the earlier one left pending and seeing each held
+  position's bar count as the first did, until a later bar executes and so
+  acts on the earlier decision. After that the bar is
+  decided without them, reading every symbol only through its start, as of
+  its own availability, so its fills do not wait for the later bars.
 - Known gap: where one symbol's segment-ending bar carries the settle, live
   decides the others at their own availability without it and that bar in a
   later event, while a backtest decides them together at the settled
