@@ -146,7 +146,6 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("POSTGRES_APP_PASSWORD", Where.SECRETS, secret=True),
     EnvVar("POSTGRES_GRAFANA_PASSWORD", Where.SECRETS, secret=True),
     EnvVar("TELEGRAM_BOT_TOKEN", Where.SECRETS, secret=True),
-    EnvVar("TS_AUTHKEY", Where.SECRETS, secret=True),
     EnvVar("TIMESCALE_DSN", Where.SECRETS, secret=True),
     EnvVar("TRADE_TIMESCALE_DSN", Where.SECRETS, secret=True),
     EnvVar("LIBRAE_CONSOLE_DSN", Where.SECRETS, secret=True),

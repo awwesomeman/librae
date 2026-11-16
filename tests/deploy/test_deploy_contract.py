@@ -142,17 +142,15 @@ def test_trade_image_build_receives_explicit_source_identity() -> None:
     assert 'PLATFORMS="${TRADE_PLATFORMS:-linux/amd64,linux/arm64}"' in build_script
     assert 'docker buildx build --platform "${PLATFORMS}"' in build_script
 
-    for script_name in ("build_push.sh", "trade.sh"):
-        script = (DEPLOY / script_name).read_text(encoding="utf-8")
-        assert '--build-arg LIBRAE_VERSION="' in script
-        assert '--build-arg LIBRAE_REVISION="' in script
-        assert "--build-arg UV_DEFAULT_INDEX" in script
-        assert "--build-arg UV_INDEX" in script
-        assert "--build-arg UV_FIND_LINKS" in script
-        assert '--secret "id=uv_config,src=${' in script
-        assert "UV_CONFIG_FILE not found:" in script
-        assert "git -C " in script
-        assert "rev-parse --verify HEAD" in script
+    assert '--build-arg LIBRAE_VERSION="' in build_script
+    assert '--build-arg LIBRAE_REVISION="' in build_script
+    assert "--build-arg UV_DEFAULT_INDEX" in build_script
+    assert "--build-arg UV_INDEX" in build_script
+    assert "--build-arg UV_FIND_LINKS" in build_script
+    assert '--secret "id=uv_config,src=${' in build_script
+    assert "UV_CONFIG_FILE not found:" in build_script
+    assert "git -C " in build_script
+    assert "rev-parse --verify HEAD" in build_script
 
 
 def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
@@ -162,7 +160,12 @@ def test_trade_image_workflow_builds_and_runs_the_real_image() -> None:
     assert workflow_config["on"]["push"]["branches"] == ["main"]
     assert "branches" not in workflow_config["on"]["pull_request"]
     assert workflow.count('- "deploy/**"') == 2
-    assert "bash -n deploy/build_push.sh deploy/cloud_deploy.sh deploy/trade.sh" in workflow
+    # `bash -n a b` checks only `a`, so every script is checked on its own.
+    assert "for script in deploy/*.sh; do" in workflow
+    assert 'bash -n "${script}"' in workflow
+    assert "docker compose --file deploy/docker-compose.yml config --quiet" in workflow
+    assert "./deploy/db_backup.sh" in workflow
+    assert "./deploy/db_restore.sh" in workflow
     assert "if: github.event_name == 'push'" in workflow
     assert "docker/setup-qemu-action@v4" in workflow
     assert "docker/setup-buildx-action@v4" in workflow
@@ -227,7 +230,7 @@ def test_registry_trade_deploy_uses_one_immutable_image_reference() -> None:
     assert 'docker pull -q "${image}"' in trade_script
     assert "${image}:latest" not in trade_script
     assert "TRADE_IMAGE is a publish repository, not a deployable reference." in trade_script
-    assert 'image="quant-trade:local"' in trade_script
+    assert "quant-trade:local" not in trade_script
     assert 'org.opencontainers.image.revision" }}' in trade_script
 
     database_preflight = trade_script.index('echo "Checking strategy account and TimescaleDB')
@@ -1286,16 +1289,13 @@ def test_backtest_cache_identity_is_separate_from_config_hash() -> None:
     assert "(run_id, strategy, symbols, timeframe, config_hash," not in workflow
 
 
-def test_local_trade_build_uses_explicit_strategy_context() -> None:
-    script = (DEPLOY / "trade.sh").read_text(encoding="utf-8")
+def test_image_build_uses_explicit_strategy_context() -> None:
+    script = (DEPLOY / "build_push.sh").read_text(encoding="utf-8")
+    dockerfile = (DEPLOY / "Dockerfile").read_text(encoding="utf-8")
 
-    assert (
-        'strategy_source="${TRADE_STRATEGY_PATH:?Set TRADE_STRATEGY_PATH to the directory '
-        'containing <strategy>/run.py.}"' in script
-    )
-    assert '--build-context "strategy_source=${strategy_source}"' in script
-    assert '"${strategy_source}/${strategy}/${required_file}"' in script
-    assert '-f "${SCRIPT_DIR}/Dockerfile" "${PROJECT_ROOT}"' in script
+    assert 'STRATEGY_SOURCE="${TRADE_STRATEGY_PATH:?Set TRADE_STRATEGY_PATH' in script
+    assert '--build-context "strategy_source=${STRATEGY_SOURCE}"' in script
+    assert "COPY --from=strategy_source . strategies/" in dockerfile
 
 
 def test_timescaledb_has_enlarged_shm() -> None:
@@ -1383,7 +1383,7 @@ def test_cloud_deploy_preflight_allows_a_clean_env(tmp_path: Path) -> None:
                 "TSDB_BIND=127.0.0.1",
                 "TELEGRAM_CHAT_ID=12345",
                 "# TELEGRAM_BOT_TOKEN=not-set-here",
-                "TS_AUTHKEY=",
+                "TELEGRAM_BOT_TOKEN=",
                 "TRADE_IMAGE_REF=ghcr.io/user/quant-trade@sha256:abc",
             )
         ),
@@ -1478,13 +1478,6 @@ def test_cloud_deploy_preflight_matches_every_declared_secret_and_nothing_else()
 
     for var in ENV_VARS:
         assert bool(pattern.match(var.name)) is var.secret, var.name
-
-
-def test_bootstrap_tailscale_reads_its_auth_key_from_the_unsynced_file() -> None:
-    script = (DEPLOY / "bootstrap_tailscale.sh").read_text(encoding="utf-8")
-
-    assert "for env_file in .env .env.secrets; do" in script
-    assert "TS_AUTHKEY can be set in .env.secrets" in script
 
 
 def test_cloud_deploy_preflight_suffixes_are_the_registry_suffixes() -> None:

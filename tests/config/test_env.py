@@ -278,7 +278,7 @@ class TestRegistry:
         assert "TELEGRAM_CHAT_ID" not in SECRET_NAMES
 
 
-@pytest.mark.parametrize("name", ["TS_AUTHKEY", "SHIOAJI_PERSON_ID"])
+@pytest.mark.parametrize("name", ["TELEGRAM_BOT_TOKEN", "SHIOAJI_PERSON_ID"])
 def test_easily_overlooked_credentials_are_declared_secret(name: str):
     assert name in SECRET_NAMES
 

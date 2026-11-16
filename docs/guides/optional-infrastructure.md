@@ -348,6 +348,22 @@ the Python wheel. The packaged distribution does include the SQL schema under
 build machine, Bash for the local scripts, and a compatible Linux target; it
 is not part of the OS-independent Python package contract.
 
+`deploy/` holds one path from source to a running container, and nothing
+else:
+
+| File | Role |
+|---|---|
+| `Dockerfile`, `Dockerfile.dockerignore` | Image with the engine at the locked versions plus the caller's strategy source |
+| `build_push.sh` | Builds the image, pushes it, and prints the digest-qualified `TRADE_IMAGE_REF` |
+| `docker-compose.yml` | The reference TimescaleDB service |
+| `cloud_deploy.sh` | Copies the compose file and schema to a host and starts TimescaleDB there |
+| `trade.sh` | Starts, inspects, halts, and stops one container per deployment |
+| `db_backup.sh`, `db_restore.sh` | Backup and restore of that TimescaleDB ([runbook](operational-runbook.md#db-backup-and-restore)) |
+
+CI builds the image and runs each script against the compose service. A test
+fails when a file in `deploy/` is missing from this table, or when a document
+names a `deploy/` file or `trade.sh` command that does not exist.
+
 The reference builder combines this engine checkout with caller-owned strategy
 source. `TRADE_STRATEGY_PATH` selects that source directory and is required —
 there is no default. Relative paths resolve from the Librae checkout, so a
@@ -386,17 +402,15 @@ extras at the exact versions selected by the checked-in `uv.lock`.
 resolving new versions when `pyproject.toml`, those extras, and the lock
 disagree. It also pins the Python base and `uv` installer by multi-platform
 manifest digest. A deliberate base, installer, dependency, or extras refresh
-therefore appears in review. Both the local build in `trade.sh` and the
-registry build in `build_push.sh` use this same Dockerfile and frozen
-selection.
+therefore appears in review.
 
 Configure registry mirrors, HTTP proxies, and BuildKit caches on the Docker
 builder in the normal way for the environment. Configure an alternative
 Python package index through the standard `UV_DEFAULT_INDEX`, `UV_INDEX`, or
-`UV_FIND_LINKS` environment variables; both build scripts forward only the
+`UV_FIND_LINKS` environment variables; `build_push.sh` forwards only the
 values that are set. These are Docker build arguments and must contain only
 non-secret mirror or link settings. For an authenticated index, set
-`UV_CONFIG_FILE` to a local `uv.toml`; the scripts pass that file to
+`UV_CONFIG_FILE` to a local `uv.toml`; the script passes that file to
 `deploy/Dockerfile` as a temporary BuildKit secret. Keep the file outside
 version control. The repository does not embed an index URL, credentials, or
 TLS exceptions.
@@ -421,7 +435,7 @@ script publishes a Librae-revision candidate tag and prints
 target's operator-managed environment before starting a registry deployment.
 `trade.sh` rejects mutable tags and uses the same digest-qualified reference
 for pull, database preflight, and the running container. It does not edit the
-environment automatically. After selecting either a registry or locally built
+environment automatically. After selecting the
 image, it reads that image's immutable Docker image ID, records it as a
 container label, and passes it to the runner as `--runtime-revision`.
 
