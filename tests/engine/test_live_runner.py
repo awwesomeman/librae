@@ -55,6 +55,7 @@ from tests.engine.live_factories import (
     _test_cfg,
     _test_execution_identity,
     _zero_cost_model,
+    halt_file_of,
     make_live_runner,
     make_live_trader,
     with_run_leases,
@@ -6952,8 +6953,9 @@ class TestLiveExecutionLifecycle:
             on_ohlcv=None,
             on_heartbeat=None,
             on_signal_outcome=None,
-            state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
+            state_store=(store := MemoryLiveStateStore(restart_durable_for_tests=True)),
             runtime_revision="test-runtime",
+            halt_file=halt_file_of(store),
             clock=lambda: TEST_CLOCK_NOW,
         )
         runner.STALE_DATA_TOLERANCE_BARS = 100
@@ -8083,6 +8085,7 @@ class TestCryptoLiveFactory:
             )
         return trader, mock_cls
 
+    @pytest.mark.usefixtures("live_halt_file")
     def test_auto_builds_order_adapter_from_env(self, monkeypatch):
         trader, adapter_cls = self._build(monkeypatch)
         adapter_cls.assert_called_once()
@@ -8139,6 +8142,7 @@ class TestMultiAdapterRouting:
 
 
 class TestIBKRLiveFactory:
+    @pytest.mark.usefixtures("live_halt_file")
     def test_us_equity_builds_ibkr_instead_of_crypto(self):
         with (
             patch("librae.brokers.ibkr_adapter.IBKRAdapter") as mock_cls,
@@ -8180,6 +8184,7 @@ class TestShioajiLiveFactory:
         overrides.setdefault("broker", "shioaji")
         return _test_cfg(**overrides)
 
+    @pytest.mark.usefixtures("live_halt_file")
     def test_auto_builds_order_adapter_from_shioaji(self):
         with (
             patch("librae.brokers.shioaji_adapter.ShioajiAdapter") as mock_cls,
@@ -8201,6 +8206,7 @@ class TestShioajiLiveFactory:
         # Same authenticated session used for fetching and for order placement.
         assert trader._executor.get_order_adapter("TXFR1") is mock_cls.return_value
 
+    @pytest.mark.usefixtures("live_halt_file")
     def test_strategy_signal_triggers_shioaji_place_order(self):
         """End-to-end: strategy emits a buy, next bar's fill is mirrored to
         the auto-wired ShioajiAdapter via LiveExecutor.submit_order."""

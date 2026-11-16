@@ -51,6 +51,8 @@ _DATA_ADAPTER_BY_BROKER = {
 _DB_FAILURE_ALERT_THRESHOLD = 3
 _READY_FILE_ENV = "LIBRAE_READY_FILE"
 _READY_TOKEN_ENV = "LIBRAE_READY_TOKEN"
+# Where a live halt is written before it acts (LiveTrader's halt_file).
+_HALT_FILE_ENV = "LIBRAE_HALT_FILE"
 
 type _ExecutionRoute = tuple[str, str, str]
 
@@ -615,6 +617,9 @@ def build_live_trader(
     (which resolves by adapter *type*, not per symbol) — for a symbol that
     needs a bespoke data source ``instrument_overrides``' ``data_adapter``
     type can't express.
+
+    A live run takes its halt file from ``LIBRAE_HALT_FILE``, which it
+    requires.
     """
     if (feature_fn is None) == (batch_feature_fn is None):
         raise ValueError("exactly one of feature_fn and batch_feature_fn is required")
@@ -790,5 +795,6 @@ def build_live_trader(
         # construction returns is too late, since __init__ already persisted.
         on_run_registered=callbacks.register_run if callbacks else None,
         _market_data_snapshot=market_data_snapshot,
+        halt_file=(os.environ.get(_HALT_FILE_ENV) or None) if config.mode == "live" else None,
     )
     return trader

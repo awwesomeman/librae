@@ -972,6 +972,10 @@ def test_trade_script_uses_account_specific_identity_config_and_credentials(
     assert "--config /app/deployment/config.yaml" in final_run
     assert "--add-host host.docker.internal:host-gateway" in final_run
     assert ".secrets:/app/.secrets:ro" not in final_run
+    # A named volume outlives the container, so a halt the state store never
+    # recorded holds across a restart and a start that replaces the container.
+    assert "-v quant_momentum-main_halt:/var/lib/librae " in final_run
+    assert "-e LIBRAE_HALT_FILE=/var/lib/librae/halt " in final_run
 
 
 def test_trade_script_accepts_optional_credentials_in_sim_mode(tmp_path: Path) -> None:
@@ -997,6 +1001,7 @@ def test_trade_script_accepts_optional_credentials_in_sim_mode(tmp_path: Path) -
     final_run = next(call for call in docker_calls if call.startswith("run -d "))
     assert f"--env-file {credentials_file}" in final_run
     assert "--label io.librae.mode=sim" in final_run
+    assert "LIBRAE_HALT_FILE" not in final_run
 
 
 def _shioaji_credentials(tmp_path: Path, ca_path: str | None) -> Path:

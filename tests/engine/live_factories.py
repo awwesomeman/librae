@@ -5,8 +5,12 @@ Test modules import these instead of instantiating one another's test classes.
 
 from __future__ import annotations
 
+import tempfile
+import weakref
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -19,6 +23,20 @@ from librae.live.executor import LiveExecutor
 from librae.live.state import MemoryLiveStateStore
 
 from tests.conftest import make_test_cfg
+
+_HALT_DIRECTORY = tempfile.TemporaryDirectory(prefix="librae-halt-")
+_HALT_FILES: weakref.WeakKeyDictionary[object, Path] = weakref.WeakKeyDictionary()
+
+
+def halt_file_of(state_store: object) -> Path:
+    """The halt file that goes with ``state_store``, as a deployment's volume goes with its store.
+
+    A successor built on the same store finds a halt its predecessor wrote.
+    """
+    path = _HALT_FILES.get(state_store)
+    if path is None:
+        path = _HALT_FILES[state_store] = Path(_HALT_DIRECTORY.name) / uuid4().hex
+    return path
 
 
 def _zero_cost_model() -> CostModel:
@@ -121,6 +139,8 @@ def make_live_runner(
     kwargs.setdefault("on_ohlcv", None)
     if test_config.mode == "live":
         kwargs.setdefault("runtime_revision", "test-runtime")
+        if kwargs["state_store"] is not None:
+            kwargs.setdefault("halt_file", halt_file_of(kwargs["state_store"]))
         configured_order_adapter = kwargs.get("order_adapter")
         routes = (
             configured_order_adapter.values()
@@ -185,10 +205,12 @@ def make_live_trader(
     cost_model: CostModel | None = None,
     fetcher=None,
 ) -> LiveTrader:
+    state_store = state_store or MemoryLiveStateStore(restart_durable_for_tests=True)
+    config = config or _test_cfg(mode="live")
     trader = LiveTrader(
         strategy,
         _simple_feature_fn,
-        config=config or _test_cfg(mode="live"),
+        config=config,
         adapter=fetcher or (lambda *a, **kw: _make_ohlcv_df()),
         cost_model=cost_model or _zero_cost_model(),
         order_adapter=adapter,
@@ -197,8 +219,9 @@ def make_live_trader(
         on_ohlcv=None,
         on_heartbeat=None,
         on_signal_outcome=None,
-        state_store=state_store or MemoryLiveStateStore(restart_durable_for_tests=True),
+        state_store=state_store,
         runtime_revision=runtime_revision,
+        halt_file=halt_file_of(state_store) if config.mode == "live" else None,
         clock=clock or (lambda: TEST_CLOCK_NOW),
         on_ready=on_ready,
         on_runtime_event=on_runtime_event,

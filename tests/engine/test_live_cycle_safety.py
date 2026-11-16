@@ -259,8 +259,8 @@ class TestRiskChecksThroughAStoreOutage:
 
     The order poll keeps reading and booking, but places nothing. A breach or
     operator flatten sends its cancels and exits with their rows carried in
-    memory; a restart before they land halts on the venue's book and sends
-    nothing.
+    memory; a restart before they land comes up halted from the halt file
+    and sends nothing.
     """
 
     def test_a_breach_cancels_and_closes_at_once_and_is_recorded_once_the_store_answers(self):
@@ -427,14 +427,14 @@ class TestRiskChecksThroughAStoreOutage:
         [(True, None), (False, None), (False, "pair")],
         ids=["recorded", "unrecorded", "unrecorded-grouped"],
     )
-    def test_a_restart_halts_only_on_a_recorded_halt_or_an_ungrouped_cancel(
+    def test_a_restart_comes_up_halted_whether_or_not_the_store_recorded_the_halt(
         self, recorded, group_id
     ):
-        """Started once the halt is recorded, the successor resumes halted.
-        Started before, it resumes unhalted from the older checkpoint and
-        reads the halt's cancel as the venue's: an order without group_id
-        halts it as Order Cancelled, a grouped one fails only its group and
-        it trades on. Either way it sends no cancel again."""
+        """Started once the halt is recorded, the successor resumes halted
+        from its checkpoint. Started before, it loads the older, unhalted
+        checkpoint, and the halt file halts it before any order work, so the
+        halt's cancel reads as the halt's whatever the order's group. Either
+        way it sends no cancel again."""
         store = MemoryLiveStateStore(restart_durable_for_tests=True)
         trader, adapter, _, _, _ = _partly_filled_trader(store, group_id=group_id)
         outage = _store_down(store)
@@ -453,8 +453,9 @@ class TestRiskChecksThroughAStoreOutage:
         successor._initialize_run()
         successor._poll_cycle()
 
-        assert successor._halted is (recorded or group_id is None)
-        assert len(_alerts_titled(alerts, "Order Cancelled")) == (0 if recorded else 1)
+        assert successor._halted is True
+        assert len(_alerts_titled(alerts, "Halt Restored")) == (0 if recorded else 1)
+        assert _alerts_titled(alerts, "Order Cancelled") == []
         assert successor._positions["AAA"].quantity == pytest.approx(1.5)
         assert successor._active_orders == []
         adapter.place_order.assert_not_called()
@@ -576,7 +577,8 @@ class TestRiskChecksThroughAStoreOutage:
     def test_a_restart_before_the_store_answers_halts_on_the_venue_and_sends_nothing(
         self, venue, halt
     ):
-        """The successor knows only the checkpoint from before the breach.
+        """The successor knows only the checkpoint from before the breach,
+        and the halt file, which halts it before it reads the venue.
 
         The venue was closed by exits it does not know, or still holds the
         first of them, which go out one at a time.
@@ -610,6 +612,7 @@ class TestRiskChecksThroughAStoreOutage:
         successor._poll_cycle()
 
         assert successor._halted is True
+        assert len(_alerts_titled(alerts, "Halt Restored")) == 1
         assert len(_alerts_titled(alerts, halt)) == 1
         adapter.place_order.assert_not_called()
         adapter.cancel_order.assert_not_called()

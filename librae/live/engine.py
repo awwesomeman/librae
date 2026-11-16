@@ -8,6 +8,7 @@ factories belong outside the engine.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import types
 from collections import deque
@@ -19,6 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from inspect import getattr_static
 from math import isclose, isfinite
+from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Lock, RLock
 from time import perf_counter
@@ -128,6 +130,7 @@ from .executor import (
     OrderBelowVenueMinimumError,
     OrderRequest,
 )
+from .halt_file import read_halt_file, write_halt_file
 from .interfaces import (
     BarCallback,
     BarDataFetcher,
@@ -710,6 +713,10 @@ class LiveTrader:
             already-resolved source capability and subscription snapshot.
         runtime_revision: Caller-owned opaque runtime identity. Live mode
             requires it so checkpoints cannot cross code or image revisions.
+        halt_file: Live-only path a halt is written to before it acts, in a
+            writable directory that outlives the process. Live mode requires
+            it, so a restart stays halted until ``reset_halt`` even when the
+            state store never recorded the halt.
         execution_identity: Optional factory-observed broker identity. In live
             mode the order adapter is still queried and must report the exact
             same value before checkpoint lookup.
@@ -758,6 +765,7 @@ class LiveTrader:
         runtime_revision: str | None = None,
         execution_identity: ExecutionIdentity | None = None,
         clock: Callable[[], datetime] | None = None,
+        halt_file: str | os.PathLike[str] | None = None,
     ) -> None:
         from librae.config.symbols import resolve_symbol
         from librae.core.cost_model import CostModel
@@ -1012,6 +1020,21 @@ class LiveTrader:
                 "restart_durable=True. Use the reference database store, or a "
                 "custom store that genuinely survives the process."
             )
+        self._halt_file = Path(halt_file) if halt_file is not None else None
+        if is_live and self._halt_file is None:
+            raise ValueError(
+                "live mode requires halt_file, where a halt is written before it acts so a "
+                "restart stays halted when the state store never recorded it "
+                "(build_live_trader reads it from LIBRAE_HALT_FILE)"
+            )
+        if self._halt_file is not None:
+            if not is_live:
+                raise ValueError("halt_file is only valid in live mode")
+            # Checked here, not at the first halt, which would find out too late.
+            if not os.access(self._halt_file.parent, os.W_OK | os.X_OK):
+                raise ValueError(
+                    f"halt_file directory {self._halt_file.parent} must exist and be writable"
+                )
 
         self._ohlcv_cache: dict[str, pd.DataFrame] = {}
         # When this process first received each cached row version, keyed by
@@ -1050,7 +1073,8 @@ class LiveTrader:
         self._halted: bool = False
         # Operator pause: orders that open or add are dropped, exits still go out.
         self._entries_paused: bool = False
-        # A halt the store has not recorded: a restart would resume unhalted.
+        # A halt the store has not recorded: a restart would resume unhalted
+        # unless the halt file holds it.
         self._halt_unpersisted = False
         # Whether a halt still owes the live cancellation it skipped, that failed,
         # or that the venue has not yet confirmed for every tracked order.
@@ -1697,12 +1721,10 @@ class LiveTrader:
         here a write that meets an outage keeps its rows carried for the next
         checkpoint that lands and the work goes on; the outermost scope then
         raises the outage, as any failed write does. A restart before a
-        checkpoint lands starts unhalted from one that does not know this
-        work. Startup reconciliation halts, sending nothing, on the positions
-        or untracked open orders a flatten left at the venue. An order this
-        work cancelled reads as one the venue ended: one without ``group_id``
-        halts the account, a grouped one fails only its group, and the
-        account trades on.
+        checkpoint lands loads one that does not know this work, but starts
+        halted from the halt file (``_restore_halt_file``), sending nothing;
+        startup reconciliation then alerts the positions or untracked open
+        orders a flatten left at the venue.
         """
         if self._unrecorded is not None:
             yield
@@ -2590,11 +2612,12 @@ class LiveTrader:
     ) -> None:
         """Fail closed and cancel every tracked order that may still execute.
 
-        The halt is checkpointed before cancelling, and each cancel records
-        itself. A failure of either still alerts, naming it, before it
-        propagates. A store outage holds back neither
-        (``_acting_through_store_outage``): a cancel adds no exposure, and a
-        restart reads one it does not know as the venue's.
+        The halt is written to the halt file and checkpointed before
+        cancelling, and each cancel records itself. A failure of any still
+        alerts, naming it; a checkpoint or cancel failure then propagates. A
+        store outage holds back neither the cancels nor the halt file
+        (``_acting_through_store_outage``): a cancel adds no exposure, and the
+        file keeps a restart halted until the checkpoint records the halt.
 
         On an account a flatten has halted or is halting, whose only orders
         are its exits, the exits keep working, as for a manual halt:
@@ -2620,9 +2643,13 @@ class LiveTrader:
             order.cancel_requested = True
             cancelled = (order,)
         dropped, self._pending_flatten = self._pending_flatten, None
+        on_disk, disk_note = self._write_halt_file(title, message)
         self._enter_halt()
         with self._acting_through_store_outage():
-            failure, note = self._persist_halt(*cancelled, cancel_on_retry=not keep_exits)
+            failure, note = self._persist_halt(
+                *cancelled, cancel_on_retry=not keep_exits, on_disk=on_disk
+            )
+            note = disk_note + note
             if keep_exits:
                 others = [tracked for tracked in self._active_orders if tracked not in cancelled]
                 unsent = sum(1 for tracked in others if not tracked.placement_attempted)
@@ -2697,16 +2724,17 @@ class LiveTrader:
         self._drop_pending_halt_reset()
 
     def _persist_halt(
-        self, *orders: TrackedOrder, cancel_on_retry: bool
+        self, *orders: TrackedOrder, cancel_on_retry: bool, on_disk: bool
     ) -> tuple[Exception | None, str]:
         """Checkpoint a halt, or keep it for retry and return a note naming the failure.
 
         ``cancel_on_retry`` is whether the halt still owes a cancellation: a
         plain halt does, a flatten leaves its recovery exits working.
+        ``on_disk`` is whether the halt file holds the halt, which keeps a
+        restart halted; without it, the note says what a restart would find.
 
         Acting through a store outage (``_acting_through_store_outage``), a
-        halt whose write fails returns no failure: its work goes on, and the
-        note says what a restart would find.
+        halt whose write fails returns no failure: its work goes on.
         """
         try:
             self._persist_state(*orders)
@@ -2715,21 +2743,69 @@ class LiveTrader:
             self._halt_cancels_pending = cancel_on_retry and not self._executor.simulation
             # The caller re-raises it, which logs the traceback.
             logger.error("Halt checkpoint not written: %s", exc)
-            return exc, (
-                f"; halt not persisted ({type(exc).__name__}: {exc}), "
-                "so a restart now would resume unhalted"
-            )
+            restart = "" if on_disk else ", so a restart now would resume unhalted"
+            return exc, f"; halt not persisted ({type(exc).__name__}: {exc}){restart}"
         if self._checkpoint_failing and self._unrecorded:
             error = self._unrecorded[-1]
             self._halt_unpersisted = True
             logger.error("Halt checkpoint not written: %s", error)
-            return None, (
-                f"; not recorded yet ({type(error).__name__}: {error}), so a restart now "
-                "would resume trading unhalted from the last checkpoint, halting only on a "
-                "venue position or open order that differs from it or on an order without "
-                "group_id that this halt cancelled"
+            restart = (
+                ""
+                if on_disk
+                else (
+                    ", so a restart now would resume trading unhalted from the last "
+                    "checkpoint, halting only on a venue position or open order that differs "
+                    "from it or on an order without group_id that this halt cancelled"
+                )
             )
+            return None, f"; not recorded yet ({type(error).__name__}: {error}){restart}"
         return None, ""
+
+    def _write_halt_file(self, title: str, message: str) -> tuple[bool, str]:
+        """Write a live halt to the halt file before it acts.
+
+        Returns whether the file holds the halt, and a note naming a failure.
+        A failure holds nothing back: the cancels and exits that follow matter
+        more, and the checkpoint still records the halt once the store takes it.
+        """
+        if self._halt_file is None:
+            return False, ""
+        try:
+            write_halt_file(
+                self._halt_file,
+                {
+                    "title": title,
+                    "message": message,
+                    "run_id": self._run_id,
+                    "halted_at": self._utc_now().isoformat(),
+                },
+            )
+        except OSError as exc:
+            logger.error("Halt file %s not written", self._halt_file, exc_info=exc)
+            return False, f"; halt file not written ({type(exc).__name__}: {exc})"
+        return True, ""
+
+    def _restore_halt_file(self) -> None:
+        """Halt a starting run whose halt file holds a halt its checkpoint does not.
+
+        A halt made during a store outage was written there before it acted,
+        but reaches the checkpoint only once the store answers, so the two can
+        disagree after a restart; the halt wins. It is checkpointed before any
+        order work, and a failed write fails the start, so nothing trades
+        before it is recorded.
+        """
+        assert self._halt_file is not None
+        recorded = read_halt_file(self._halt_file)
+        if recorded is None or self._halted:
+            return
+        self._enter_halt()
+        self._persist_state()
+        logger.error("Halt Restored: %s", recorded)
+        self._send_alert(
+            "Halt Restored",
+            f"restarted halted on a halt the state store never recorded: {recorded}",
+        )
+        self._record_runtime_event("halted", {"reason": "Halt Restored", "message": recorded})
 
     def _cancel_for_halt(self) -> tuple[Exception | None, str]:
         """Cancel every tracked order, keeping the cancellation owed until the venue confirms.
@@ -3080,6 +3156,7 @@ class LiveTrader:
                     f"another live process already owns state_key={self._state_key!r}"
                 )
             self._lease_acquired = True
+            self._restore_halt_file()
             # Not persisted: a start decides from the checkpoint, as a new process does.
             self._halt_cancels_pending = False
             restored_halted = self._halted
@@ -3502,7 +3579,8 @@ class LiveTrader:
         an operator can see it after the fact. Safe from any thread, waiting
         for the cycle in progress as ``halt`` does; a halt request still
         pending then applies on the next cycle. Raises unless ``run`` holds
-        the account, as ``halt`` does.
+        the account, as ``halt`` does. In live mode it is the only thing that
+        removes the halt file.
         """
         with self._cycle_lock:
             readiness = self.halt_reset_readiness()
@@ -3512,6 +3590,10 @@ class LiveTrader:
                     on_runtime_event=self._on_runtime_event,
                     utc_now=self._utc_now,
                 )
+            if self._halt_file is not None:
+                # Before anything changes, so a failure refuses the reset. The
+                # checkpoint holds the halt by now, so a restart stays halted.
+                self._halt_file.unlink(missing_ok=True)
             equity, _ = self._calc_account_snapshot()
             was_halted = self._halted
             if was_halted:
@@ -8078,6 +8160,7 @@ class LiveTrader:
         halt is not recorded yet.
         """
         halted = self._halted
+        on_disk, disk_note = self._write_halt_file(title, detail)
         exit_queued = False
         exits_owed = False
         submit_failure: Exception | None = None
@@ -8142,7 +8225,7 @@ class LiveTrader:
             finally:
                 self._flatten_at = None
         self._enter_halt()
-        failure, note = self._persist_halt(cancel_on_retry=exits_owed)
+        failure, note = self._persist_halt(cancel_on_retry=exits_owed, on_disk=on_disk)
         if submit_failure is not None:
             outcome = f"exit submission failed ({type(submit_failure).__name__}: {submit_failure})"
         elif exits_owed:
@@ -8164,7 +8247,8 @@ class LiveTrader:
             "send_alert",
             title=f"[{self._executor.strategy_name}] {title}",
             message=(
-                f"account_id={self._account_id} {detail} — {outcome} {ending}{cancel_note}{note}"
+                f"account_id={self._account_id} {detail} — {outcome} {ending}"
+                f"{cancel_note}{disk_note}{note}"
             ),
         )
         logger.warning(
