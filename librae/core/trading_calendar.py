@@ -254,6 +254,14 @@ class _Hours:
     sources: tuple[str, ...]
     night_weekdays: frozenset[int] = frozenset()
 
+    def __post_init__(self) -> None:
+        if (self.night is None) == bool(self.night_weekdays):
+            raise ValueError(
+                "_Hours: night and night_weekdays go together: a night with no "
+                "weekdays never opens, weekdays with no night mean nothing "
+                f"(night={self.night}, night_weekdays={set(self.night_weekdays)})"
+            )
+
 
 _TWSE_HOURS_HISTORY = "https://www.twse.com.tw/staticFiles/product/publication/twse60/html/178/"
 _TWSE_2001_HOURS = "https://www.twse.com.tw/en/about/company/history.html"
@@ -1083,7 +1091,7 @@ _MAX_TOLERATED_OUTLIER_RATIO = 0.01
 
 
 def _bucket_starts_skipping_outliers(
-    index: pd.DatetimeIndex, target_seconds: int, calendar_id: str, session_mode: str
+    index: pd.DatetimeIndex, target_seconds: int, calendar_id: str
 ) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
     """Bucket-start for every bar that resolves to a session, dropping the rest.
 
@@ -1115,7 +1123,7 @@ def _bucket_starts_skipping_outliers(
     skipped: list[pd.Timestamp] = []
     for timestamp in index:
         try:
-            bucket = _bucket_start(timestamp, target_seconds, calendar_id, session_mode)
+            bucket = _bucket_start(timestamp, target_seconds, calendar_id)
         except ValueError:
             skipped.append(timestamp)
             continue
@@ -1150,13 +1158,11 @@ def resample_session_ohlcv(
     frame: pd.DataFrame,
     target_seconds: int,
     calendar_id: str,
-    *,
-    session_mode: str = "extended",
 ) -> pd.DataFrame:
     """Aggregate 1-minute OHLCV on exchange-session bucket boundaries.
 
-    Bars that don't resolve to any segment ``session_mode`` reads (see
-    _bucket_starts_skipping_outliers) are dropped, not fatal.
+    Bars are cut by the calendar's extended segments. Bars that resolve to no
+    segment (see _bucket_starts_skipping_outliers) are dropped, not fatal.
     """
     if target_seconds <= 0:
         raise ValueError("target_seconds must be positive")
@@ -1165,9 +1171,7 @@ def resample_session_ohlcv(
     if not isinstance(frame.index, pd.DatetimeIndex) or frame.index.tz is None:
         raise ValueError("OHLCV must have a timezone-aware DatetimeIndex")
 
-    kept_index, buckets = _bucket_starts_skipping_outliers(
-        frame.index, target_seconds, calendar_id, session_mode
-    )
+    kept_index, buckets = _bucket_starts_skipping_outliers(frame.index, target_seconds, calendar_id)
     frame = frame.loc[kept_index]
     grouped = frame.groupby(buckets)
     result = pd.DataFrame(
