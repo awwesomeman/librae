@@ -307,7 +307,8 @@ def status_panel(run_id: str, label: str) -> None:
             decision_label,
             "No decision bar is recorded in the checkpoint."
             if pd.isna(decision)
-            else f"Start of the last decision bar in the checkpoint: {decision}.",
+            else f"Last event decided in the checkpoint: {decision}, its bars' start, or "
+            "their availability for primaries off one bar grid.",
         )
         + "</div></div>"
     )

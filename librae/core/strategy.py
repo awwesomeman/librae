@@ -64,11 +64,11 @@ class Context:
 
     Attributes:
         ts: Event timestamp. When the primaries share one bar grid it is
-            the bars' start. Off one grid, which only a backtest runs, it is
-            the instant the event's bars became available: a 24/7 daily bar
-            starting Jan 6 is decided at Jan 7 00:00. Calendar logic keyed on
-            bar starts (``ctx.ts in rebalance_dates``) then reads each bar's
-            own start, the last index of ``market_data.history``.
+            the bars' start. Off one grid it is the instant the event's bars
+            became available: a 24/7 daily bar starting Jan 6 is decided at
+            Jan 7 00:00. Calendar logic keyed on bar starts
+            (``ctx.ts in rebalance_dates``) then reads each bar's own start,
+            the last index of ``market_data.history``.
         symbol: Primary symbol (single-asset convenience).
         symbols: All configured symbols.
         bar: Current data for the primary symbol, or an empty dict when that

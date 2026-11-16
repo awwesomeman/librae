@@ -1,9 +1,9 @@
-"""Primaries off one bar grid: live refuses them, a backtest orders them by availability.
+"""Primaries off one bar grid: every mode orders their events by availability.
 
 When one symbol's bar starts while another's is still open, the bar read at
 the earlier start closes after the other symbol's next bar opens. Ordered by
-bar start, a decision on it could fill before it was made, and live meets the
-bars out of start order.
+bar start, a decision on it could fill before it was made. Sim runs the same
+events as a backtest and fills them on the same bars.
 """
 
 from __future__ import annotations
@@ -13,11 +13,14 @@ import pandas as pd
 import pytest
 from librae import Backtest, MarketDataSubscription
 from librae.core.cost_model import CostModel
-from librae.core.market_data import require_aligned_bar_grids
+from librae.core.market_data import bar_grids_align
+from librae.core.run_config import ExecutionPolicy, RiskPolicy
 from librae.core.strategy import Context, OrderIntent, PortfolioWeights, Strategy
 from librae.live.engine import LiveTrader
+from librae.live.state import MemoryLiveStateStore
 
 from tests.conftest import make_test_cfg
+from tests.engine.test_live_runner import _broker_report, _mock_order_adapter
 
 
 def _subscription(symbol: str, timeframe: str, calendar_id: str, session_mode: str):
@@ -80,8 +83,8 @@ def _subscription(symbol: str, timeframe: str, calendar_id: str, session_mode: s
         ),
     ],
 )
-def test_aligned_grids_are_accepted(grids: list[tuple[str, str, str]]) -> None:
-    require_aligned_bar_grids([_subscription(f"S{i}", *grid) for i, grid in enumerate(grids)])
+def test_aligned_grids_are_recognized(grids: list[tuple[str, str, str]]) -> None:
+    assert bar_grids_align([_subscription(f"S{i}", *grid) for i, grid in enumerate(grids)])
 
 
 @pytest.mark.parametrize(
@@ -121,9 +124,8 @@ def test_aligned_grids_are_accepted(grids: list[tuple[str, str, str]]) -> None:
         ),
     ],
 )
-def test_misaligned_grids_are_refused(grids: list[tuple[str, str, str]]) -> None:
-    with pytest.raises(ValueError, match="one shared grid"):
-        require_aligned_bar_grids([_subscription(f"S{i}", *grid) for i, grid in enumerate(grids)])
+def test_misaligned_grids_are_recognized(grids: list[tuple[str, str, str]]) -> None:
+    assert not bar_grids_align([_subscription(f"S{i}", *grid) for i, grid in enumerate(grids)])
 
 
 def _frame(symbol: str, starts: list[str], closes: list[float]) -> pd.DataFrame:
@@ -133,7 +135,7 @@ def _frame(symbol: str, starts: list[str], closes: list[float]) -> pd.DataFrame:
         {
             "open": 100.0,
             "high": np.maximum(close, 100.0) + 1,
-            "low": 99.0,
+            "low": np.minimum(close, 100.0) - 1,
             "close": close,
             "volume": 100.0,
         },
@@ -171,17 +173,21 @@ def _mixed_data(a_available_at: list[str] | None = None) -> pd.DataFrame:
 class _Recorder(Strategy):
     """Records every decision; buys ``buy`` once ``when(ctx)`` first holds."""
 
-    def __init__(self, buy=(), when=lambda ctx: False) -> None:
+    def __init__(self, buy=(), when=lambda ctx: False, quantity: float = 1.0) -> None:
         self.contexts: list[Context] = []
         self._buy = buy
         self._when = when
+        self._quantity = quantity
         self.bought_at: pd.Timestamp | None = None
 
     def on_bar(self, ctx: Context) -> list[OrderIntent]:
         self.contexts.append(ctx)
         if self.bought_at is None and self._when(ctx):
             self.bought_at = pd.Timestamp(ctx.ts)
-            return [OrderIntent(symbol=symbol, action="long", quantity=1.0) for symbol in self._buy]
+            return [
+                OrderIntent(symbol=symbol, action="long", quantity=self._quantity)
+                for symbol in self._buy
+            ]
         return []
 
 
@@ -353,17 +359,45 @@ def test_a_direct_backtest_cannot_skip_the_grid_check_by_omitting_subscriptions(
         Backtest(data, _Idle(), strategy_name="grid", cost_model=CostModel.zero())
 
 
-def test_live_refuses_misaligned_grids_at_construction() -> None:
-    symbols = ["A", "B"]
-    calendars = {"A": "24/7", "B": "XNYS"}
-    with pytest.raises(ValueError, match="one shared grid"):
-        LiveTrader(
-            _Idle(),
-            lambda frame: frame,
+_EXECUTION = ExecutionPolicy(max_bar_volume_participation_rate=None, warmup_periods=1)
+
+
+class _Runtime:
+    """Sim, or live with an ``order_adapter``, over ``data``, polled a minute
+    after each instant a bar is published or at ``polls``; each poll sees the
+    bars published by then, as a feed serves them."""
+
+    def __init__(self, strategy: Strategy, data: pd.DataFrame, polls=None, **kwargs) -> None:
+        symbols = ["A", "B"]
+        calendars = {"A": "24/7", "B": "XNYS"}
+        frames = {
+            symbol: data.xs(symbol, level="symbol")
+            .reset_index()
+            .rename(columns={"datetime": "ts"})
+            .dropna(axis=1, how="all")
+            for symbol in symbols
+        }
+        batch_feature_fn = kwargs.pop("batch_feature_fn", None)
+        feature_fn = kwargs.pop("feature_fn", lambda frame: frame)
+        state_store = kwargs.pop("state_store", None)
+        live: dict = {}
+        if (order_adapter := kwargs.pop("order_adapter", None)) is not None:
+            live = {"order_adapter": order_adapter, "runtime_revision": "grid"}
+            state_store = MemoryLiveStateStore(restart_durable_for_tests=True)
+            # Reconciliation reads the mock's flat book; these tests are about events.
+            kwargs.update(broker="binance", reconciliation_interval_seconds=10**7)
+        polls = polls if polls is not None else _publications()
+        self._clock = {"now": polls[0].to_pydatetime()}
+        self.trader = LiveTrader(
+            strategy,
+            None if batch_feature_fn is not None else feature_fn,
+            batch_feature_fn=batch_feature_fn,
+            state_store=state_store,
+            **live,
             config=make_test_cfg(
-                mode="sim",
+                mode="live" if live else "sim",
                 symbols=symbols,
-                timeframe="H1",
+                timeframe="D1",
                 session_mode="regular",
                 instrument_overrides={
                     symbol: {
@@ -374,7 +408,299 @@ def test_live_refuses_misaligned_grids_at_construction() -> None:
                     for symbol in symbols
                 },
                 symbol_cost_overrides={symbol: {"multiplier": 1.0} for symbol in symbols},
+                execution=_EXECUTION,
+                **kwargs,
             ),
-            adapter={symbol: (lambda *_a, **_k: pd.DataFrame()) for symbol in symbols},
+            adapter={
+                symbol: (
+                    lambda *_args, symbol=symbol, **_kwargs: (
+                        frames[symbol]
+                        .loc[
+                            frames[symbol]["ts"]
+                            < self.withheld.get(symbol, pd.Timestamp.max.tz_localize("UTC"))
+                        ]
+                        .copy()
+                    )
+                )
+                for symbol in symbols
+            },
             cost_model=CostModel.zero(),
+            clock=lambda: self._clock["now"],
         )
+        # Bars of a symbol from this start on, which its feed has not served yet.
+        self.withheld: dict[str, pd.Timestamp] = {}
+        self.position_events: list = []
+        self.equity_ts: list[pd.Timestamp] = []
+        self.trader._on_position_event = lambda event, _sequence: self.position_events.append(event)
+        self.trader._on_bar = lambda _run_id, ts, *_rest: self.equity_ts.append(pd.Timestamp(ts))
+        self.trader._last_reconciliation_at = self._clock["now"]
+        for now in polls:
+            self.poll(now)
+
+    def poll(self, now: pd.Timestamp) -> None:
+        self._clock["now"] = now.to_pydatetime()
+        self.trader._poll_cycle()
+
+    def entries(self) -> dict[str, pd.Timestamp]:
+        return self._of("open")
+
+    def exits(self) -> dict[str, pd.Timestamp]:
+        return self._of("close")
+
+    def _of(self, event_type: str) -> dict[str, pd.Timestamp]:
+        return {
+            event.symbol: pd.Timestamp(event.ts)
+            for event in self.position_events
+            if event.event_type == event_type
+        }
+
+
+def _publications() -> list[pd.Timestamp]:
+    """A minute after each instant bars are published, from the first at
+    which both symbols have one. A is available at the next midnight, B at
+    the XNYS close."""
+    available = {
+        "A": [pd.Timestamp(day, tz="UTC") + pd.Timedelta(days=1) for day in _DAYS],
+        "B": [_utc(f"{day} 21:00") for day in _DAYS],
+    }
+    first = max(times[0] for times in available.values())
+    instants = sorted({at for times in available.values() for at in times if at >= first})
+    return [at + pd.Timedelta(minutes=1) for at in instants]
+
+
+def _decisions(strategy: _Recorder) -> list[tuple[pd.Timestamp, list[str]]]:
+    return [(pd.Timestamp(ctx.ts), sorted(ctx.bars)) for ctx in strategy.contexts]
+
+
+@pytest.mark.parametrize(
+    "when",
+    [
+        pytest.param(
+            lambda ctx: ctx.bars.get("A", {}).get("close") == 150, id="decided on a 24/7 day"
+        ),
+        pytest.param(lambda ctx: ctx.ts == _utc("2026-01-06 21:00"), id="decided on an XNYS close"),
+    ],
+)
+def test_sim_decides_and_fills_mixed_grids_as_a_backtest_does(when) -> None:
+    """Decided on the XNYS close at 21:00, A fills on its next day, not on
+    the one already open then."""
+    backtest_strategy = _Recorder(buy=("A", "B"), when=when)
+    result = _run(backtest_strategy, _mixed_data(), execution=_EXECUTION)
+    sim_strategy = _Recorder(buy=("A", "B"), when=when)
+    sim = _Runtime(sim_strategy, _mixed_data())
+
+    assert _decisions(sim_strategy) == _decisions(backtest_strategy)
+    assert sim.entries() == _entries(result)
+    assert _entries(result) == {"A": _utc("2026-01-07"), "B": _utc("2026-01-07 14:30")}
+    assert sim.equity_ts == [point.ts for point in result.account.equity_curve]
+    assert sim.trader._last_cycle_ts == _utc("2026-01-10")
+
+
+def test_a_restart_keeps_when_a_pending_intent_was_decided() -> None:
+    """Restarted after the 21:00 decision, sim still fills A on its next
+    day rather than on the day open at 21:00."""
+    when = lambda ctx: ctx.ts == _utc("2026-01-06 21:00")  # noqa: E731
+    polls = _publications()
+    store = MemoryLiveStateStore()
+    first = _Runtime(
+        _Recorder(buy=("A", "B"), when=when),
+        _mixed_data(),
+        [now for now in polls if now <= _utc("2026-01-06 21:01")],
+        state_store=store,
+    )
+    assert first.entries() == {}
+    restarted = _Runtime(
+        _Recorder(),
+        _mixed_data(),
+        [now for now in polls if now > _utc("2026-01-06 21:01")],
+        state_store=store,
+    )
+
+    assert restarted.entries() == {"A": _utc("2026-01-07"), "B": _utc("2026-01-07 14:30")}
+
+
+def test_live_sends_each_order_when_its_symbol_is_decided() -> None:
+    """Decided on the XNYS close, B's order goes out at once; A has no bar
+    in that event, so its order goes out once A's next bar is decided."""
+    placed: list[tuple[str, pd.Timestamp]] = []
+    adapter = _mock_order_adapter()
+    sim: _Runtime | None = None
+
+    def place(signal):
+        assert sim is not None
+        placed.append((signal["canonical_symbol"], pd.Timestamp(sim._clock["now"])))
+        return _broker_report(order_id=signal["client_order_id"], quantity=signal["quantity"])
+
+    adapter.place_order.side_effect = place
+    strategy = _Recorder(buy=("A", "B"), when=lambda ctx: ctx.ts == _utc("2026-01-06 21:00"))
+    polls = _publications()
+    sim = _Runtime(strategy, _mixed_data(), polls[:1], order_adapter=adapter)
+    for now in polls[1:]:
+        sim.poll(now)
+
+    backtest_strategy = _Recorder()
+    _run(backtest_strategy, _mixed_data(), execution=_EXECUTION)
+    assert _decisions(strategy) == _decisions(backtest_strategy)
+    assert placed == [("B", _utc("2026-01-06 21:01")), ("A", _utc("2026-01-07 00:01"))]
+
+
+def _b_late_on_jan_6() -> tuple[_Runtime, _Recorder]:
+    """B's Jan 6 bar, due at 21:00, is not served when A's Jan 6 bar becomes
+    available at midnight."""
+    strategy = _Recorder()
+    sim = _Runtime(strategy, _mixed_data(), [_utc("2026-01-06 00:01")])
+    sim.withheld["B"] = _utc("2026-01-06 14:30")
+    sim.poll(_utc("2026-01-06 21:01"))
+    sim.poll(_utc("2026-01-07 00:00:05"))
+    return sim, strategy
+
+
+def test_an_event_waits_for_a_symbol_due_before_it() -> None:
+    sim, strategy = _b_late_on_jan_6()
+    assert len(strategy.contexts) == 2
+
+    sim.withheld.clear()
+    sim.poll(_utc("2026-01-07 00:00:20"))
+
+    assert _decisions(strategy)[2:] == [
+        (_utc("2026-01-06 21:00"), ["B"]),
+        (_utc("2026-01-07"), ["A"]),
+    ]
+
+
+def test_past_the_hold_an_event_goes_ahead_and_the_late_bar_follows() -> None:
+    sim, strategy = _b_late_on_jan_6()
+    sim.poll(_utc("2026-01-07 00:00:35"))
+    sim.withheld.clear()
+    sim.poll(_utc("2026-01-07 00:01"))
+
+    assert _decisions(strategy)[2:] == [
+        (_utc("2026-01-07"), ["A"]),
+        (_utc("2026-01-06 21:00"), ["B"]),
+    ]
+    assert sim.trader._last_cycle_ts == _utc("2026-01-07")
+
+
+def test_sim_reads_each_bar_start_and_decides_as_of_the_event() -> None:
+    strategy = _Recorder()
+    subscriptions = _Runtime(strategy, _mixed_data()).trader._market_data_subscriptions
+
+    ctx = strategy.contexts[1]
+    assert ctx.ts == _utc("2026-01-06")
+    assert ctx.decision_at == _utc("2026-01-06")
+    assert ctx.market_data is not None
+    assert ctx.market_data.history(subscriptions["A"]).index[-1] == _utc("2026-01-05")
+    assert ctx.market_data.history(subscriptions["B"]).index[-1] == _utc("2026-01-05 14:30")
+
+
+def test_sim_decides_a_late_bar_with_the_bars_it_delayed(caplog: pytest.LogCaptureFixture) -> None:
+    """A's Jan 6 bar is published three days late, with the two bars after
+    it: sim fills and decides the three in one event, as a backtest does."""
+    data = _mixed_data(["2026-01-06", "2026-01-09", "2026-01-08", "2026-01-09", "2026-01-10"])
+    when = lambda ctx: ctx.ts == _utc("2026-01-06 21:00")  # noqa: E731
+    backtest_strategy = _Recorder(buy=("A", "B"), when=when)
+    result = _run(backtest_strategy, data, execution=_EXECUTION)
+    sim_strategy = _Recorder(buy=("A", "B"), when=when)
+    polls = [
+        _utc(day) + pd.Timedelta(minutes=1) for day in ("2026-01-06", "2026-01-09", "2026-01-10")
+    ]
+    sim = _Runtime(sim_strategy, data, polls)
+
+    assert _decisions(sim_strategy) == _decisions(backtest_strategy)
+    assert (
+        sim.entries()
+        == _entries(result)
+        == {"A": _utc("2026-01-07"), "B": _utc("2026-01-07 14:30")}
+    )
+    assert "A by up to 1 days" in caplog.text
+
+
+def test_a_retried_event_takes_the_bars_that_joined_it() -> None:
+    """A's late Jan 6 bar is booked, then its decision fails. The retry also
+    has A's next two bars, available with it: it books them and decides, as
+    a backtest of the same bars does, rather than refusing the event."""
+    data = _mixed_data(["2026-01-06", "2026-01-09", "2026-01-08", "2026-01-09", "2026-01-10"])
+    when = lambda ctx: ctx.ts == _utc("2026-01-06 21:00")  # noqa: E731
+    backtest_strategy = _Recorder(buy=("A", "B"), when=when)
+    result = _run(backtest_strategy, data, execution=_EXECUTION)
+    failures = [_utc("2026-01-06")]
+
+    def features(frame: pd.DataFrame) -> pd.DataFrame:
+        if failures and frame.index[-1] == failures[0]:
+            failures.pop()
+            raise RuntimeError("feature source down")
+        return frame
+
+    sim_strategy = _Recorder(buy=("A", "B"), when=when)
+    sim = _Runtime(sim_strategy, data, [_utc("2026-01-06 00:01")], feature_fn=features)
+    sim.withheld["A"] = _utc("2026-01-07")
+    with pytest.raises(RuntimeError, match="feature source down"):
+        sim.poll(_utc("2026-01-09 00:01"))
+    sim.withheld.clear()
+    for now in (_utc("2026-01-09 00:02"), _utc("2026-01-10 00:01")):
+        sim.poll(now)
+
+    assert _decisions(sim_strategy) == _decisions(backtest_strategy)
+    assert sim.entries() == _entries(result)
+
+
+def test_sim_exits_a_breach_on_bars_starting_after_it() -> None:
+    """B's Jan 7 close breaches the drawdown limit at 21:00. A's Jan 7 bar
+    opened at midnight, before the breach, so A exits on its Jan 8 bar."""
+    data = pd.concat(
+        [
+            _frame("A", _DAYS, [100] * 5),
+            _frame("B", [f"{day} 14:30" for day in _DAYS], [100, 100, 10, 10, 10]),
+        ]
+    )
+    when = lambda ctx: ctx.ts == _utc("2026-01-05 21:00")  # noqa: E731
+    risk = RiskPolicy(max_drawdown_rate=0.01)
+    result = _run(
+        _Recorder(buy=("A", "B"), when=when, quantity=100.0), data, execution=_EXECUTION, risk=risk
+    )
+    sim = _Runtime(_Recorder(buy=("A", "B"), when=when, quantity=100.0), data, risk=risk)
+
+    assert sim.exits() == _exits(result) == {"A": _utc("2026-01-08"), "B": _utc("2026-01-08 14:30")}
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        pytest.param(PortfolioWeights(weights={"A": 0.5, "B": 0.5}), id="portfolio weights"),
+        pytest.param(
+            [
+                OrderIntent(symbol="A", action="long", quantity=1.0, group_id="hedge"),
+                OrderIntent(symbol="B", action="short", quantity=1.0, group_id="hedge"),
+            ],
+            id="order group",
+        ),
+    ],
+)
+def test_sim_refuses_legs_on_other_grids_with_the_reason(decision) -> None:
+    class _Emit(Strategy):
+        def on_bar(self, ctx: Context):
+            return decision
+
+    with pytest.raises(ValueError, match="not supported across grids"):
+        _Runtime(_Emit(), _mixed_data())
+
+
+def test_sim_batch_features_on_mixed_grids_see_only_available_bars() -> None:
+    seen: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    def features(batch):
+        for subscription in batch.primary_subscriptions:
+            history = batch.market_data.history(subscription)
+            if not history.empty:
+                seen.append((pd.Timestamp(batch.as_of), history["available_at"].max()))
+        return {
+            subscription: batch.market_data.history(subscription)
+            for subscription in batch.active_primary_subscriptions
+        }
+
+    when = lambda ctx: ctx.bars.get("A", {}).get("close") == 150  # noqa: E731
+    result = _run(_Recorder(buy=("A", "B"), when=when), _mixed_data(), execution=_EXECUTION)
+    sim = _Runtime(_Recorder(buy=("A", "B"), when=when), _mixed_data(), batch_feature_fn=features)
+
+    assert seen and all(latest <= as_of for as_of, latest in seen)
+    assert sim.entries() == _entries(result)

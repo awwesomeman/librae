@@ -219,7 +219,7 @@ without a run ID are not selectable in the console.
   than two bars plus three poll cycles. Market closures are not modelled, so
   a run on a session calendar shows the warning while its market is closed.
   Alerting stays with the notifier and health checks, not the console.
-- The halt flag and last decision bar come from the run's checkpoint in
+- The halt flag and last decided event come from the run's checkpoint in
   `execution_runtime_state`; a backtest has none.
 - Query results are bounded: recent runs and the newest history rows (a
   caption identifies truncation), with a 30 s statement timeout. Drawdown,

@@ -242,22 +242,21 @@ Events follow the bars' availability. When the primaries share one bar grid
 their names: intraday, every segment opens at one phase of the period's grid;
 a day, week or month bar never starts while another symbol's is open), bar
 starts already order the bars by completion, and every mode runs one event per
-bar start, keyed by it. Off one grid a later-starting bar can complete first:
+bar start, keyed by it. Off one grid a later-starting bar can complete first,
+so every mode runs one event per instant at which primary bars become
+available:
 
-- A backtest runs one event per instant at which primary bars become
-  available, keyed by that instant: the `ts` of its equity and snapshot rows
-  and of its `Context`, which is then not a bar start. Calendar logic keyed on
-  bar starts reads each bar's own start from `Context.market_data`, which such
-  a run always carries. A bar counts as available no earlier than its
-  symbol's previous bar, so a late bar holds only its own symbol, and a
+- The event is keyed by that instant: the `ts` of its equity and snapshot
+  rows, of its `Context` and of the checkpoint's last decided event, which is
+  then not a bar start. Calendar logic keyed on bar starts reads each bar's
+  own start from `Context.market_data`, which such a run always carries;
+  signals keep their bar's start. A bar counts as available no earlier than
+  its symbol's previous bar, so a late bar holds only its own symbol, and a
   warning names the symbols it delayed.
 - Each leg fills on its own bar, so `PortfolioWeights` and `group_id` orders,
   which execute on one event, are refused when their legs' bars are not in
-  the deciding event. At the end of the run each position closes on its own
-  last bar.
-- `LiveTrader` still orders events by bar start, so it refuses such primaries
-  at construction (`require_aligned_bar_grids`): it would meet the bars out of
-  order and could fill a decision before its data was available.
+  the deciding event. At the end of a backtest each position closes on its
+  own last bar.
 
 Within those events:
 
@@ -266,15 +265,18 @@ Within those events:
   into it (`settled_available_at`), so that bar is available, and decided, a
   settle after another grid's bar of the same start.
 - A decision is made when its event's bars are all available, the latest
-  `available_at` seen so far. A backtest fills its intents, and a drawdown exit
-  it queues, on the first bar that starts at or after that instant.
-- Sim/live decide a multi-symbol bar once with each required symbol whose next
-  bar is available by the event's availability: by the `available_at` its
-  source declares (`market_data_available_at`), else its completion floor. A
-  shut market or a later publication does not hold the rest. The event waits
+  `available_at` seen so far. A backtest or sim fills its intents, and a
+  drawdown exit it queues, on each symbol's first bar that starts at or after
+  that instant; sim checkpoints the instant with each. Live sends its orders
+  when it decides, and an intent for a symbol without a bar in the event when
+  that symbol's next bar is decided.
+- Sim/live decide an event once with each required symbol whose next bar is
+  available by the event's availability: by the `available_at` its source
+  declares (`market_data_available_at`), else its completion floor. A shut
+  market or a later publication does not hold the rest. The event waits
   `LiveTrader.COHORT_HOLD` for such a bar's arrival jitter; a bar arriving
-  later is decided at its own start when it arrives, ordered by its symbol's
-  watermark alone.
+  later is decided at its own start, or off one grid its own availability,
+  when it arrives, ordered by its symbol's watermark alone.
 - Known gap: where one symbol's segment-ending bar carries the settle, live
   decides the others at their own availability without it and that bar in a
   later event, while a backtest decides them together at the settled

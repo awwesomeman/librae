@@ -126,6 +126,9 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         last_financing_ts={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
         last_funding_settled_at={"BTC/USDT": datetime(2025, 1, 2, 0, 0, 0, 3000, tzinfo=UTC)},
         pending_decision=[OrderIntent(action="close", symbol="BTC/USDT")],
+        pending_decided_at={"BTC/USDT": datetime(2025, 1, 2, 1, tzinfo=UTC)},
+        pending_decided_on={"BTC/USDT": datetime(2025, 1, 2, tzinfo=UTC)},
+        market_exit_decided_at={"BTC/USDT": datetime(2025, 1, 2, 1, 30, tzinfo=UTC)},
         active_orders=[_order()],
         equity_peak=1_050.0,
         prev_equity=1_002.0,
@@ -153,8 +156,16 @@ def test_runtime_state_round_trip_preserves_restart_fields():
 @pytest.mark.parametrize(
     ("versions_back", "missing"),
     [
-        (1, ("last_funding_settled_at",)),
-        (2, ("last_funding_settled_at", "rebalance_stopped_at", "failed_rebalance_symbols")),
+        (1, ("pending_decided_at", "pending_decided_on", "market_exit_decided_at")),
+        (
+            2,
+            (
+                "pending_decided_at",
+                "pending_decided_on",
+                "market_exit_decided_at",
+                "last_funding_settled_at",
+            ),
+        ),
     ],
 )
 def test_an_additive_previous_schema_loads_with_its_missing_fields_empty(versions_back, missing):

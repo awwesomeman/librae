@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import pandas as pd
-from librae import FeatureBatch
+from librae import Backtest, FeatureBatch, MarketDataSubscription
 from librae.brokers.base import settled_available_at, with_settled_available_at
 from librae.core.cost_model import CostModel
 from librae.core.run_config import ExecutionPolicy
@@ -49,7 +49,10 @@ def _trader(
     poll_seconds: int = 0,
     session_mode: str = "extended",
     adapters: dict | None = None,
+    strategy: Strategy | None = None,
+    plain: bool = False,
 ):
+    """A sim of A and B; with ``plain``, through ``feature_fn`` rather than batch features."""
     symbols = ["A", "B"]
     calendars = calendars or {symbol: "24/7" for symbol in symbols}
 
@@ -66,8 +69,8 @@ def _trader(
         }
 
     return LiveTrader(
-        _Hold(),
-        None,
+        strategy or _Hold(),
+        (lambda frame: frame) if plain else None,
         config=make_test_cfg(
             mode="sim",
             symbols=symbols,
@@ -85,7 +88,7 @@ def _trader(
             symbol_cost_overrides={symbol: {"multiplier": 1.0} for symbol in symbols},
             execution=ExecutionPolicy(max_bar_volume_participation_rate=None, warmup_periods=2),
         ),
-        batch_feature_fn=features,
+        batch_feature_fn=None if plain else features,
         adapter=adapters
         or {
             symbol: (
@@ -192,7 +195,13 @@ class _TaifexSource:
         return settled_available_at(ts, timeframe, calendar_id)
 
 
-def _taifex_close(newest: dict, clock: dict, decided: list):
+def _taifex_close(
+    newest: dict,
+    clock: dict,
+    decided: list,
+    strategy: Strategy | None = None,
+    plain: bool = False,
+):
     """A trades 24/7; B is a TAIFEX future whose day session closes at 05:45
     UTC, so its 05:44 minute is available a settle later than A's."""
     trader = _trader(
@@ -206,6 +215,8 @@ def _taifex_close(newest: dict, clock: dict, decided: list):
             "A": lambda *_a, **_k: _bars(newest["A"], "2026-01-05T05:40Z", "min"),
             "B": _TaifexSource(newest, "B", clock),
         },
+        strategy=strategy,
+        plain=plain,
     )
     trader._poll_cycle()
     return trader
@@ -230,6 +241,168 @@ def test_a_segment_ending_bar_is_its_own_later_event():
     clock["now"] = (bar + pd.Timedelta(minutes=2, seconds=5)).to_pydatetime()
     trader._poll_cycle()
     assert decided[-2:] == [(bar, ["B"]), (bar + pd.Timedelta(minutes=1), ["A"])]
+
+
+class _BuyA(Strategy):
+    """Buys A on a bar from ``since`` through ``until`` while A is flat,
+    recording each decision."""
+
+    def __init__(self, since: pd.Timestamp, until: pd.Timestamp | None = None) -> None:
+        self._since, self._until = since, until
+        self.decisions: list[tuple[pd.Timestamp, list[str]]] = []
+
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
+        ts = pd.Timestamp(ctx.ts)
+        self.decisions.append((ts, sorted(ctx.bars)))
+        if (
+            self._since <= ts
+            and (self._until is None or ts <= self._until)
+            and "A" in ctx.bars
+            and "A" not in ctx.positions
+        ):
+            return [OrderIntent(symbol="A", action="long", quantity=1.0)]
+        return []
+
+    def last_decisions(self, since: pd.Timestamp) -> list[tuple[pd.Timestamp, list[str]]]:
+        """Each event's last decision from ``since`` on, in event order."""
+        last = {ts: bars for ts, bars in self.decisions if ts >= since}
+        return sorted(last.items())
+
+
+def _backtest_opens(
+    frames: dict[str, pd.DataFrame], calendars: dict[str, str], timeframe: str, strategy: Strategy
+) -> list[pd.Timestamp]:
+    frame = pd.concat([bars.assign(symbol=symbol) for symbol, bars in frames.items()]).rename(
+        columns={"ts": "datetime"}
+    )
+    result = Backtest(
+        frame.set_index(["symbol", "datetime"]),
+        strategy,
+        strategy_name="cohort",
+        cost_model=CostModel.zero(),
+        primary_subscriptions=[
+            MarketDataSubscription(
+                symbol=symbol,
+                timeframe=timeframe,
+                calendar_id=calendar_id,
+                session_mode="extended",
+                data_source="fixture",
+                instrument_type="spot",
+            )
+            for symbol, calendar_id in calendars.items()
+        ],
+    ).run()
+    return [
+        pd.Timestamp(event.ts) for event in result.position_events if event.event_type == "open"
+    ]
+
+
+_TAIFEX_START = "2026-01-05T05:40Z"
+
+
+def _taifex_bars(through: pd.Timestamp, b_through: pd.Timestamp) -> dict[str, pd.DataFrame]:
+    return {
+        "A": _bars(through, _TAIFEX_START, "min"),
+        "B": with_settled_available_at(_bars(b_through, _TAIFEX_START, "min"), "1m", "XTAIFEX"),
+    }
+
+
+def test_a_decision_on_a_settled_bar_fills_on_a_bar_opening_after_it():
+    """Polled after B's settle, the 05:44 bars are decided together at
+    05:46, after A's 05:45 minute opened: A fills on its 05:46 minute, as a
+    backtest of the same bars does."""
+    bar = pd.Timestamp("2026-01-05T05:44Z")
+    newest = {"A": bar - pd.Timedelta(minutes=1), "B": bar - pd.Timedelta(minutes=1)}
+    clock = {"now": (bar + pd.Timedelta(seconds=5)).to_pydatetime()}
+    decided: list = []
+    trader = _taifex_close(newest, clock, decided, strategy=_BuyA(bar, bar))
+    fills: list = []
+    trader._on_position_event = lambda event, _sequence: fills.append(pd.Timestamp(event.ts))
+
+    newest["A"], newest["B"] = bar + pd.Timedelta(minutes=1), bar
+    clock["now"] = (bar + pd.Timedelta(minutes=2, seconds=5)).to_pydatetime()
+    trader._poll_cycle()
+    assert decided[-2:] == [(bar, ["A", "B"]), (bar + pd.Timedelta(minutes=1), ["A"])]
+    assert fills == []
+
+    newest["A"] = bar + pd.Timedelta(minutes=2)
+    clock["now"] = (bar + pd.Timedelta(minutes=3, seconds=5)).to_pydatetime()
+    trader._poll_cycle()
+    assert fills == [bar + pd.Timedelta(minutes=2)]
+    assert fills == _backtest_opens(
+        _taifex_bars(bar + pd.Timedelta(minutes=2), bar),
+        {"A": "24/7", "B": "XTAIFEX"},
+        "M1",
+        _BuyA(bar, bar),
+    )
+
+
+def test_a_settled_bar_decided_again_replaces_the_decision_made_without_it():
+    """Polled before B's settle, A's 05:44 minute is decided alone; once B's
+    arrives, sim decides 05:44 again with both, as a backtest decides it
+    once. That decision replaces the first: no duplicate intent, and A fills
+    on its 05:46 minute, as in the backtest."""
+    bar = pd.Timestamp("2026-01-05T05:44Z")
+    newest = {"A": bar - pd.Timedelta(minutes=1), "B": bar - pd.Timedelta(minutes=1)}
+    clock = {"now": (bar + pd.Timedelta(seconds=5)).to_pydatetime()}
+    strategy = _BuyA(bar, bar)
+    trader = _taifex_close(newest, clock, [], strategy=strategy, plain=True)
+    fills: list = []
+    trader._on_position_event = lambda event, _sequence: fills.append(pd.Timestamp(event.ts))
+    for minutes in range(1, 4):
+        newest["A"], newest["B"] = bar + pd.Timedelta(minutes=minutes - 1), bar
+        clock["now"] = (bar + pd.Timedelta(minutes=minutes, seconds=5)).to_pydatetime()
+        trader._poll_cycle()
+
+    assert strategy.decisions[1:3] == [(bar, ["A"]), (bar, ["A", "B"])]
+    assert not trader._halted
+    backtest = _BuyA(bar, bar)
+    assert fills == [bar + pd.Timedelta(minutes=2)]
+    assert fills == _backtest_opens(
+        _taifex_bars(bar + pd.Timedelta(minutes=2), bar),
+        {"A": "24/7", "B": "XTAIFEX"},
+        "M1",
+        backtest,
+    )
+    assert strategy.last_decisions(bar) == backtest.last_decisions(bar)
+
+
+def test_a_bar_decided_again_with_a_late_symbol_replaces_the_earlier_decision():
+    """B's 02:00 bar arrives past the hold, after A's was decided alone. Sim
+    decides 02:00 again with both and the second decision replaces the
+    first: a strategy buying A whenever it is flat buys it once, on the
+    03:00 bar, as a backtest does."""
+    newest = {"A": BAR - pd.Timedelta(hours=1), "B": BAR - pd.Timedelta(hours=1)}
+    clock = {"now": CLOSE - timedelta(minutes=30)}
+    strategy = _BuyA(BAR)
+    trader = _trader(newest, clock, [], strategy=strategy, plain=True)
+    fills: list = []
+    trader._on_position_event = lambda event, _sequence: fills.append(
+        (pd.Timestamp(event.ts), event.event_type)
+    )
+    trader._poll_cycle()
+    newest["A"] = BAR
+    clock["now"] = CLOSE + LiveTrader.COHORT_HOLD
+    trader._poll_cycle()
+    newest["B"] = BAR
+    clock["now"] = CLOSE + LiveTrader.COHORT_HOLD + timedelta(seconds=30)
+    trader._poll_cycle()
+    for hours in (1, 2):
+        newest["A"] = newest["B"] = BAR + pd.Timedelta(hours=hours)
+        clock["now"] = CLOSE + timedelta(hours=hours, seconds=5)
+        trader._poll_cycle()
+
+    assert strategy.decisions[1:3] == [(BAR, ["A"]), (BAR, ["A", "B"])]
+    assert not trader._halted
+    backtest = _BuyA(BAR)
+    assert [ts for ts, event_type in fills if event_type == "open"] == _backtest_opens(
+        {symbol: _bars(BAR + pd.Timedelta(hours=2), "2026-01-01T00:00Z", "h") for symbol in "AB"},
+        {"A": "24/7", "B": "24/7"},
+        "H1",
+        backtest,
+    )
+    assert fills == [(BAR + pd.Timedelta(hours=1), "open")]
+    assert strategy.last_decisions(BAR) == backtest.last_decisions(BAR)
 
 
 def test_a_bar_delivered_past_the_hold_is_decided_late_rather_than_refused():
