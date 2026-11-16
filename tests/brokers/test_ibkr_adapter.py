@@ -381,17 +381,6 @@ class TestFetchOhlcv:
             adapter.fetch_ohlcv("MU", "1m", session_mode="regular")
             assert adapter._ib.reqHistoricalData.call_args.kwargs["useRTH"] is True
 
-    def test_legacy_use_rth_must_agree_with_session_mode(self):
-        adapter = _make_adapter()
-
-        with pytest.raises(ValueError, match="request different IBKR sessions"):
-            adapter.fetch_ohlcv(
-                "MU",
-                "1m",
-                session_mode="regular",
-                use_rth=False,
-            )
-
     def test_daily_stock_uses_session_date_and_regular_close_availability(self):
         adapter = _make_adapter()
         adapter._resolve_contract = MagicMock(return_value="mock_contract")

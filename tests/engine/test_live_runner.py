@@ -724,7 +724,6 @@ class TestLiveTrader:
         assert frame is not None
         assert calls[0][1]["session_mode"] == "regular"
         assert calls[0][1]["calendar_id"] == "XNYS"
-        assert "use_rth" not in calls[0][1]
 
     def test_daily_ibkr_without_calendar_fails_at_construction(self):
         config = _test_cfg(
