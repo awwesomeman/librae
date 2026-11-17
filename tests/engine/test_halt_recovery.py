@@ -221,3 +221,16 @@ class TestResetSucceedsOnceMarksArrive:
         runner.reset_halt()
 
         assert runner._equity_peak == runner._prev_equity
+
+    def test_reset_starts_the_equity_curve_afresh(self) -> None:
+        """The next point's return and turnover are taken from the reset, even
+        one written again at the latest point's timestamp."""
+        runner = _halted_runner()
+        runner._poll_cycle()
+        assert runner._prev_equity_ts is not None
+
+        runner.reset_halt()
+
+        assert runner._prev_equity_ts is None
+        assert runner._prev_equity_base is None
+        assert runner._prev_equity_traded_notional == 0.0
