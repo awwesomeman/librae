@@ -91,15 +91,138 @@ def test_refresh_performance_matches_in_memory_backtest_metrics() -> None:
     ):
         refresh_performance(output.run_metadata.run_id, "default", config=config)
 
-    refreshed = write.call_args.args[6]
-    expected = asdict(output.metrics)
-    actual = asdict(refreshed)
-    assert actual.keys() == expected.keys()
-    for field, expected_value in expected.items():
+    _assert_same_metrics(write.call_args.args[6], output.metrics)
+
+
+def _assert_same_metrics(actual: StrategyMetrics, expected: StrategyMetrics) -> None:
+    actual_fields, expected_fields = asdict(actual), asdict(expected)
+    assert actual_fields.keys() == expected_fields.keys()
+    for field, expected_value in expected_fields.items():
         if expected_value is None:
-            assert actual[field] is None
+            assert actual_fields[field] is None, field
         else:
-            assert actual[field] == pytest.approx(expected_value)
+            assert actual_fields[field] == pytest.approx(expected_value), field
+
+
+class _HedgeThenSingle(Strategy):
+    """A two-perp hedge that is partly reduced and then closed, followed by an
+    ungrouped position the end of the run liquidates."""
+
+    def on_bar(self, ctx: Context):
+        if ctx.period_index == 0:
+            return [
+                OrderIntent(action="long", symbol="A", quantity=4.0, group_id="hedge"),
+                OrderIntent(action="short", symbol="B", quantity=4.0, group_id="hedge"),
+            ]
+        if ctx.period_index == 2:
+            return [
+                OrderIntent(action="close", symbol="A", quantity=1.0),
+                OrderIntent(action="close", symbol="B", quantity=1.0),
+            ]
+        if ctx.period_index == 4:
+            return [
+                OrderIntent(action="close", symbol="A"),
+                OrderIntent(action="close", symbol="B"),
+            ]
+        if ctx.period_index == 5:
+            return [OrderIntent(action="long", symbol="A", quantity=2.0)]
+        return []
+
+
+def test_backtest_refresh_and_closed_trades_agree_on_a_funded_partly_reduced_hedge() -> None:
+    """The backtest summary, a refresh from the stored rows, and closed_trades
+    must see the same trades: the hedge's two legs and both of their exits
+    are one trade, funding follows the quantity it accrued on, and the final
+    liquidation takes the last bar's funding."""
+    from librae.core.metrics import closed_trades, compute_all
+
+    from tests.conftest import primary_subscriptions_for
+
+    timestamps = pd.date_range(datetime(2026, 1, 1, tzinfo=UTC), periods=8, freq="h")
+    funded = [i % 2 == 1 for i in range(len(timestamps))]
+    frames = []
+    for symbol, prices in {
+        "A": [100.0, 101.0, 103.0, 102.0, 105.0, 104.0, 106.0, 108.0],
+        "B": [50.0, 50.5, 51.0, 51.5, 52.5, 52.0, 53.0, 54.0],
+    }.items():
+        frames.append(
+            pd.DataFrame(
+                {
+                    "open": prices,
+                    "high": prices,
+                    "low": prices,
+                    "close": prices,
+                    "volume": 1_000.0,
+                    "funding_rate": [0.001 if paid else float("nan") for paid in funded],
+                    "funding_settled_at": timestamps.where(funded),
+                },
+                index=pd.MultiIndex.from_arrays(
+                    [[symbol] * len(timestamps), timestamps], names=["symbol", "datetime"]
+                ),
+            )
+        )
+    data = pd.concat(frames).sort_index(level="datetime", sort_remaining=False)
+    backtest = Backtest(
+        data,
+        _HedgeThenSingle(),
+        initial_balance=10_000.0,
+        cost_model=CostModel(
+            multiplier=10.0,
+            commission_rate=0.0005,
+            min_commission=0.0,
+            slippage_ticks=1.0,
+            tick_size=0.01,
+            tax_rate=0.0,
+            long_margin_rate=0.1,
+            short_margin_rate=0.1,
+            long_margin_mode="dynamic",
+            short_margin_mode="dynamic",
+        ),
+        data_source="test",
+        primary_subscriptions=primary_subscriptions_for(
+            data, "H1", instrument_type="contract_perpetual"
+        ),
+    )
+    backtest.run()
+    with patch("librae.core.metrics.compute_all", wraps=compute_all) as in_memory:
+        output = backtest.build_output()
+    backtest_trades = in_memory.call_args.kwargs["trades"]
+
+    # What the readers return: every event and payment, timestamps as ``_time``.
+    stored_events = pd.DataFrame(output.position_events).rename(columns={"ts": "_time"})
+    stored_funding = pd.DataFrame(output.financing_cash_flows).rename(columns={"ts": "_time"})
+    equity = pd.DataFrame([{**asdict(point), "_time": point.ts} for point in output.equity_curve])
+    with (
+        patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
+        patch("librae.db.timescale_reader.load_position_events", return_value=stored_events),
+        patch("librae.db.timescale_reader.load_financing_cash_flows", return_value=stored_funding),
+        patch("librae.core.metrics.compute_all", wraps=compute_all) as refreshed,
+        patch("librae.db.timescale_writer.write_strategy_performance") as write,
+    ):
+        refresh_performance(
+            output.run_metadata.run_id,
+            "default",
+            config=_config(account_id="default", initial_cash=10_000.0),
+        )
+    refresh_trades = refreshed.call_args.kwargs["trades"]
+
+    trades = closed_trades(
+        pd.DataFrame(output.position_events), pd.DataFrame(output.financing_cash_flows)
+    )
+    assert "reduce" in {event.event_type for event in output.position_events}
+    assert [row.event_type for row in output.position_events][-1] == "close"
+    assert output.position_events[-1].reason == "force_close"
+    assert trades["symbol"].tolist() == ["A / B", "A"]
+    assert trades["group_id"].tolist() == ["hedge", None]
+    assert (trades["financing"].abs() > 0).all()
+    # The hedge's exits release all of its funding; the single trade's is its own.
+    assert trades["financing"].sum() == pytest.approx(
+        sum(flow.cash_flow for flow in output.financing_cash_flows)
+    )
+    pd.testing.assert_frame_equal(backtest_trades, trades)
+    pd.testing.assert_frame_equal(refresh_trades, trades)
+    assert output.metrics.trades == 2
+    _assert_same_metrics(write.call_args.args[6], output.metrics)
 
 
 def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
@@ -122,7 +245,11 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
             {
                 "_time": timestamps[2],
                 "symbol": "BTC/USDT:USDT",
+                "side": "long",
                 "event_type": "close",
+                "reason": "",
+                "group_id": None,
+                "periods_held": 2,
                 "realized_pnl": 7.0,
                 "commission": 0.7,
                 "slippage": 0.8,
@@ -169,16 +296,16 @@ def test_refresh_performance_reconstructs_persisted_quant_inputs() -> None:
         refresh_performance("run-1", "alpha", config=_config())
 
     kwargs = compute.call_args.kwargs
-    trade = kwargs["trade_pnls"][0]
-    # Funding accrued for this round-trip (3.0) is folded into gross/net PnL
-    # and return on top of the fill-only basis-convergence figures (13.0/7.0).
-    assert trade.gross_pnl == pytest.approx(16.0)
-    assert trade.net_pnl == pytest.approx(10.0)
-    assert trade.net_return == pytest.approx(5.0)  # 3.5 + 3.0/200.0*100
-    assert trade.commission == pytest.approx(1.7)
-    assert trade.slippage == pytest.approx(2.8)
-    assert trade.tax == pytest.approx(1.5)
-    assert kwargs["trade_notionals"] == pytest.approx([200.0])
+    trade = kwargs["trades"].iloc[0]
+    # Funding accrued for this round-trip (3.0) is folded into net PnL and
+    # return on top of the fill-only figure (7.0).
+    assert trade["net_pnl"] == pytest.approx(10.0)
+    assert trade["financing"] == pytest.approx(3.0)
+    assert trade["net_return"] == pytest.approx(0.05)  # 10.0 / 200.0
+    assert trade["commission"] == pytest.approx(1.7)
+    assert trade["slippage"] == pytest.approx(2.8)
+    assert trade["tax"] == pytest.approx(1.5)
+    assert trade["entry_notional"] == pytest.approx(200.0)
     assert kwargs["exposed_periods"] == 2
     assert kwargs["turnover_values"] == pytest.approx([0.0, 0.5, 0.5])
     write.assert_called_once()
@@ -198,7 +325,11 @@ def test_refresh_performance_attributes_funding_by_close_time() -> None:
         return {
             "_time": ts,
             "symbol": "BTC/USDT:USDT",
+            "side": "short",
             "event_type": event_type,
+            "reason": "",
+            "group_id": None,
+            "periods_held": 2,
             "realized_pnl": 0.0,
             "commission": 0.0,
             "slippage": 0.0,
@@ -262,11 +393,9 @@ def test_refresh_performance_attributes_funding_by_close_time() -> None:
     ):
         refresh_performance("run-1", "alpha", config=_config())
 
-    trades = compute.call_args.kwargs["trade_pnls"]
+    trades = compute.call_args.kwargs["trades"]
     # The later 20 belongs only to the two units still open after the first exit.
-    assert trades[0].net_pnl == pytest.approx(30.0)
-    assert trades[1].net_pnl == pytest.approx(40.0)
-    assert sum(trade.net_pnl for trade in trades) == pytest.approx(70.0)
+    assert trades["net_pnl"].tolist() == pytest.approx([30.0, 40.0])
 
 
 def test_refresh_performance_keeps_the_last_bar_financing_on_the_forced_close() -> None:
@@ -281,8 +410,11 @@ def test_refresh_performance_keeps_the_last_bar_financing_on_the_forced_close() 
             {
                 "_time": timestamps[2],
                 "symbol": "BTC/USDT:USDT",
+                "side": "short",
                 "event_type": "close",
                 "reason": "force_close",
+                "group_id": None,
+                "periods_held": 2,
                 "realized_pnl": 0.0,
                 "commission": 0.0,
                 "slippage": 0.0,
@@ -328,7 +460,7 @@ def test_refresh_performance_keeps_the_last_bar_financing_on_the_forced_close() 
     ):
         refresh_performance("run-1", "alpha", config=_config())
 
-    assert compute.call_args.kwargs["trade_pnls"][0].net_pnl == pytest.approx(20.0)
+    assert compute.call_args.kwargs["trades"]["net_pnl"].iloc[0] == pytest.approx(20.0)
 
 
 def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:
@@ -347,6 +479,15 @@ def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:
     closed = pd.DataFrame(
         [
             {
+                "_time": timestamps[1],
+                "symbol": "BTC/USDT:USDT",
+                "side": "long",
+                "event_type": "close",
+                "reason": "",
+                "group_id": None,
+                "periods_held": 1,
+                "entry_at": timestamps[0],
+                "remaining_quantity": 0.0,
                 "realized_pnl": 1.0,
                 "commission": 0.1,
                 "slippage": 0.0,
@@ -366,6 +507,7 @@ def test_refresh_performance_rejects_legacy_close_without_entry_costs() -> None:
     with (
         patch("librae.db.timescale_reader.load_equity_curve", return_value=equity),
         patch("librae.db.timescale_reader.load_position_events", return_value=closed),
+        patch("librae.db.timescale_reader.load_financing_cash_flows", return_value=pd.DataFrame()),
         pytest.raises(ValueError, match="entry_commission"),
     ):
         refresh_performance("run-1", "alpha", config=_config())

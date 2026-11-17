@@ -34,12 +34,13 @@ class OptionalPackageBlocker(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, OptionalPackageBlocker())
 
 import librae
+import pandas as pd
 
 start = datetime(2025, 1, 1, tzinfo=UTC)
 metrics = librae.compute_all(
     equity_values=[100.0, 101.0, 100.5],
     timestamps=[start + timedelta(days=offset) for offset in range(3)],
-    trade_pnls=[],
+    trades=librae.closed_trades(pd.DataFrame(), pd.DataFrame()),
     total_periods=3,
 )
 assert metrics.period_sharpe is not None

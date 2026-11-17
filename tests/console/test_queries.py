@@ -112,14 +112,19 @@ def test_drawdown_is_measured_from_the_running_peak() -> None:
 
 
 def test_drawdown_matches_the_stored_summary_definition() -> None:
-    from librae.core.metrics import compute_all
+    from librae.core.metrics import closed_trades, compute_all
 
     ts = pd.date_range("2026-03-01", periods=6, freq="1h", tz="UTC")
     values = [100.0, 104.0, 97.0, 99.0, 110.0, 101.0]
 
     curve = queries.with_drawdown(pd.DataFrame({"ts": ts, "equity": values}))
 
-    stored = compute_all(values, list(ts), trade_pnls=[], total_periods=len(values))
+    stored = compute_all(
+        values,
+        list(ts),
+        trades=closed_trades(pd.DataFrame(), pd.DataFrame()),
+        total_periods=len(values),
+    )
     assert curve["drawdown"].min() == pytest.approx(stored.max_drawdown)
 
 
@@ -178,22 +183,71 @@ def test_position_snapshot_marks_to_the_latest_bar_with_the_multiplier() -> None
     assert pd.isna(unmarked["market_price"]) and pd.isna(unmarked["mtm_pnl"])
 
 
-def test_trade_returns_count_hedge_legs_as_one_trade() -> None:
-    entry = NOW - pd.Timedelta(hours=1)
-    events = pd.DataFrame(
-        {
-            "net_return": [None, 5.0, 10.0, -6.0],  # percentage points; None is an entry
-            "group_id": [None, None, "hedge", "hedge"],
-            "entry_at": [pd.NaT, entry, entry, entry],
-            "realized_pnl": [None, 5.0, 10.0, -6.0],
-            "notional": [100.0, 100.0, 100.0, 100.0],
-            "entry_price": [10.0, 10.0, 10.0, 10.0],
-            "price": [10.0, 10.0, 10.0, 10.0],
-        }
-    )
+def _exit_event(ts, symbol: str, realized_pnl: float, group_id: str | None = None) -> dict:
+    return {
+        "ts": ts,
+        "symbol": symbol,
+        "side": "long",
+        "event_type": "close",
+        "fill_quantity": 10.0,
+        "remaining_quantity": 0.0,
+        "price": 10.0,
+        "entry_price": 10.0,
+        "notional": 100.0,
+        "realized_pnl": realized_pnl,
+        "commission": 0.0,
+        "slippage": 0.0,
+        "tax": 0.0,
+        "entry_commission": 0.0,
+        "entry_slippage": 0.0,
+        "entry_tax": 0.0,
+        "entry_at": NOW - pd.Timedelta(hours=1),
+        "group_id": group_id,
+        "periods_held": 1,
+        "reason": "",
+    }
 
-    # The ungrouped exit keeps its 5%; the two legs net 4 on 200 of notional.
-    assert sorted(queries.trade_returns(events)) == pytest.approx([0.02, 0.05])
+
+def _funding(ts, symbol: str, cash_flow: float) -> dict:
+    return {
+        "ts": ts,
+        "symbol": symbol,
+        "kind": "funding",
+        "side": "long",
+        "quantity": 10.0,
+        "mark_price": 10.0,
+        "multiplier": 1.0,
+        "rate": -cash_flow / 100.0,
+        "cash_flow": cash_flow,
+        "group_id": None,
+        "entry_at": NOW - pd.Timedelta(hours=1),
+    }
+
+
+def test_trade_returns_count_hedge_legs_as_one_trade_and_include_financing() -> None:
+    events = pd.DataFrame(
+        [
+            _exit_event(NOW, "A", 5.0),
+            _exit_event(NOW, "B", 10.0, group_id="hedge"),
+            _exit_event(NOW, "C", -6.0, group_id="hedge"),
+        ]
+    )
+    financing = pd.DataFrame([_funding(NOW - pd.Timedelta(minutes=30), "A", -2.0)])
+
+    # A keeps 5 less 2 of funding on 100; the two legs net 4 on 200 of notional.
+    assert queries.trade_returns(events, financing).tolist() == pytest.approx([0.03, 0.02])
+
+
+def test_trade_returns_drop_financing_older_than_cut_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Funding before the oldest event shown accrued while events now cut
+    away changed the position, so it cannot be replayed against the rest."""
+    monkeypatch.setattr(queries, "HISTORY_ROWS", 1)
+    events = pd.DataFrame([_exit_event(NOW, "A", 5.0)])
+    financing = pd.DataFrame([_funding(NOW - pd.Timedelta(days=1), "A", -2.0)])
+
+    assert queries.trade_returns(events, financing).tolist() == pytest.approx([0.05])
 
 
 def test_margin_totals_preserve_unknown_values_and_regimes() -> None:

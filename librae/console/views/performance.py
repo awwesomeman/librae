@@ -110,10 +110,11 @@ def _history(selected: common.Selection) -> None:
     run_id, account_id = selected.run["run_id"], selected.account_id
     equity = common.history(queries.EQUITY, (run_id, account_id))
     events = common.history(queries.POSITION_EVENTS, (run_id, account_id))
+    financing = common.history(queries.FINANCING_CASH_FLOWS, (run_id, account_id))
     performance = db.query(queries.PERFORMANCE, (run_id, account_id))
     curve = queries.with_drawdown(equity)
 
-    _account_charts(curve, events, run_id, account_id)
+    _account_charts(curve, events, financing, run_id, account_id)
     ui.section_header("Performance Details", "Full Run")
     if performance.empty:
         st.info("No stored performance summary for this account yet.")
@@ -169,7 +170,11 @@ def _history(selected: common.Selection) -> None:
 
 
 def _account_charts(
-    equity: pd.DataFrame, events: pd.DataFrame, run_id: str, account_id: str | None
+    equity: pd.DataFrame,
+    events: pd.DataFrame,
+    financing: pd.DataFrame,
+    run_id: str,
+    account_id: str | None,
 ) -> None:
     """``equity`` carries the drawdown columns ``queries.with_drawdown`` adds."""
     if equity.empty:
@@ -200,7 +205,7 @@ def _account_charts(
         st.caption("Notional as a share of equity; Largest is the biggest single position.")
     with right:
         st.subheader("Trade Returns")
-        returns = queries.trade_returns(events)
+        returns = queries.trade_returns(events, financing)
         if returns.empty:
             st.info("No closed trades yet.")
         else:
@@ -209,6 +214,6 @@ def _account_charts(
                 key=f"trade_returns_{run_id}_{account_id}",
             )
             st.caption(
-                "One value per exit; legs sharing a group_id and entry time count as one "
-                "trade, as in Performance Details. Financing is not included."
+                "One value per exit, financing included; legs sharing a group_id and entry "
+                "time count as one trade, as in Performance Details."
             )

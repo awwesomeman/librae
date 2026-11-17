@@ -249,6 +249,24 @@ exit, holding-period, or notional facts. Use
 trade analysis, and the [signal outcome guide](signal-outcome-analysis.md) for
 gross forward return, MFE, and MAE.
 
+The trades behind `StrategyMetrics`' trade count, win rate, profit factor and
+average trade return come from `closed_trades()`, one row per trade with its
+costs and financing; build trade reports from it rather than from the events:
+
+```python
+import pandas as pd
+
+from librae import closed_trades
+
+trades = closed_trades(
+    pd.DataFrame(output.position_events),
+    pd.DataFrame(output.financing_cash_flows),
+)
+```
+
+The `timescale_reader` loaders name the timestamp column `_time`; rename it to
+`ts` before passing their frames.
+
 ## Use third-party reporting directly
 
 Librae intentionally does not wrap an opinionated equity tearsheet. A thin
