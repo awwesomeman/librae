@@ -47,7 +47,9 @@
 # A live run also mounts the named volume quant_<deployment_id>_halt, which
 # holds its halt until `reset` clears it, so a restart, or a start that
 # replaces the container, stays halted even when the state store never
-# recorded the halt. Nothing here removes that volume.
+# recorded the halt. Nothing here removes that volume. `halt` on such a run
+# succeeds only once the engine has written the halt file there, within
+# TRADE_HALT_TIMEOUT_SECONDS (default 30).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -67,6 +69,7 @@ READY_MOUNT="/run/librae"
 HALT_MOUNT="/var/lib/librae"
 START_TIMEOUT_SECONDS="${TRADE_START_TIMEOUT_SECONDS:-30}"
 STOP_TIMEOUT_SECONDS="${TRADE_STOP_TIMEOUT_SECONDS:-90}"
+HALT_TIMEOUT_SECONDS="${TRADE_HALT_TIMEOUT_SECONDS:-30}"
 
 container_name() {
     local deployment_id="$1"
@@ -794,10 +797,58 @@ signal_ready_runner() {
     fi
 }
 
+# The halt file the runner was started with, empty for one without (sim).
+# The template prints only that variable: Config.Env also holds secrets.
+container_halt_file() {
+    local entry
+    entry="$(
+        docker inspect \
+            --format '{{range .Config.Env}}{{if eq (index (split . "=") 0) "LIBRAE_HALT_FILE"}}{{println .}}{{end}}{{end}}' \
+            "$1"
+    )" || return 1
+    printf '%s\n' "${entry#LIBRAE_HALT_FILE=}"
+}
+
+# Poll from outside the runner: the file is on a volume that outlives the
+# process, so a container that restarted since the signal still answers once
+# it runs again, and a failed exec in between is just another miss.
+wait_for_halt_file() {
+    local container="$1" halt_file="$2"
+    local deadline=$((SECONDS + HALT_TIMEOUT_SECONDS))
+    until docker exec "${container}" test -e "${halt_file}" >/dev/null 2>&1; do
+        if (( SECONDS >= deadline )); then
+            return 1
+        fi
+        sleep 1
+    done
+}
+
 cmd_halt() {
     local deployment_id="${1:?Usage: trade.sh halt <deployment_id>}"
+    validate_timeout "${HALT_TIMEOUT_SECONDS}" "TRADE_HALT_TIMEOUT_SECONDS"
     signal_ready_runner "${deployment_id}" SIGUSR1 || return 1
-    echo "Halt requested for $(container_name "${deployment_id}"); it is in effect once the Manual Halt alert arrives. If the container restarts before that, run halt again."
+    local container halt_file
+    local runbook="the 'halt file not written' row of 'Halt not persisted' in docs/guides/operational-runbook.md"
+    container="$(container_name "${deployment_id}")"
+    # A failed lookup must not read as sim, which would report success.
+    if ! halt_file="$(container_halt_file "${container}")"; then
+        echo "The halt was signalled to ${container}, but its persistence could not be confirmed: its halt file could not be looked up. See ${runbook}." >&2
+        return 1
+    fi
+    if [[ -z "${halt_file}" ]]; then
+        # Sim keeps a requested halt in memory only, so a restart drops it.
+        echo "Halt requested for ${container}; it is in effect once the Manual Halt alert arrives. If the container restarts before that, run halt again."
+        return 0
+    fi
+    # The engine writes the halt file as it takes the request, unless one is
+    # there already; either way a restart from then on comes up halted.
+    if ! wait_for_halt_file "${container}" "${halt_file}"; then
+        echo "Halt signalled to ${container}, but its halt file ${halt_file} was not written within ${HALT_TIMEOUT_SECONDS}s, so a restart may not stay halted." >&2
+        echo "If the log lines below say the halt file was not written, halting again only times out again: see ${runbook}. Otherwise run halt again once inspect reports phase=running." >&2
+        docker logs --tail 50 "${container}" >&2 || true
+        return 1
+    fi
+    echo "Halt requested for ${container} and its halt file is present, so a restart stays halted; it is in effect once the Manual Halt alert arrives."
 }
 
 cmd_reset() {
