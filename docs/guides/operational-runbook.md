@@ -300,10 +300,17 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
   **Manual Halt** alert (reason `SIGUSR1 operator halt`) or `docker logs`.
 - The engine writes the request to the halt file as soon as the signal
   reaches it, so a container that restarts before that alert comes up halted
-  (**Halt Restored**). `halt` returns once the signal is sent, not once the
-  engine has it: if the container restarts and neither alert arrives, run
-  `halt` again once `inspect` reports `phase=running`. An alert that says
-  `halt not persisted` is covered in [Halt not persisted](#halt-not-persisted).
+  (**Halt Restored**). `halt` succeeds only once that file exists, waiting up
+  to `TRADE_HALT_TIMEOUT_SECONDS`; otherwise, or when it cannot look the file
+  up after signalling, it exits non-zero. If the engine could not write the
+  file (the container log says `Halt file ... not written`, or the halt alert
+  says `halt file not written`), halting again only times out again: follow
+  the `halt file not written` row of [Halt not persisted](#halt-not-persisted),
+  which also covers `halt not persisted`. Otherwise run `halt` again once
+  `inspect` reports `phase=running`.
+- A sim deployment has no halt file: `halt` returns once the signal is sent,
+  and a restart before the **Manual Halt** alert drops the request, so run
+  `halt` again then.
 - The halt cancels tracked broker orders and drops pending decisions. A
   cancellation the venue has not confirmed stays tracked and is retried each
   cycle; check the venue for anything still resting.

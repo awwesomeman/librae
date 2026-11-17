@@ -274,6 +274,8 @@ def _run_trade_script(
     restart_count: str = "0",
     ready_file: str = "/run/librae/ready",
     marker_at_signal: str | None = None,
+    halt_file: str = "",
+    halt_file_poll: int | None = None,
     arguments: list[str] | None = None,
     image_present: bool = False,
     start_options: list[str] | None = None,
@@ -331,6 +333,10 @@ elif [[ "$1" == "ps" ]]; then
     printf '%s\\n' "${FAKE_DOCKER_RUNNING_CONTAINERS}"
 elif [[ "$1" == "inspect" ]]; then
     case "$*" in
+        *LIBRAE_HALT_FILE*)
+            [[ -z "${FAKE_HALT_FILE_LOOKUP_FAILS:-}" ]] || exit 1
+            [[ -z "${FAKE_HALT_FILE}" ]] || printf 'LIBRAE_HALT_FILE=%s\\n' "${FAKE_HALT_FILE}"
+            ;;
         *io.librae.account_id*) printf '%s\\n' "${FAKE_EXISTING_ACCOUNT_ID}" ;;
         *io.librae.currency*) printf '%s\\n' "${FAKE_EXISTING_CURRENCY}" ;;
         *io.librae.strategy*) printf '%s\\n' "${FAKE_EXISTING_STRATEGY}" ;;
@@ -383,6 +389,16 @@ elif [[ "$1" == "exec" ]]; then
         [[ "${@: -1}" == "${FAKE_MARKER_AT_SIGNAL}" ]]
         exit $?
     fi
+    if [[ "$*" == *" test -e "* ]]; then
+        # The halt file exists from the FAKE_HALT_FILE_POLL-th look on; never
+        # when that is empty.
+        polls_file="${FAKE_DOCKER_STATE_FILE}.halt-polls"
+        polls=$(( $(cat "${polls_file}" 2>/dev/null || echo 0) + 1 ))
+        printf '%s\\n' "${polls}" > "${polls_file}"
+        [[ -n "${FAKE_HALT_FILE_POLL}" && "${polls}" -ge "${FAKE_HALT_FILE_POLL}" \\
+            && "${@: -1}" == "${FAKE_HALT_FILE}" ]]
+        exit $?
+    fi
     if [[ "$*" == *" cat "* ]]; then
         marker_file="${@: -1}"
         if [[ "${marker_file}" == "${FAKE_READY_FILE}" ]]; then
@@ -424,6 +440,8 @@ fi
             "FAKE_EXISTING_MANAGED": existing_managed,
             "FAKE_READY_FILE": ready_file,
             "FAKE_MARKER_AT_SIGNAL": ready_marker if marker_at_signal is None else marker_at_signal,
+            "FAKE_HALT_FILE": halt_file,
+            "FAKE_HALT_FILE_POLL": "" if halt_file_poll is None else str(halt_file_poll),
             "FAKE_READY_TOKEN": ready_token,
             "FAKE_READY_MARKER": ready_marker,
             "FAKE_READY_MARKER_EXIT_CODE": str(ready_marker_exit_code),
@@ -762,6 +780,18 @@ def _signalled(docker_calls: list[str]) -> bool:
     )
 
 
+# Where a live container's halt file is, as `start` sets LIBRAE_HALT_FILE.
+LIVE_HALT_FILE = "/var/lib/librae/halt"
+
+
+def _halt_file_polls(docker_calls: list[str]) -> list[int]:
+    return [
+        index
+        for index, call in enumerate(docker_calls)
+        if call == f"exec quant_smoke-main test -e {LIVE_HALT_FILE}"
+    ]
+
+
 @pytest.mark.parametrize(("command", "signal_name"), SIGNAL_COMMANDS)
 def test_trade_script_signals_a_ready_deployment(
     tmp_path: Path, command: str, signal_name: str
@@ -780,6 +810,91 @@ def test_trade_script_signals_a_ready_deployment(
     )
     assert f"run {command} again" in result.stdout
     assert "restart-safe readiness" not in result.stderr
+    # A sim runner has no halt file to wait for.
+    assert not _halt_file_polls(docker_calls)
+
+
+def test_trade_script_halt_waits_for_the_live_halt_file(tmp_path: Path) -> None:
+    # The engine writes the file after the first look.
+    result, docker_calls = _signal_runner(
+        tmp_path, all_containers="quant_smoke-main", halt_file=LIVE_HALT_FILE, halt_file_poll=2
+    )
+
+    assert result.returncode == 0, result.stderr
+    polls = _halt_file_polls(docker_calls)
+    assert len(polls) == 2
+    signal_call = next(index for index, call in enumerate(docker_calls) if _signalled([call]))
+    assert signal_call < polls[0]
+    # Holds whether this request wrote the file or found one there already.
+    assert "its halt file is present, so a restart stays halted" in result.stdout
+    assert "run halt again" not in result.stdout
+
+
+# Where a halt whose file cannot be written is handled; halting again only
+# times out again.
+HALT_FILE_RUNBOOK_ROW = (
+    "the 'halt file not written' row of 'Halt not persisted' in docs/guides/operational-runbook.md"
+)
+
+
+def test_the_halt_file_runbook_row_exists() -> None:
+    runbook = (ROOT / "docs/guides/operational-runbook.md").read_text(encoding="utf-8")
+
+    section = runbook.split("\n## Halt not persisted\n", 1)[1].split("\n## ", 1)[0]
+    assert "\n| Any halt alert that says `halt file not written (<error>)` |" in section
+
+
+def test_trade_script_halt_fails_when_the_live_halt_file_is_not_written(tmp_path: Path) -> None:
+    result, docker_calls = _signal_runner(
+        tmp_path,
+        all_containers="quant_smoke-main",
+        halt_file=LIVE_HALT_FILE,
+        extra_env={"TRADE_HALT_TIMEOUT_SECONDS": "1"},
+    )
+
+    assert result.returncode != 0
+    assert _signalled(docker_calls)
+    assert _halt_file_polls(docker_calls)
+    assert (
+        f"Halt signalled to quant_smoke-main, but its halt file {LIVE_HALT_FILE} "
+        "was not written within 1s, so a restart may not stay halted." in result.stderr
+    )
+    assert (
+        "If the log lines below say the halt file was not written, halting again only "
+        f"times out again: see {HALT_FILE_RUNBOOK_ROW}. Otherwise run halt again once "
+        "inspect reports phase=running." in result.stderr
+    )
+    assert "logs --tail 50 quant_smoke-main" in docker_calls
+    assert result.stdout == ""
+
+
+def test_trade_script_halt_fails_when_the_halt_file_cannot_be_looked_up(tmp_path: Path) -> None:
+    # Say the container was removed between the signal and the lookup: that
+    # must not read as a sim runner, for which halt reports success at once.
+    result, docker_calls = _signal_runner(
+        tmp_path, all_containers="quant_smoke-main", extra_env={"FAKE_HALT_FILE_LOOKUP_FAILS": "1"}
+    )
+
+    assert result.returncode != 0
+    assert _signalled(docker_calls)
+    assert result.stderr.strip() == (
+        "The halt was signalled to quant_smoke-main, but its persistence could not be "
+        f"confirmed: its halt file could not be looked up. See {HALT_FILE_RUNBOOK_ROW}."
+    )
+    assert result.stdout == ""
+
+
+def test_trade_script_halt_refuses_an_invalid_timeout_before_signalling(tmp_path: Path) -> None:
+    result, docker_calls = _signal_runner(
+        tmp_path,
+        all_containers="quant_smoke-main",
+        halt_file=LIVE_HALT_FILE,
+        extra_env={"TRADE_HALT_TIMEOUT_SECONDS": "0"},
+    )
+
+    assert result.returncode != 0
+    assert "TRADE_HALT_TIMEOUT_SECONDS must be a positive integer" in result.stderr
+    assert not _signalled(docker_calls)
 
 
 def test_trade_script_reset_names_both_outcome_alerts(tmp_path: Path) -> None:
@@ -797,7 +912,11 @@ def test_trade_script_signal_reports_a_runner_that_restarted_after_the_check(
     # The runner crashed between the readiness check and the signal: the
     # restarted container's tmpfs no longer holds the validated marker.
     result, docker_calls = _signal_runner(
-        tmp_path, command, all_containers="quant_smoke-main", marker_at_signal=""
+        tmp_path,
+        command,
+        all_containers="quant_smoke-main",
+        marker_at_signal="",
+        halt_file=LIVE_HALT_FILE,
     )
 
     assert result.returncode != 0
@@ -807,6 +926,7 @@ def test_trade_script_signal_reports_a_runner_that_restarted_after_the_check(
         "Retry once inspect reports phase=running."
     )
     assert "requested" not in result.stdout
+    assert not _halt_file_polls(docker_calls)
 
 
 def test_trade_script_warns_about_a_deployment_created_before_restart_safe_readiness(
@@ -872,11 +992,12 @@ def test_trade_script_signal_refuses_an_unmanaged_container(tmp_path: Path, comm
 
 @pytest.mark.parametrize("command", SIGNAL_COMMAND_NAMES)
 def test_trade_script_signal_refuses_an_unknown_deployment(tmp_path: Path, command: str) -> None:
-    result, docker_calls = _signal_runner(tmp_path, command)
+    result, docker_calls = _signal_runner(tmp_path, command, halt_file=LIVE_HALT_FILE)
 
     assert result.returncode != 0
-    assert "quant_smoke-main not found" in result.stderr
+    assert result.stderr.strip() == "quant_smoke-main not found."
     assert not _signalled(docker_calls)
+    assert not _halt_file_polls(docker_calls)
 
 
 def test_trade_script_rejects_strategy_account_mismatch_before_replacement(
