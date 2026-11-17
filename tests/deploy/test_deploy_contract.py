@@ -1415,8 +1415,10 @@ def test_market_data_schema_keeps_complete_subscriptions_distinct() -> None:
     assert "data_source_by_symbol JSONB NOT NULL" in schema
     assert "jsonb_typeof(data_source_by_symbol) = 'object'" in schema
     assert (
-        "ON run_bars (run_id, symbol, ts, available_at, open, high, low, close, volume)" in schema
+        "ON run_bars (run_id, symbol, ts, available_at, open, high, low, close, volume)\n"
+        "    NULLS NOT DISTINCT;" in schema
     )
+    assert "volume          DOUBLE PRECISION," in schema
     assert "available_at    TIMESTAMPTZ NOT NULL" in schema
     assert "chk_run_bars_available_at CHECK (available_at >= ts)" in schema
     assert "CREATE TABLE IF NOT EXISTS ohlcv" not in schema

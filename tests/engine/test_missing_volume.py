@@ -263,7 +263,8 @@ class TestSimPolling:
         assert "changed under the same available_at" not in caplog.text
 
 
-def test_run_bars_store_missing_volume_as_nan() -> None:
+def test_run_bars_store_missing_volume_as_null() -> None:
+    """NULL, unlike NaN, is skipped by SQL aggregates over the stored bars."""
     frame = _bars([NAN, 5.0], freq="h").droplevel("symbol").rename_axis("ts")
     subscription = MarketDataSubscription(
         symbol="BTCUSDT",
@@ -283,5 +284,5 @@ def test_run_bars_store_missing_volume_as_nan() -> None:
         write_run_bars("run-1", subscription, frame)
 
     rows = execute_values.call_args.args[2]
-    assert math.isnan(rows[0][-1])
+    assert rows[0][-1] is None
     assert rows[1][-1] == 5.0

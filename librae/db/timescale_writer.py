@@ -840,7 +840,8 @@ def write_run_bars(
             bars["high"].astype(float),
             bars["low"].astype(float),
             bars["close"].astype(float),
-            bars["volume"].astype(float),
+            # A missing volume is NULL, not NaN, so SQL aggregates skip it.
+            [None if pd.isna(volume) else float(volume) for volume in bars["volume"]],
             strict=True,
         )
     )
