@@ -69,6 +69,7 @@ from librae.core.executor import (
     coalesce_runtime_events,
     execute_pending_decision_and_stops,
     liquidate_all,
+    log_opposite_side_refusals,
     merge_pending_decisions,
     partition_pending_decision,
     queue_market_exit_all,
@@ -1847,6 +1848,7 @@ class Backtest:
         allocation_snapshots: list[AllocationSnapshot] = []
         financing_cash_flows: list[FinancingCashFlow] = []
         runtime_events: list[RuntimeEvent] = []
+        opposite_side_logged: set[str] = set()
         portfolio_snapshots: list[PortfolioSnapshot] = []
         active_target_weights: dict[str, float] | None = None
         last_prices: dict[str, float] = {}
@@ -2051,6 +2053,7 @@ class Backtest:
                 trades.extend(step_result.trades)
                 all_events.extend(step_result.events)
                 runtime_events.extend(step_result.runtime_events)
+                log_opposite_side_refusals(step_result.runtime_events, opposite_side_logged)
                 roll_guard.after_fills(ts, bars, positions, step_result.events)
                 drawdown_exit_origins = {
                     symbol: origin

@@ -313,6 +313,41 @@ wait across periods for a grouped decision's data to arrive, and rejects one
 that is missing a required bar rather than queueing it. Use per-symbol order
 intents for asynchronous cross-market execution.
 
+## Reversing a position
+
+A long becomes a short (or the reverse) in one decision with either type:
+
+```python
+# Order intents: close the whole position, then enter the other side.
+return [
+    OrderIntent(action="close", symbol="AAA"),
+    OrderIntent(action="short", symbol="AAA", quantity=10.0),
+]
+
+# Weights: a target on the other side of the held position.
+return PortfolioWeights(weights={"AAA": -0.5})
+```
+
+Both reduce, then add. A backtest or sim fills the close and the entry at the
+same fill point; live sends the entry only after the close has filled.
+
+- A decision holds one intent per symbol. The one exception is the pair above,
+  in that order: a `close` with no quantity (or at least the held quantity),
+  then a `long` or `short` opposite the held position, both ungrouped market
+  orders whose `time_in_force` is not `day` or `gtc`. Anything else raises
+  `ValueError` on the emitting bar.
+- An entry that finds the close incomplete (volume-capped, below the venue
+  minimum) is refused, so the position ends smaller, never larger, than asked.
+  A rejected or partly filled entry leaves the position flat or partial.
+- Live never sends an entry to open a position while the ledger still holds
+  the symbol. A close that ends any way but filled (rejected, cancelled,
+  expired, timed out, partly filled), for a grouped position too, halts the
+  account and drops the entry; so does any halt before the entry is sent. A
+  failed entry halts as any failed ungrouped order does.
+- An entry refused because the opposite position is still open, whether no
+  close came before it or that close did not complete, is a `decision_skipped`
+  event (reason `opposite_side`) and is logged once per symbol per run.
+
 ## Related multi-leg order contract
 
 This section is the canonical `group_id` execution contract. Summaries in API,

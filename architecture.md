@@ -509,7 +509,7 @@ document scoped to layering, boundaries, and naming conventions.
 |------|------|
 | `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioWeights` |
 | `Context` | immutable event snapshot: current bars, positions, one account snapshot, callback period index, and the continuous series to exit before their next contract switch |
-| `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision |
+| `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision; one intent per symbol, except a `[close, opposite-side entry]` reversal ([engine guide](docs/guides/engine-usage.md#reversing-a-position)) |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
 | `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` identifies related legs — backtest/sim stage them as one local fill-or-kill unit, while live preflights them before serial broker submission and does not claim venue atomicity (see the [related multi-leg contract](docs/guides/engine-usage.md#related-multi-leg-order-contract)); `time_in_force` (`day`/`gtc`/`ioc`/`fok`) sets the order lifetime — backtest/sim model it from bar data (eligible-event count plus whether a short fill counts, measured against the engine's own participation limits, never book depth), while live delegates the real lifetime to the broker |
 | `PortfolioWeights` | timestamped portfolio weights: next-bar resolution in backtest (optionally bounded whole-book deferral on explicit untradability), next-cycle simulation resolution, immediate market-order sizing in live |
