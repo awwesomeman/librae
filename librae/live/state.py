@@ -316,11 +316,12 @@ class LiveRuntimeState:
     last_funding_settled_at: dict[str, datetime] = field(default_factory=dict)
     pending_decision: StrategyDecision = field(default_factory=list)
     # Bar timestamp each pending intent FIRST rested on, keyed by symbol
-    # (validate_strategy_decision allows at most one intent per symbol). A
-    # resting "day" limit expires against the session it first rested in, not
-    # the one that emitted it — a decision is emitted on one bar and first
-    # executable on the next. Only set once an intent has actually rested, and
-    # it has to survive a restart along with the intent itself.
+    # (validate_strategy_decision allows one intent per symbol, or a reversal
+    # pair whose market legs cannot rest). A resting "day" limit expires
+    # against the session it first rested in, not the one that emitted it — a
+    # decision is emitted on one bar and first executable on the next. Only set
+    # once an intent has actually rested, and it has to survive a restart along
+    # with the intent itself.
     pending_resting_since: dict[str, datetime] = field(default_factory=dict)
     # Simulation only. When each pending intent was decided, keyed by symbol
     # (a whole-book target under every symbol), and when a drawdown breach
