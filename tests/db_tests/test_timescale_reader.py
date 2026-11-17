@@ -263,7 +263,13 @@ def _stored_output():
             [["BTCUSDT"] * 6, timestamps], names=["symbol", "datetime"]
         ),
     )
-    backtest = Backtest(data, OpenThenClose(), cost_model=CostModel.zero(), data_source="fixture")
+    backtest = Backtest(
+        data,
+        OpenThenClose(),
+        cost_model=CostModel.zero(),
+        data_source="fixture",
+        currency="USDT",
+    )
     backtest.run()
     return backtest.build_output()
 

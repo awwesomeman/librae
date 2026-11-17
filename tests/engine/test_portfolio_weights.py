@@ -25,7 +25,7 @@ from librae.core.strategy import (
     StrategyDecision,
 )
 
-from tests.conftest import primary_subscriptions_for
+from tests.conftest import declare_instruments, primary_subscriptions_for
 
 TS = datetime(2026, 7, 27, tzinfo=UTC)
 
@@ -616,6 +616,7 @@ class TestBacktestRebalance:
             cost_model=CostModel.zero(),
             data_source="test",
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         )
 
         result = backtest.run()
@@ -647,6 +648,7 @@ class TestBacktestRebalance:
                 rebalance_residual_policy="defer_symbols",
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         opens = [event for event in result.position_events if event.event_type == "open"]
@@ -684,6 +686,7 @@ class TestBacktestRebalance:
                 rebalance_residual_policy="defer_symbols",
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         b_open = next(
@@ -718,6 +721,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=2,
                 rebalance_residual_policy="defer_symbols",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         entries = [event for event in result.position_events if event.event_type == "open"]
@@ -762,6 +766,7 @@ class TestBacktestRebalance:
                 rebalance_residual_policy="defer_symbols",
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         a_open = next(event for event in result.position_events if event.symbol == "A")
@@ -813,6 +818,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=4,
                 rebalance_residual_policy="defer_symbols",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         additions = [event for event in result.position_events if event.event_type == "add"]
@@ -870,6 +876,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         open_events = [event for event in result.position_events if event.event_type == "open"]
@@ -904,6 +911,7 @@ class TestBacktestRebalance:
             ),
             record_position_snapshots=True,
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         )
         backtest.run()
         output = backtest.build_output()
@@ -943,6 +951,7 @@ class TestBacktestRebalance:
                     max_rebalance_delay_bars=1,
                 ),
                 primary_subscriptions=primary_subscriptions_for(frame),
+                instrument_overrides=declare_instruments(frame),
             ).run()
 
     def test_deferred_rebalance_fails_if_the_backtest_ends(self) -> None:
@@ -973,6 +982,7 @@ class TestBacktestRebalance:
                     max_rebalance_delay_bars=2,
                 ),
                 primary_subscriptions=primary_subscriptions_for(frame),
+                instrument_overrides=declare_instruments(frame),
             ).run()
 
     def test_new_target_supersedes_a_deferred_rebalance(self) -> None:
@@ -1006,6 +1016,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         opens = [event for event in result.position_events if event.event_type == "open"]
@@ -1041,6 +1052,7 @@ class TestBacktestRebalance:
                 rebalance_residual_policy="defer_all",
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         opens = [event for event in result.position_events if event.event_type == "open"]
@@ -1086,6 +1098,7 @@ class TestBacktestRebalance:
                     max_rebalance_delay_bars=4,
                     rebalance_residual_policy="defer_symbols",
                 ),
+                instrument_overrides=declare_instruments(frame),
             ).run()
 
     def test_drawdown_halt_records_the_residual_it_cancels(self) -> None:
@@ -1114,6 +1127,7 @@ class TestBacktestRebalance:
                 rebalance_residual_policy="defer_symbols",
             ),
             risk=RiskPolicy(max_drawdown_rate=0.05),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         cancelled = [
@@ -1149,6 +1163,7 @@ class TestBacktestRebalance:
                 rebalance_residual_policy="defer_symbols",
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         opens = [event for event in result.position_events if event.event_type == "open"]
@@ -1195,6 +1210,7 @@ class TestBacktestRebalance:
                 rebalance_residual_policy="defer_symbols",
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         entries = [event for event in result.position_events if event.event_type in ("open", "add")]
@@ -1227,6 +1243,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=2,
                 rebalance_residual_policy="defer_symbols",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         entries = [
@@ -1279,6 +1296,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_symbols",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         entries = [event for event in result.position_events if event.event_type in ("open", "add")]
@@ -1311,6 +1329,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_symbols",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         entry = next(event for event in result.position_events if event.event_type == "open")
@@ -1346,6 +1365,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=2,
                 rebalance_residual_policy="discard",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         entries = [event for event in result.position_events if event.event_type in ("open", "add")]
@@ -1376,6 +1396,7 @@ class TestBacktestRebalance:
                 max_bar_volume_participation_rate=0.1,
                 rebalance_residual_policy="fail",
             ),
+            instrument_overrides=declare_instruments(frame),
         )
 
         with pytest.raises(
@@ -1407,6 +1428,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=2,
                 rebalance_residual_policy="defer_symbols",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         entries = [event for event in result.position_events if event.event_type in ("open", "add")]
@@ -1441,6 +1463,7 @@ class TestBacktestRebalance:
                     max_rebalance_delay_bars=1,
                     rebalance_residual_policy="defer_symbols",
                 ),
+                instrument_overrides=declare_instruments(frame),
             ).run()
 
     def test_terminal_residual_fails_instead_of_being_discarded(self) -> None:
@@ -1468,6 +1491,7 @@ class TestBacktestRebalance:
                     max_rebalance_delay_bars=10,
                     rebalance_residual_policy="defer_symbols",
                 ),
+                instrument_overrides=declare_instruments(frame),
             ).run()
 
     def test_new_target_supersedes_partially_filled_quantities(self) -> None:
@@ -1494,6 +1518,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_symbols",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         target_entries = [
@@ -1542,6 +1567,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_symbols",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         at_supersession = [
@@ -1592,6 +1618,7 @@ class TestBacktestRebalance:
                 rebalance_residual_policy="defer_symbols",
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         first_slice = [
@@ -1637,6 +1664,7 @@ class TestBacktestRebalance:
                 max_rebalance_delay_bars=1,
                 rebalance_residual_policy="defer_symbols",
             ),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         reversal_events = [event for event in result.position_events if event.reason == "reverse"]
@@ -1661,6 +1689,7 @@ class TestBacktestRebalance:
             data_source="test",
             record_position_snapshots=True,
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         )
         backtest.run()
         output = backtest.build_output()

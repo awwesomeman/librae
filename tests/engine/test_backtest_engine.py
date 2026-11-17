@@ -14,7 +14,7 @@ from librae.core.cost_model import CostModel
 from librae.core.run_config import AccountConfig, ExecutionPolicy, RiskPolicy
 from librae.core.strategy import Context, OrderIntent, Strategy
 
-from tests.conftest import make_test_cfg, primary_subscriptions_for
+from tests.conftest import declare_instruments, make_test_cfg, primary_subscriptions_for
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -190,7 +190,12 @@ class TestBacktestBasics:
     def test_no_trades_flat_equity(self) -> None:
         df = _make_multiindex_df([100.0] * 10)
         bt = Backtest(
-            df, HoldStrategy(), initial_balance=10_000, cost_model=_zero_cost(), data_source="test"
+            df,
+            HoldStrategy(),
+            initial_balance=10_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+            currency="USDT",
         )
         result = bt.run()
 
@@ -209,6 +214,7 @@ class TestBacktestBasics:
             initial_balance=10_000,
             cost_model=_zero_cost(),
             data_source="test",
+            currency="USDT",
         )
         result = bt.run()
 
@@ -231,6 +237,7 @@ class TestBacktestBasics:
             BuyOnce(),
             initial_balance=100_000.0,
             cost_model=_zero_cost(),
+            currency="USDT",
         ).run()
 
         open_event = next(event for event in result.position_events if event.event_type == "open")
@@ -343,6 +350,7 @@ class TestBacktestBasics:
             initial_balance=100_000.0,
             cost_model=_zero_cost(),
             execution=policy,
+            currency="USDT",
         ).run()
 
         open_event = next(event for event in result.position_events if event.event_type == "open")
@@ -399,6 +407,7 @@ class TestBacktestBasics:
             initial_balance=100_000.0,
             cost_model=_zero_cost(),
             execution=policy,
+            currency="USDT",
         ).run()
 
         entry_events = [
@@ -416,6 +425,9 @@ class TestBacktestBasics:
             HoldStrategy(),
             execution=policy,
             cost_model=CostModel.zero(),
+            instrument_overrides=declare_instruments(
+                _make_multiindex_df([100.0] * 5, symbol="UNREGISTERED")
+            ),
         )
 
         with pytest.raises(ValueError, match=r"calendar_id.*UNREGISTERED"):
@@ -461,7 +473,12 @@ class TestBacktestBasics:
                 return []
 
         bt = Backtest(
-            df, BuyBar2(), initial_balance=10_000, cost_model=_zero_cost(), data_source="test"
+            df,
+            BuyBar2(),
+            initial_balance=10_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+            currency="USDT",
         )
         result = bt.run()
 
@@ -486,6 +503,7 @@ class TestBacktestBasics:
             initial_balance=1_000.0,
             cost_model=_zero_cost(),
             data_source="test",
+            currency="USDT",
         ).run()
 
         assert result.portfolio_snapshots[-1].turnover == pytest.approx(0.3)
@@ -595,6 +613,7 @@ class TestBacktestDataContract:
             initial_balance=1_000.0,
             cost_model=_zero_cost(),
             primary_subscriptions=primary_subscriptions_for(data, "H1"),
+            instrument_overrides=declare_instruments(data),
         )
 
         with pytest.raises(ValueError, match="not the canonical timeframe=H1 start"):
@@ -617,6 +636,7 @@ class TestBacktestDataContract:
                 initial_balance=1_000.0,
                 cost_model=_zero_cost(),
                 primary_subscriptions=primary_subscriptions_for(data, "H1"),
+                instrument_overrides=declare_instruments(data),
             ).run()
 
     def test_rejects_configured_timeframe_that_disagrees_with_data(self) -> None:
@@ -642,6 +662,7 @@ class TestBacktestDataContract:
             HoldStrategy(),
             initial_balance=1_000.0,
             cost_model=_zero_cost(),
+            currency="USDT",
         )
 
         backtest.run()
@@ -656,7 +677,12 @@ class TestBacktestDataContract:
             names=["symbol", "datetime"],
         )
 
-        backtest = Backtest(frame, HoldStrategy(), cost_model=_zero_cost())
+        backtest = Backtest(
+            frame,
+            HoldStrategy(),
+            cost_model=_zero_cost(),
+            currency="USDT",
+        )
         backtest.run()
 
         assert str(backtest._data.index.get_level_values("datetime").tz) == "UTC"
@@ -732,6 +758,7 @@ class TestBacktestDataContract:
             HoldStrategy(),
             cost_model=_zero_cost(),
             primary_subscriptions=(subscription,),
+            instrument_overrides=declare_instruments(frame),
         )
         backtest.run()
 
@@ -768,6 +795,7 @@ class TestBacktestDataContract:
             CaptureUniverse(),
             cost_model=_zero_cost(),
             primary_subscriptions=subscriptions,
+            instrument_overrides=declare_instruments(data),
         )
 
         backtest.run()
@@ -840,11 +868,19 @@ class TestBacktestDataContract:
         )
 
         with pytest.raises(ValueError, match="requires primary_subscriptions"):
-            Backtest(data, HoldStrategy(), cost_model=_zero_cost())
+            Backtest(
+                data,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+                instrument_overrides=declare_instruments(data),
+            )
 
     def test_direct_backtest_requires_an_explicit_cost_model(self) -> None:
         with pytest.raises(ValueError, match="requires cost_model"):
-            Backtest(_make_multiindex_df([100.0] * 5), HoldStrategy())
+            Backtest(
+                _make_multiindex_df([100.0] * 5),
+                HoldStrategy(),
+            )
 
     def test_direct_primary_subscriptions_type_check_precedes_field_access(self) -> None:
         frame = _make_multiindex_df([100.0] * 5, symbol="CUSTOM")
@@ -858,6 +894,7 @@ class TestBacktestDataContract:
                 HoldStrategy(),
                 cost_model=_zero_cost(),
                 primary_subscriptions=(object(),),
+                instrument_overrides=declare_instruments(frame),
             )
 
     def test_direct_primary_subscriptions_exact_cover_fails_at_construction(self) -> None:
@@ -877,6 +914,7 @@ class TestBacktestDataContract:
                 HoldStrategy(),
                 cost_model=_zero_cost(),
                 primary_subscriptions=(wrong,),
+                instrument_overrides=declare_instruments(frame),
             )
 
     def test_available_at_is_reserved_from_strategy_and_execution_bars(self) -> None:
@@ -911,6 +949,7 @@ class TestBacktestDataContract:
             BuyOnce(),
             cost_model=_zero_cost(),
             primary_subscriptions=(subscription,),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         assert result.position_events[0].event_type == "open"
@@ -941,6 +980,7 @@ class TestBacktestDataContract:
                 HoldStrategy(),
                 cost_model=_zero_cost(),
                 primary_subscriptions=(subscription,),
+                instrument_overrides=declare_instruments(frame),
             ).run()
 
     def test_primary_subscription_rejects_naive_availability(self) -> None:
@@ -965,6 +1005,7 @@ class TestBacktestDataContract:
                 HoldStrategy(),
                 cost_model=_zero_cost(),
                 primary_subscriptions=(subscription,),
+                instrument_overrides=declare_instruments(frame),
             ).run()
 
     @pytest.mark.parametrize(
@@ -996,7 +1037,11 @@ class TestBacktestDataContract:
             names=["symbol", "datetime"],
         )
 
-        backtest = Backtest(frame, HoldStrategy(), cost_model=_zero_cost())
+        backtest = Backtest(
+            frame,
+            HoldStrategy(),
+            cost_model=_zero_cost(),
+        )
         backtest.run()
 
         assert backtest._timeframe == "D1"
@@ -1052,7 +1097,11 @@ class TestBacktestDataContract:
         )
 
         with pytest.raises(ValueError, match=r"canonical timeframe=D1 period starts"):
-            Backtest(frame, HoldStrategy(), cost_model=_zero_cost()).run()
+            Backtest(
+                frame,
+                HoldStrategy(),
+                cost_model=_zero_cost(),
+            ).run()
 
     def test_xnys_daily_timeframe_rejects_off_session_timestamp(self) -> None:
         timestamps = pd.to_datetime(
@@ -1112,7 +1161,11 @@ class TestBacktestDataContract:
             names=["symbol", "datetime"],
         )
 
-        backtest = Backtest(frame, HoldStrategy(), cost_model=_zero_cost())
+        backtest = Backtest(
+            frame,
+            HoldStrategy(),
+            cost_model=_zero_cost(),
+        )
         backtest.run()
 
         assert backtest._timeframe == "W1"
@@ -1134,7 +1187,11 @@ class TestBacktestDataContract:
             names=["symbol", "datetime"],
         )
 
-        backtest = Backtest(frame, HoldStrategy(), cost_model=_zero_cost())
+        backtest = Backtest(
+            frame,
+            HoldStrategy(),
+            cost_model=_zero_cost(),
+        )
         backtest.run()
 
         assert backtest._timeframe == "W1"
@@ -1156,7 +1213,11 @@ class TestBacktestDataContract:
             names=["symbol", "datetime"],
         )
 
-        backtest = Backtest(frame, HoldStrategy(), cost_model=_zero_cost())
+        backtest = Backtest(
+            frame,
+            HoldStrategy(),
+            cost_model=_zero_cost(),
+        )
         backtest.run()
 
         assert backtest._timeframe == "W1"
@@ -1663,6 +1724,7 @@ class TestSignalDrivenStrategy:
             initial_balance=10_000,
             cost_model=_zero_cost(),
             data_source="test",
+            currency="USDT",
         )
         result = bt.run()
 
@@ -1681,6 +1743,7 @@ class TestSignalDrivenStrategy:
             initial_balance=10_000,
             cost_model=_zero_cost(),
             data_source="test",
+            currency="USDT",
         )
         result = bt.run()
 
@@ -1736,6 +1799,7 @@ class TestMultiAsset:
             cost_model=_zero_cost(),
             data_source="test",
             primary_subscriptions=primary_subscriptions_for(df),
+            instrument_overrides=declare_instruments(df),
         )
         result = bt.run()
 
@@ -1776,6 +1840,7 @@ class TestMultiAsset:
             cost_model=_zero_cost(),
             data_source="test",
             primary_subscriptions=primary_subscriptions_for(df),
+            instrument_overrides=declare_instruments(df),
         ).run()
 
         assert available == [
@@ -1829,6 +1894,7 @@ class TestMultiAsset:
             cost_model=_zero_cost(),
             data_source="test",
             primary_subscriptions=primary_subscriptions_for(df),
+            instrument_overrides=declare_instruments(df),
         ).run()
 
         symbols_traded = {t.symbol for t in result.trades}
@@ -1874,6 +1940,7 @@ class TestMultiAsset:
             cost_model=_zero_cost(),
             data_source="test",
             primary_subscriptions=primary_subscriptions_for(df),
+            instrument_overrides=declare_instruments(df),
         ).run()
 
         events_by_symbol = {e.symbol: e for e in result.position_events if e.event_type == "open"}
@@ -1904,6 +1971,7 @@ class TestMultiAsset:
             initial_balance=100_000,
             cost_model=_zero_cost(),
             data_source="test",
+            currency="USDT",
         ).run()
 
         open_event = next(e for e in result.position_events if e.event_type == "open")
@@ -1944,6 +2012,7 @@ class TestMultiAsset:
             cost_model=_zero_cost(),
             data_source="test",
             primary_subscriptions=primary_subscriptions_for(df),
+            instrument_overrides=declare_instruments(df),
         ).run()
 
         open_event = next(event for event in result.position_events if event.event_type == "open")
@@ -2000,6 +2069,7 @@ class TestMultiAsset:
             cost_model=_zero_cost(),
             data_source="test",
             primary_subscriptions=primary_subscriptions_for(df),
+            instrument_overrides=declare_instruments(df),
         ).run()
 
         assert result.equity_curve[2].equity == pytest.approx(1_020.0)
@@ -2041,6 +2111,7 @@ class TestMultiAsset:
             cost_model=_zero_cost(),
             data_source="test",
             primary_subscriptions=primary_subscriptions_for(df),
+            instrument_overrides=declare_instruments(df),
         )
         result = backtest.run()
 
@@ -2072,6 +2143,7 @@ class TestMultiAsset:
             initial_balance=1_000.0,
             cost_model=_zero_cost(),
             data_source="test",
+            instrument_overrides=declare_instruments(df),
         )
         result = backtest.run()
 
@@ -2106,6 +2178,7 @@ class TestMultiAsset:
             cost_model=_zero_cost(),
             data_source="test",
             execution=ExecutionPolicy(max_bar_volume_participation_rate=0.1),
+            instrument_overrides=declare_instruments(df),
         )
         result = backtest.run()
 
@@ -2229,7 +2302,12 @@ class TestWithCosts:
         )
 
         bt = Backtest(
-            df, BuyBar2CloseBar4(), initial_balance=10_000, cost_model=cost, data_source="test"
+            df,
+            BuyBar2CloseBar4(),
+            initial_balance=10_000,
+            cost_model=cost,
+            data_source="test",
+            currency="USDT",
         )
         result = bt.run()
 
@@ -2255,7 +2333,12 @@ class TestContext:
 
         df = _make_multiindex_df([100.0] * 6)
         bt = Backtest(
-            df, Spy(), initial_balance=10_000, cost_model=_zero_cost(), data_source="test"
+            df,
+            Spy(),
+            initial_balance=10_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+            currency="USDT",
         )
         bt.run()
 
@@ -2285,7 +2368,12 @@ class TestContext:
 
         df = _make_multiindex_df([100.0] * 8)
         bt = Backtest(
-            df, Tracker(), initial_balance=10_000, cost_model=_zero_cost(), data_source="test"
+            df,
+            Tracker(),
+            initial_balance=10_000,
+            cost_model=_zero_cost(),
+            data_source="test",
+            currency="USDT",
         )
         bt.run()
 

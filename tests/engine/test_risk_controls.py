@@ -30,7 +30,7 @@ from librae.core.strategy import (
     Strategy,
 )
 
-from tests.conftest import make_test_cfg, primary_subscriptions_for
+from tests.conftest import declare_instruments, make_test_cfg, primary_subscriptions_for
 
 # ---------------------------------------------------------------------------
 # Helpers — mirrors tests/engine/test_stop_targets.py / test_position_scaling.py
@@ -786,7 +786,12 @@ class TestMaxDrawdownBreaker:
             {"open": 60, "high": 65, "low": 55, "close": 60},
             {"open": 60, "high": 61, "low": 59, "close": 60},
         ]
-        bt = Backtest(_make_multiindex_df(bars), OpenOnceStrategy(), cost_model=_zero_cost())
+        bt = Backtest(
+            _make_multiindex_df(bars),
+            OpenOnceStrategy(),
+            cost_model=_zero_cost(),
+            currency="USDT",
+        )
         result = bt.run()
 
         close_events = [e for e in result.position_events if e.event_type == "close"]
@@ -881,6 +886,7 @@ class TestMaxPositionCap:
             cost_model=_zero_cost(),
             risk=RiskPolicy(max_position_weight=0.5),
             primary_subscriptions=primary_subscriptions_for(data),
+            instrument_overrides=declare_instruments(data),
         ).run()
 
         b_open = next(
@@ -1098,6 +1104,7 @@ class TestDynamicSlippage:
                 OpenFixedQtyStrategy(),
                 cost_model=cost_model,
                 execution=ExecutionPolicy(max_bar_volume_participation_rate=None),
+                currency="USDT",
             )
             result = bt.run()
             open_events = [e for e in result.position_events if e.event_type == "open"]

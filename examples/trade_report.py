@@ -65,6 +65,7 @@ def main() -> None:
         strategy=AlternatingStrategy(),
         cost_model=CostModel.zero(),
         data_source="demo",
+        instrument_overrides={symbol: {"instrument_type": "spot", "currency": "USD"}},
     )
     backtest.run()
     output = backtest.build_output()  # the only librae type this script needs

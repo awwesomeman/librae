@@ -191,7 +191,11 @@ class TestOtherInstrumentsStillShort:
         assert instrument("us_equity", "spot").can_short
         assert instrument("tw_equity", "spot").can_short
 
-    def test_a_direct_symbol_without_metadata_is_not_guessed(self) -> None:
-        result = _run("UNREGISTERED", _EnterThenClose("short"))
+    def test_a_declared_spot_without_a_market_is_not_guessed(self) -> None:
+        result = _run(
+            "UNREGISTERED",
+            _EnterThenClose("short"),
+            instrument_overrides={"UNREGISTERED": {"instrument_type": "spot", "currency": "USD"}},
+        )
 
         assert _events(result) == [("open", "short"), ("close", "short")]

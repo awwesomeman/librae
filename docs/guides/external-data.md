@@ -26,6 +26,7 @@ subscription = MarketDataSubscription(
 backtest = Backtest(
     data=bars,
     strategy=strategy,
+    currency="USDT",
     cost_model=CostModel.zero(),
     primary_subscriptions=(subscription,),
 )

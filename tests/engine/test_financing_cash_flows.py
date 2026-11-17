@@ -26,7 +26,7 @@ from librae.core.utils import interval_to_timedelta
 from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
 
-from tests.conftest import make_test_cfg, primary_subscriptions_for
+from tests.conftest import declare_instruments, make_test_cfg, primary_subscriptions_for
 
 
 def _cost_model(multiplier: float = 10.0) -> CostModel:
@@ -88,10 +88,17 @@ def _backtest_frame(
     return data
 
 
-def _subscriptions(data: pd.DataFrame):
+def _instrument_type(data: pd.DataFrame) -> str:
     """A frame carrying funding is a perpetual's; any other one is spot."""
-    instrument_type = "contract_perpetual" if "funding_rate" in data.columns else "spot"
-    return primary_subscriptions_for(data, "H1", instrument_type=instrument_type)
+    return "contract_perpetual" if "funding_rate" in data.columns else "spot"
+
+
+def _subscriptions(data: pd.DataFrame):
+    return primary_subscriptions_for(data, "H1", instrument_type=_instrument_type(data))
+
+
+def _instruments(data: pd.DataFrame):
+    return declare_instruments(data, instrument_type=_instrument_type(data))
 
 
 class _OpenOnce(Strategy):
@@ -201,6 +208,7 @@ def test_backtest_applies_only_same_timestamp_observations() -> None:
         cost_model=_cost_model(),
         data_source="test",
         primary_subscriptions=_subscriptions(data),
+        instrument_overrides=_instruments(data),
     )
 
     result = backtest.run()
@@ -226,6 +234,7 @@ def test_backtest_uses_explicit_funding_mark_price_and_multiplier() -> None:
         cost_model=_cost_model(multiplier=5.0),
         data_source="test",
         primary_subscriptions=_subscriptions(data),
+        instrument_overrides=_instruments(data),
     ).run()
 
     assert len(result.financing_cash_flows) == 1
@@ -259,6 +268,7 @@ def test_funding_accrued_while_held_is_folded_into_the_closed_trade_stats() -> N
         cost_model=_cost_model(),
         data_source="test",
         primary_subscriptions=_subscriptions(data),
+        instrument_overrides=_instruments(data),
     )
     backtest.run()
     output = backtest.build_output()
@@ -281,6 +291,7 @@ def test_backtest_metrics_assign_later_funding_only_to_remaining_quantity() -> N
         cost_model=_cost_model(),
         data_source="test",
         primary_subscriptions=_subscriptions(data),
+        instrument_overrides=_instruments(data),
     )
     backtest.run()
 
@@ -315,6 +326,7 @@ def test_financing_on_the_final_bar_reaches_the_end_of_run_forced_close(
         cost_model=_cost_model(),
         data_source="test",
         primary_subscriptions=_subscriptions(data),
+        instrument_overrides=_instruments(data),
     )
     result = backtest.run()
     output = backtest.build_output()
@@ -351,6 +363,7 @@ def test_a_liquidity_capped_terminal_close_releases_its_share_of_the_last_accrua
         cost_model=_cost_model(),
         data_source="test",
         primary_subscriptions=_subscriptions(data),
+        instrument_overrides=_instruments(data),
     )
     result = backtest.run()
     backtest.build_output()
@@ -791,6 +804,7 @@ def test_borrow_cost_is_charged_to_the_short_and_folded_into_the_closed_trade() 
         cost_model=_cost_model(),
         data_source="test",
         primary_subscriptions=_subscriptions(data),
+        instrument_overrides=_instruments(data),
     )
     backtest.run()
     output = backtest.build_output()
@@ -813,6 +827,7 @@ def test_a_long_pays_no_borrow_interest_over_a_whole_backtest() -> None:
         cost_model=_cost_model(),
         data_source="test",
         primary_subscriptions=_subscriptions(data),
+        instrument_overrides=_instruments(data),
     )
     backtest.run()
 
@@ -925,6 +940,7 @@ def test_backtest_refuses_a_forward_filled_funding_rate() -> None:
             _OpenOnce(),
             cost_model=_cost_model(),
             primary_subscriptions=_subscriptions(data),
+            instrument_overrides=_instruments(data),
         ).run()
 
 
@@ -937,6 +953,7 @@ def test_backtest_refuses_a_rate_without_its_settlement_time() -> None:
             _OpenOnce(),
             cost_model=_cost_model(),
             primary_subscriptions=_subscriptions(data),
+            instrument_overrides=_instruments(data),
         ).run()
 
 
@@ -949,6 +966,7 @@ def test_backtest_refuses_funding_on_a_non_perpetual() -> None:
             _OpenOnce(),
             cost_model=_cost_model(),
             primary_subscriptions=primary_subscriptions_for(data, "H1"),
+            instrument_overrides=declare_instruments(data),
         ).run()
 
 
@@ -959,12 +977,22 @@ def test_backtest_refuses_an_unfunded_perpetual() -> None:
 
     with pytest.raises(ValueError, match="no funding_rate observations"):
         Backtest(
-            unfunded, _OpenOnce(), cost_model=_cost_model(), primary_subscriptions=subscriptions
+            unfunded,
+            _OpenOnce(),
+            cost_model=_cost_model(),
+            primary_subscriptions=subscriptions,
+            instrument_overrides=declare_instruments(
+                unfunded, instrument_type="contract_perpetual"
+            ),
         ).run()
 
     zero = _backtest_frame([0.0] * 5)
     result = Backtest(
-        zero, _OpenOnce(), cost_model=_cost_model(), primary_subscriptions=subscriptions
+        zero,
+        _OpenOnce(),
+        cost_model=_cost_model(),
+        primary_subscriptions=subscriptions,
+        instrument_overrides=declare_instruments(zero, instrument_type="contract_perpetual"),
     ).run()
     assert {item.cash_flow for item in result.financing_cash_flows} == {0.0}
 
@@ -992,6 +1020,7 @@ def test_backtest_refuses_a_settlement_placed_a_bar_late() -> None:
             _OpenOnce(),
             cost_model=_cost_model(),
             primary_subscriptions=_subscriptions(data),
+            instrument_overrides=_instruments(data),
         ).run()
 
 

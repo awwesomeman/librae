@@ -103,6 +103,23 @@ config = RunConfig(
 bars["contract"] = contract_of_each_bar  # e.g. "TX202611", keyed like the bars
 ```
 
+A direct `Backtest` takes the same declaration through its
+`instrument_overrides` keyword and refuses a symbol that is neither registered
+nor declared. It books PnL with the cost model it is passed, so that model's
+`multiplier` must equal the product's (TX books 200 per point), or the run is
+refused:
+
+```python
+Backtest(
+    data=bars,
+    strategy=strategy,
+    currency="TWD",
+    cost_model=dataclasses.replace(CostModel.zero(), multiplier=200.0),
+    data_source="my_store",
+    instrument_overrides={"TXR1": {"product": "TX", "continuous_alias": True}},
+)
+```
+
 The backtest boundary fails fast on malformed input. Index levels must be
 exactly `(symbol, datetime)`; `(symbol, datetime)` pairs are unique; timestamps
 are timezone-aware and increasing within each symbol; and `config.symbols`, when
@@ -1741,6 +1758,11 @@ financial/execution fact.
   Catch-and-default behavior at those boundaries is prohibited.
 - Direct `Backtest(...)` construction without a config requires a
   `cost_model`; a cost-free run passes `CostModel.zero()` explicitly.
+- Direct construction resolves each symbol as `resolve_symbol` does: a symbol
+  neither registered nor declared in `instrument_overrides` is refused, and an
+  instrument's currency must equal the account `currency` and its multiplier
+  the `cost_model`'s. Routing facts a
+  backtest does not use (`market`, `data_adapter`) are not required there.
 - A registered spot instrument may derive multiplier `1.0`; contract
   multipliers, broker routes, currencies, and unresolved execution prices are
   never guessed.

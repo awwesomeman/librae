@@ -1432,6 +1432,10 @@ class Backtest:
         strategy_name: Override strategy name (default: from config or snake_case of class name).
         cost_model: CostModel directly (for tests or custom cost models).
         data_source: Data source identifier — direct-args style.
+        instrument_overrides: Per-symbol instrument declarations for direct
+            construction, keyed like ``RunConfig.instrument_overrides``. Every
+            symbol must be registered or declared here. With ``config``,
+            ``config.instrument_overrides`` is the only source.
         session_mode: Market-data session identity for direct-args data. With
             ``config``, ``config.session_mode`` is the only source.
         primary_subscriptions: Optional exact primary identities. In direct
@@ -1464,6 +1468,7 @@ class Backtest:
         strategy_name: str | None = None,
         cost_model: CostModel | None = None,
         data_source: str = "",
+        instrument_overrides: Mapping[str, Mapping[str, object]] | None = None,
         session_mode: MarketDataSessionMode | None = None,
         primary_subscriptions: Sequence[MarketDataSubscription] | None = None,
         auxiliary_data: Mapping[MarketDataSubscription, pd.DataFrame] | None = None,
@@ -1527,6 +1532,11 @@ class Backtest:
             )
         if config is not None and risk is not None:
             raise ValueError("risk cannot override config.risk; use one configuration source")
+        if config is not None and instrument_overrides is not None:
+            raise ValueError(
+                "instrument_overrides cannot override config.instrument_overrides; "
+                "use one configuration source"
+            )
         if config is not None and session_mode is not None:
             raise ValueError(
                 "session_mode cannot override config.session_mode; use one configuration source"
@@ -1583,9 +1593,12 @@ class Backtest:
                     "(or config) so their bar grids can be read"
                 )
         self._timeline = sorted(data.index.get_level_values("datetime").unique())
-        from librae.config.symbols import load_symbol_registry, resolve_symbol
-
-        registry = load_symbol_registry()
+        from librae.config.symbols import (
+            resolve_direct_symbol,
+            resolve_symbol,
+            validate_instrument_overrides,
+            validate_product_overrides,
+        )
 
         # Resolve from config or explicit args
         if config is not None:
@@ -1597,18 +1610,51 @@ class Backtest:
             resolved_name = config.strategy_name
             resolved_cm = CostModel.from_config(config, override=cost_model)
         else:
-            self._instruments = {symbol: registry.get(symbol) for symbol in self._symbols}
-            self._account_id = account_id
-            self._currency = currency
-            self._initial_cash = initial_balance
-            self._data_source = data_source
-            resolved_name = None
             if cost_model is None:
                 # A run with no costs overstates every result; make it a choice.
                 raise ValueError(
                     "direct Backtest requires cost_model; pass CostModel.zero() "
                     "for a deliberately cost-free run"
                 )
+            overrides = dict(instrument_overrides or {})
+            validate_instrument_overrides(overrides, symbols=tuple(self._symbols))
+            validate_product_overrides(
+                tuple(self._symbols),
+                instrument_overrides=overrides,
+                cost_overrides={},
+                symbol_cost_overrides={},
+            )
+            subscribed_sources = {item.symbol: item.data_source for item in supplied_subscriptions}
+            self._instruments = {
+                symbol: resolve_direct_symbol(
+                    symbol,
+                    overrides,
+                    data_source=subscribed_sources.get(symbol, data_source),
+                    account_id=account_id,
+                    currency=currency,
+                    multiplier=cost_model.multiplier,
+                )
+                for symbol in self._symbols
+            }
+            # PnL is booked with the passed cost model, so a symbol whose
+            # registry entry or product fixes another multiplier would be
+            # mis-sized; RunConfig refuses the same contradiction.
+            for symbol, instrument in self._instruments.items():
+                if instrument.multiplier != cost_model.multiplier:
+                    raise ValueError(
+                        f"cost_model.multiplier={cost_model.multiplier!r}, but {symbol!r} has "
+                        f"multiplier={instrument.multiplier!r} and a direct Backtest books PnL "
+                        "with its cost_model; pass a cost_model with "
+                        f"multiplier={instrument.multiplier!r}, for example "
+                        "dataclasses.replace(CostModel.zero(), "
+                        f"multiplier={instrument.multiplier!r}), or a RunConfig to run "
+                        "symbols with different multipliers together"
+                    )
+            self._account_id = account_id
+            self._currency = currency
+            self._initial_cash = initial_balance
+            self._data_source = data_source
+            resolved_name = None
             resolved_cm = cost_model
         if config is not None:
             resolved_subscriptions = tuple(
@@ -1660,8 +1706,6 @@ class Backtest:
                 subscription_by_symbol[symbol].calendar_id
                 if symbol in subscription_by_symbol
                 else instrument.calendar_id
-                if instrument is not None
-                else None
             )
             for symbol, instrument in self._instruments.items()
         }
@@ -1807,25 +1851,20 @@ class Backtest:
         return self._cost_models.get(symbol, self._cost_models["__default__"])
 
     def _get_executable_quantity(self, symbol: str, quantity: float) -> float:
-        """Apply configured instrument size rules; unknown direct symbols stay continuous."""
-        instrument = self._instruments.get(symbol)
-        return instrument.normalize_quantity(quantity) if instrument is not None else quantity
+        """Apply the instrument's size rules."""
+        return self._instruments[symbol].normalize_quantity(quantity)
 
     def _validate_intent_prices(self, symbol: str, intent: OrderIntent) -> None:
         """Apply authoritative instrument price grids before matching."""
-        instrument = self._instruments.get(symbol)
-        if instrument is not None:
-            instrument.validate_order_prices(intent)
+        self._instruments[symbol].validate_order_prices(intent)
 
     def _get_min_notional(self, symbol: str) -> float | None:
         """Return the shared entry-order minimum, when configured."""
-        instrument = self._instruments.get(symbol)
-        return instrument.min_notional if instrument is not None else None
+        return self._instruments[symbol].min_notional
 
     def _can_short(self, symbol: str) -> bool:
-        """Apply the instrument's short restriction; unknown direct symbols stay unrestricted."""
-        instrument = self._instruments.get(symbol)
-        return instrument.can_short if instrument is not None else True
+        """Apply the instrument's short restriction."""
+        return self._instruments[symbol].can_short
 
     def run(self) -> BacktestResult:
         """Execute the backtest. Generates run_id at start. Returns BacktestResult."""
@@ -1863,8 +1902,7 @@ class Backtest:
         _validate_funding(
             self._data,
             {
-                symbol: subscription_types.get(symbol)
-                or (instrument.instrument_type if instrument is not None else None)
+                symbol: subscription_types.get(symbol) or instrument.instrument_type
                 for symbol, instrument in self._instruments.items()
             },
             self._timeframe,
@@ -2854,8 +2892,7 @@ class Backtest:
         sources = {item.symbol: item.data_source for item in self._primary_subscriptions}
         result: dict[str, dict[pd.Timestamp, date]] = {}
         for symbol, symbol_data in self._data.groupby(level="symbol", sort=False):
-            instrument = self._instruments.get(symbol)
-            if instrument is None or not instrument.continuous_alias or symbol in contracts:
+            if not self._instruments[symbol].continuous_alias or symbol in contracts:
                 continue
             registered = registry.get(symbol)
             source = sources.get(symbol, self._data_source)

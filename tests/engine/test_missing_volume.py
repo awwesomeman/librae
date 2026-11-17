@@ -26,7 +26,7 @@ from librae.core.trading_calendar import resample_session_ohlcv
 from librae.db.timescale_writer import write_run_bars
 from librae.live.state import LiveRebalance, PendingOhlcvDelivery
 
-from tests.conftest import primary_subscriptions_for
+from tests.conftest import declare_instruments, primary_subscriptions_for
 
 NAN = float("nan")
 
@@ -71,6 +71,8 @@ def _entry_fills(data: pd.DataFrame, strategy: Strategy, policy: ExecutionPolicy
         cost_model=CostModel.zero(),
         execution=policy,
         primary_subscriptions=primary_subscriptions_for(data),
+        instrument_overrides=declare_instruments(data, currency="USDT"),
+        currency="USDT",
     ).run()
     return [
         event.fill_quantity
@@ -135,7 +137,11 @@ class TestTheBacktestBoundary:
         data.iloc[1, data.columns.get_loc(column)] = value
 
         with pytest.raises(ValueError, match=message):
-            Backtest(data, _BuyAt((), 0.0), cost_model=CostModel.zero())
+            Backtest(
+                data,
+                _BuyAt((), 0.0),
+                cost_model=CostModel.zero(),
+            )
 
 
 class TestLaggedAdv:

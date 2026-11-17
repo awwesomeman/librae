@@ -72,6 +72,9 @@ state, costs, and output. The [examples](examples/README.md) show the complete
   intrabar strategy decisions or quote-based PnL marks.
 - **Backtest input:** a `DataFrame` indexed exactly by
   `(symbol, datetime)`, with valid OHLCV and any precomputed feature columns.
+  Every symbol is either registered or declared in `instrument_overrides`, with
+  or without a `RunConfig`: the engine must know what it trades, and whether
+  its bars roll between futures contracts, before it can account for it.
 - **Decision timing:** the strategy observes completed data; the engine owns
   the simulated T → T+1 execution delay. Do not pre-shift a signal to imitate
   that delay.

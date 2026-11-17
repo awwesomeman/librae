@@ -11,6 +11,8 @@ from librae.backtest.schema import StrategyMetrics
 from librae.core.run_config import AccountConfig, RunConfig
 from librae.db.timescale_writer import refresh_performance
 
+from tests.conftest import declare_instruments
+
 
 def _config(
     *,
@@ -69,6 +71,7 @@ def test_refresh_performance_matches_in_memory_backtest_metrics() -> None:
             tax_rate=0.001,
         ),
         data_source="test",
+        instrument_overrides=declare_instruments(data),
     )
     backtest.run()
     output = backtest.build_output()

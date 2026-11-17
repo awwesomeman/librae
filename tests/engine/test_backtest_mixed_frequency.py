@@ -17,7 +17,7 @@ from librae.core.strategy import Context, OrderIntent, PortfolioWeights, Strateg
 from librae.core.trading_calendar import period_close
 from librae.db.timescale_writer import save_backtest_output
 
-from tests.conftest import make_test_cfg
+from tests.conftest import declare_instruments, make_test_cfg
 
 
 def _subscription(
@@ -94,6 +94,7 @@ def _mixed_backtest(
         cost_model=CostModel.zero(),
         primary_subscriptions=subscriptions,
         auxiliary_data=auxiliary,
+        instrument_overrides=declare_instruments(primary),
     )
 
 
@@ -404,6 +405,7 @@ def test_activated_rebalance_residual_is_not_regated_by_later_frontier() -> None
             rebalance_residual_policy="defer_symbols",
             max_rebalance_delay_bars=4,
         ),
+        instrument_overrides=declare_instruments(primary),
     ).run()
     additions = [event for event in result.position_events if event.event_type in ("open", "add")]
 
@@ -452,6 +454,7 @@ def test_activated_protection_is_not_regated_by_later_frontier() -> None:
         primary_subscriptions=(primary_subscription,),
         auxiliary_data={auxiliary_subscription: _frame("AUX", ["2026-01-01"], multiindex=False)},
         execution=ExecutionPolicy(max_bar_volume_participation_rate=0.02),
+        instrument_overrides=declare_instruments(primary),
     ).run()
     stops = [event for event in result.position_events if event.reason == REASON_STOP_LOSS]
 
@@ -495,6 +498,7 @@ def test_drawdown_exit_uses_breach_frontier_then_remains_activated() -> None:
         primary_subscriptions=(primary_subscription,),
         auxiliary_data={auxiliary_subscription: _frame("AUX", ["2026-01-01"], multiindex=False)},
         risk=RiskPolicy(max_drawdown_rate=0.1),
+        instrument_overrides=declare_instruments(primary),
     ).run()
     exits = [event for event in result.position_events if event.reason == REASON_DRAWDOWN_BREACH]
 
@@ -523,6 +527,7 @@ def _enter_once_opens(primary: pd.DataFrame, *, replay: bool) -> list[pd.Timesta
             if replay
             else None
         ),
+        instrument_overrides=declare_instruments(primary),
     ).run()
     return [event.ts for event in result.position_events if event.event_type == "open"]
 
@@ -577,6 +582,7 @@ def test_without_replay_a_drawdown_exit_waits_for_the_breach_bar() -> None:
         cost_model=CostModel.zero(),
         primary_subscriptions=(_subscription("PRIMARY", "H1"),),
         risk=RiskPolicy(max_drawdown_rate=0.1),
+        instrument_overrides=declare_instruments(primary),
     ).run()
     exits = [event for event in result.position_events if event.reason == REASON_DRAWDOWN_BREACH]
 
@@ -667,12 +673,18 @@ def test_empty_auxiliary_mapping_preserves_legacy_context_and_result() -> None:
     none_strategy = _Capture()
     empty_strategy = _Capture()
 
-    none_result = Backtest(primary, none_strategy, cost_model=CostModel.zero()).run()
+    none_result = Backtest(
+        primary,
+        none_strategy,
+        cost_model=CostModel.zero(),
+        instrument_overrides=declare_instruments(primary),
+    ).run()
     empty_result = Backtest(
         primary,
         empty_strategy,
         cost_model=CostModel.zero(),
         auxiliary_data={},
+        instrument_overrides=declare_instruments(primary),
     ).run()
 
     assert none_result == empty_result
@@ -699,6 +711,7 @@ def test_direct_mixed_backtest_requires_full_primary_identities() -> None:
             auxiliary_data={
                 auxiliary_subscription: _frame("AUX", ["2026-01-01"], multiindex=False)
             },
+            instrument_overrides=declare_instruments(primary),
         )
 
 

@@ -11,6 +11,8 @@ from librae.core.cost_model import CostModel
 from librae.core.executor import resolve_fill_price
 from librae.core.strategy import OrderIntent, Strategy
 
+from tests.conftest import declare_instruments
+
 
 def _bar(
     *,
@@ -209,6 +211,7 @@ def test_unfilled_limit_does_not_roll_to_a_later_bar(caplog) -> None:
             initial_balance=1_000.0,
             cost_model=CostModel.zero(),
             data_source="test",
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
     assert result.position_events == []
@@ -251,6 +254,7 @@ def test_resting_limit_protection_starts_on_next_bar() -> None:
         initial_balance=1_000.0,
         cost_model=CostModel.zero(),
         data_source="test",
+        instrument_overrides=declare_instruments(frame),
     ).run()
 
     assert result.trades[0].entry_at == timeline[1].to_pydatetime()
