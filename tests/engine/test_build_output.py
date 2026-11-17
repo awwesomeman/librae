@@ -8,6 +8,7 @@ import pytest
 from librae.backtest.engine import Backtest
 from librae.backtest.schema import BacktestOutput, StrategyMetrics
 from librae.core.cost_model import CostModel
+from librae.core.metrics import summarize_performance
 from librae.core.strategy import OrderIntent, Strategy
 
 from tests.conftest import make_test_cfg
@@ -218,6 +219,30 @@ class TestPeriodMetrics:
         output = bt.build_output()
         assert output.metrics.mean_period_return is not None
         assert output.metrics.period_volatility is not None
+
+    def test_first_point_has_no_return_and_the_rest_summarize_to_the_run_metrics(self) -> None:
+        df = _make_df()
+        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt.run()
+        output = bt.build_output()
+        curve = output.equity_curve
+
+        assert curve[0].period_return is None
+        assert all(point.period_return is not None for point in curve[1:])
+
+        returns = pd.DataFrame(
+            {"run": [point.period_return for point in curve]},
+            index=pd.DatetimeIndex([point.ts for point in curve]),
+        ).dropna()
+        summary = summarize_performance(returns)["run"]
+        for name in (
+            "total_return",
+            "mean_period_return",
+            "period_volatility",
+            "period_sharpe",
+            "max_drawdown",
+        ):
+            assert summary[name] == pytest.approx(getattr(output.metrics, name))
 
 
 class TestRuntimeEvents:

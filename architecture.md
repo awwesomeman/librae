@@ -983,7 +983,8 @@ Use `periods_held` for the scalar number of bars a position was held.
 
 `period_return`: the return for each observation, not tied to any specific
 frequency word. A timeframe can be 1h, 4h, 1d, or caller-defined, so the name
-must not imply a daily or annual convention.
+must not imply a daily or annual convention. A backtest equity curve's first
+point has no earlier equity, so its `period_return` is `None` (SQL `NULL`).
 
 ## Python database helper conventions
 

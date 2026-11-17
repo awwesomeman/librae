@@ -2668,20 +2668,23 @@ class Backtest:
 
         equity_points: list[EquityCurvePoint] = []
         peak = 0.0
-        prev_eq = equity_curve[0].equity if equity_curve else 1.0
+        prev_eq: float | None = None
         for i, snap in enumerate(equity_curve):
             portfolio = portfolio_snapshots[i]
             eq = snap.equity
             peak = max(peak, eq)
             drawdown = (eq - peak) / peak if peak > 0 else 0.0
-            period_return = (eq / prev_eq - 1.0) if prev_eq > 0 else 0.0
+            # The first point has no earlier equity to compare with, so it has no return.
+            period_return = (
+                None if prev_eq is None else (eq / prev_eq - 1.0 if prev_eq > 0 else 0.0)
+            )
             prev_eq = eq
 
             equity_points.append(
                 EquityCurvePoint(
                     ts=snap.ts,
                     equity=float(eq),
-                    period_return=float(period_return),
+                    period_return=None if period_return is None else float(period_return),
                     drawdown=float(drawdown),
                     gross_exposure=float(portfolio.gross_exposure),
                     net_exposure=float(portfolio.net_exposure),

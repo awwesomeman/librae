@@ -29,7 +29,7 @@ period_returns = pd.DataFrame(
         ]
     },
     index=pd.DatetimeIndex(point.ts for point in output.equity_curve),
-)
+).dropna()
 
 summary = summarize_performance(
     period_returns,
@@ -46,6 +46,9 @@ paths = compute_performance_series(
     metrics=("cumulative_return", "drawdown"),
 )
 ```
+
+The first curve point has no earlier equity, so its `period_return` is `None`;
+`dropna()` removes it, leaving the same observations `output.metrics` uses.
 
 `period_sharpe`, `period_sortino`, volatility, and downside deviation preserve
 the input observation frequency. Pass `period_target_return` at analysis time
@@ -119,7 +122,7 @@ def returns_from_output(output):
         [point.period_return for point in output.equity_curve],
         index=pd.DatetimeIndex(point.ts for point in output.equity_curve),
         name=output.run_metadata.run_id,
-    )
+    ).dropna()
 
 
 strategy_returns = pd.concat(
