@@ -38,7 +38,7 @@ Rotation procedure (any credential class):
    confirms the connection strings still agree with the new password.
 3. Restart the affected deployment (`deploy/trade.sh restart <deployment_id>`,
    or the `timescaledb` Compose service for DB passwords, and any running
-   console when `POSTGRES_GRAFANA_PASSWORD` changed).
+   console when `POSTGRES_CONSOLE_PASSWORD` changed).
 4. Revoke the old credential at the provider once the new one is confirmed
    working — do not revoke first, or a mid-rotation restart fails closed
    with no way back in.

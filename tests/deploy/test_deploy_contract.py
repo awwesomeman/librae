@@ -1420,7 +1420,7 @@ def test_remote_schema_path_matches_compose_source() -> None:
     for variable in (
         "POSTGRES_PASSWORD",
         "POSTGRES_APP_PASSWORD",
-        "POSTGRES_GRAFANA_PASSWORD",
+        "POSTGRES_CONSOLE_PASSWORD",
     ):
         assert f"${{{variable}:?Set {variable} in .env.secrets}}" in script
     scp_block = script[script.index("scp -q") : script.index("scp -q") + 200]
@@ -1442,7 +1442,7 @@ def test_cloud_deploy_reports_the_failed_stage(tmp_path: Path) -> None:
             (
                 "POSTGRES_PASSWORD=test",
                 "POSTGRES_APP_PASSWORD=test",
-                "POSTGRES_GRAFANA_PASSWORD=test",
+                "POSTGRES_CONSOLE_PASSWORD=test",
             )
         ),
         encoding="utf-8",
@@ -1482,14 +1482,14 @@ def test_database_roles_match_runtime_boundaries() -> None:
 
     schema = (ROOT / "librae/db/timescale_init.sql").read_text(encoding="utf-8")
 
-    assert DSN_ROLES["LIBRAE_CONSOLE_DSN"][0] == "grafana_reader"
+    assert DSN_ROLES["LIBRAE_CONSOLE_DSN"][0] == "console_reader"
     # Grants name the schema the tables are created in, never a fixed one.
     assert "SCHEMA public" not in schema
-    assert "'GRANT SELECT ON ALL TABLES IN SCHEMA %s TO grafana_reader'" in schema
+    assert "'GRANT SELECT ON ALL TABLES IN SCHEMA %s TO console_reader'" in schema
     assert "'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %s TO quant_app'" in (
         schema
     )
-    assert "INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %s TO grafana_reader" not in schema
+    assert "INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %s TO console_reader" not in schema
 
 
 def test_persisted_order_statuses_match_the_broker_orders_constraint() -> None:
@@ -1599,7 +1599,7 @@ def _cloud_deploy_project(tmp_path: Path, env_body: str) -> Path:
             (
                 "POSTGRES_PASSWORD=test",
                 "POSTGRES_APP_PASSWORD=test",
-                "POSTGRES_GRAFANA_PASSWORD=test",
+                "POSTGRES_CONSOLE_PASSWORD=test",
             )
         ),
         encoding="utf-8",

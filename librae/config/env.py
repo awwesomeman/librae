@@ -144,7 +144,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     # .env.secrets — shared infra secrets, one set per deployment
     EnvVar("POSTGRES_PASSWORD", Where.SECRETS, secret=True),
     EnvVar("POSTGRES_APP_PASSWORD", Where.SECRETS, secret=True),
-    EnvVar("POSTGRES_GRAFANA_PASSWORD", Where.SECRETS, secret=True),
+    EnvVar("POSTGRES_CONSOLE_PASSWORD", Where.SECRETS, secret=True),
     EnvVar("TELEGRAM_BOT_TOKEN", Where.SECRETS, secret=True),
     EnvVar("TIMESCALE_DSN", Where.SECRETS, secret=True),
     EnvVar("TRADE_TIMESCALE_DSN", Where.SECRETS, secret=True),
@@ -177,7 +177,7 @@ COMPOSE_LAYOUT_MARKER = "POSTGRES_APP_PASSWORD"
 DSN_ROLES: Mapping[str, tuple[str, str]] = {
     "TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
     "TRADE_TIMESCALE_DSN": ("quant_app", "POSTGRES_APP_PASSWORD"),
-    "LIBRAE_CONSOLE_DSN": ("grafana_reader", "POSTGRES_GRAFANA_PASSWORD"),
+    "LIBRAE_CONSOLE_DSN": ("console_reader", "POSTGRES_CONSOLE_PASSWORD"),
 }
 
 
