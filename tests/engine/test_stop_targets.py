@@ -23,7 +23,7 @@ from librae.core.executor import (
 from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import Context, OrderIntent, PortfolioWeights, PositionState, Strategy
 
-from tests.conftest import primary_subscriptions_for
+from tests.conftest import declare_instruments, primary_subscriptions_for
 
 # ---------------------------------------------------------------------------
 # Helpers — naming mirrors tests/engine/test_position_scaling.py and
@@ -1166,6 +1166,7 @@ class TestPendingFillStopOrdering:
                 max_rebalance_delay_bars=2,
             ),
             primary_subscriptions=primary_subscriptions_for(frame),
+            instrument_overrides=declare_instruments(frame),
         ).run()
 
         stop_exits = [event for event in result.position_events if event.reason == REASON_STOP_LOSS]
@@ -1268,6 +1269,7 @@ class TestStopTargetIntegration:
             initial_balance=100_000.0,
             cost_model=_zero_cost(),
             execution=ExecutionPolicy(max_bar_volume_participation_rate=0.5),
+            currency="USDT",
         ).run()
 
         stop_events = [
@@ -1288,7 +1290,12 @@ class TestStopTargetIntegration:
             {"open": 82, "high": 83, "low": 81, "close": 82},
         ]
         strategy = OpenWithStopAtBar1(stop_price=90.0, take_profit_price=None)
-        bt = Backtest(_make_multiindex_df(bars), strategy, cost_model=_zero_cost())
+        bt = Backtest(
+            _make_multiindex_df(bars),
+            strategy,
+            cost_model=_zero_cost(),
+            currency="USDT",
+        )
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -1307,7 +1314,12 @@ class TestStopTargetIntegration:
             {"open": 112, "high": 113, "low": 111, "close": 112},
         ]
         strategy = OpenWithStopAtBar1(stop_price=None, take_profit_price=110.0)
-        bt = Backtest(_make_multiindex_df(bars), strategy, cost_model=_zero_cost())
+        bt = Backtest(
+            _make_multiindex_df(bars),
+            strategy,
+            cost_model=_zero_cost(),
+            currency="USDT",
+        )
         result = bt.run()
 
         assert len(result.trades) == 1
@@ -1324,7 +1336,12 @@ class TestStopTargetIntegration:
             {"open": 50, "high": 60, "low": 40, "close": 55},
         ]
         strategy = OpenWithStopAtBar1(stop_price=None, take_profit_price=None)
-        bt = Backtest(_make_multiindex_df(bars), strategy, cost_model=_zero_cost())
+        bt = Backtest(
+            _make_multiindex_df(bars),
+            strategy,
+            cost_model=_zero_cost(),
+            currency="USDT",
+        )
         result = bt.run()
 
         close_events = [e for e in result.position_events if e.event_type == "close"]
@@ -1342,7 +1359,12 @@ class TestStopTargetIntegration:
             {"open": 87, "high": 88, "low": 86, "close": 87},
         ]
         strategy = OpenWithStopAtBar1(stop_price=None, take_profit_price=None)
-        bt = Backtest(_make_multiindex_df(bars), strategy, cost_model=_leveraged_cost())
+        bt = Backtest(
+            _make_multiindex_df(bars),
+            strategy,
+            cost_model=_leveraged_cost(),
+            currency="USDT",
+        )
         result = bt.run()
 
         assert len(result.trades) == 1

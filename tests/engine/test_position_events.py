@@ -20,6 +20,8 @@ from librae.core.executor import (
 )
 from librae.core.strategy import Fill, OrderIntent, PositionState, Strategy
 
+from tests.conftest import declare_instruments
+
 TS = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
 ZERO_COST = CostModel.zero()
 
@@ -759,6 +761,7 @@ class TestEngineIntegration:
             initial_balance=10_000,
             cost_model=ZERO_COST,
             data_source="test",
+            instrument_overrides=declare_instruments(df),
         )
         result = bt.run()
 

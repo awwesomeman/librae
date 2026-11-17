@@ -641,6 +641,13 @@ exchange's code, never parsed from the symbol.
 
 This is the mechanism for registering a symbol librae doesn't know about (`pip install`ed with nothing to edit, or a one-off backtest) — `symbol_cost_overrides={"MYSYM": {"multiplier": 1.0}}` needs no file, no path parameter, nothing beyond the `RunConfig` you're already passing to `Backtest`/`LiveTrader`.
 
+A direct `Backtest` (no `RunConfig`) takes the same declarations through its
+`instrument_overrides` keyword and resolves each symbol by the same rules, with
+its passed cost model and account currency in place of the config's. A symbol
+neither registered nor declared is refused: without an instrument type the
+engine cannot tell a continuous futures series, which must not be held through
+a roll, from spot.
+
 Routing metadata is intentionally separate from accounting overrides:
 
 ```yaml
@@ -723,7 +730,8 @@ weight on such a symbol in every mode, and restoring a runtime checkpoint
 whose pending decision does so fails; equity spot and contracts short
 normally. A config's `market` is a declaration for every unregistered symbol
 that does not override it, so one declared spot in a crypto run is refused; a
-direct `Backtest` symbol with no registered metadata is unrestricted.
+direct `Backtest` has no run-wide market, so a symbol declared there without
+its own `market` is unrestricted.
 
 For a live run, set one run-wide `broker` or compatible per-symbol
 `instrument_overrides.<symbol>.broker` values. Registered symbol metadata may

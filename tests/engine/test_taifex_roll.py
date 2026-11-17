@@ -6,11 +6,13 @@ continuous alias falls back to the venue's alias rule.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 import pandas as pd
 import pytest
 from librae.backtest.engine import Backtest
+from librae.config.symbols import get_symbol
 from librae.core.cost_model import CostModel
 from librae.core.run_config import AccountConfig, RunConfig
 from librae.core.strategy import Context, OrderIntent, Strategy
@@ -20,7 +22,7 @@ from librae.core.trading_calendar import period_start, session_bounds, session_l
 pytest.importorskip("exchange_calendars")
 
 CALENDAR = "XTAIFEX"
-INITIAL_CASH = 1_000_000.0
+INITIAL_CASH = 10_000_000.0  # one TX contract at full margin
 SETTLEMENT = date(2026, 11, 18)  # the 202611 contracts' final settlement day
 
 
@@ -101,6 +103,16 @@ class Scripted(Strategy):
         return [OrderIntent(symbol=ctx.symbol, **fields)]  # type: ignore[arg-type]
 
 
+def _zero_costs(multiplier: float) -> CostModel:
+    """No costs, but the contract's multiplier: a direct run books PnL with it."""
+    return replace(CostModel.zero(), multiplier=multiplier)
+
+
+def _registered_costs(frame: pd.DataFrame) -> CostModel:
+    symbol = frame.index.get_level_values("symbol")[0]
+    return _zero_costs(get_symbol(symbol).multiplier)
+
+
 def _run(
     frame: pd.DataFrame,
     actions: dict[int, str | dict[str, object]],
@@ -111,7 +123,8 @@ def _run(
         frame,
         strategy or Scripted(actions),
         initial_balance=INITIAL_CASH,
-        cost_model=CostModel.zero(),
+        currency="TWD",
+        cost_model=_registered_costs(frame),
         data_source=data_source,
     )
     return backtest.run().final_equity
@@ -265,7 +278,8 @@ def test_a_strategy_exiting_on_the_flag_never_holds_through_settlement(
         _frame("TXFR1", stamps),
         strategy,
         initial_balance=INITIAL_CASH,
-        cost_model=CostModel.zero(),
+        currency="TWD",
+        cost_model=_zero_costs(200.0),
         data_source="shioaji",
     ).run()
 
@@ -428,6 +442,82 @@ def test_a_rerouted_registered_alias_without_contracts_is_refused() -> None:
     )
     with pytest.raises(ValueError, match=REFUSED_WITHOUT_CONTRACTS):
         _run_configured(_series("TMFR1", contracts=None), Scripted({}), config)
+
+
+# A direct Backtest resolves every symbol as RunConfig does, so a continuous
+# series under the caller's own name is guarded like a registered alias.
+SERIES_OF_TX = {"product": "TX", "continuous_alias": True}
+DIRECT_SERIES = [("TX_CONT", "shioaji"), ("TXR1", "finmind"), ("TXR1", "")]
+
+
+def _run_direct(
+    frame: pd.DataFrame,
+    strategy: Strategy,
+    data_source: str,
+    instrument_overrides: dict[str, dict[str, object]] | None = None,
+    cost_model: CostModel | None = None,
+):
+    return Backtest(
+        frame,
+        strategy,
+        initial_balance=INITIAL_CASH,
+        currency="TWD",
+        cost_model=cost_model or _zero_costs(200.0),
+        data_source=data_source,
+        instrument_overrides=instrument_overrides,
+    ).run()
+
+
+@pytest.mark.parametrize(("symbol", "data_source"), DIRECT_SERIES)
+def test_a_direct_series_neither_registered_nor_declared_is_refused(
+    symbol: str, data_source: str
+) -> None:
+    pattern = f"'{symbol}' is neither a registered symbol nor declared in instrument_overrides"
+    with pytest.raises(ValueError, match=pattern):
+        _run_direct(_series(symbol), Scripted({0: "long"}), data_source)
+
+
+@pytest.mark.parametrize(("symbol", "data_source"), DIRECT_SERIES)
+def test_a_declared_direct_series_is_guarded_by_its_contracts(
+    symbol: str, data_source: str
+) -> None:
+    declared = {symbol: SERIES_OF_TX}
+    with pytest.raises(ValueError, match=r"into the .* bar, which is priced on 'TX202612'"):
+        _run_direct(_series(symbol), Scripted({0: "long"}), data_source, declared)
+
+    strategy = RollOnFlag()
+    result = _run_direct(_series(symbol), strategy, data_source, declared)
+    assert strategy.flagged == [date(2026, 11, 16)]
+    assert result.final_equity == pytest.approx(INITIAL_CASH)
+
+
+@pytest.mark.parametrize(("symbol", "data_source"), DIRECT_SERIES)
+def test_a_declared_direct_series_without_contracts_is_refused(
+    symbol: str, data_source: str
+) -> None:
+    with pytest.raises(ValueError, match=REFUSED_WITHOUT_CONTRACTS):
+        _run_direct(
+            _series(symbol, contracts=None), Scripted({}), data_source, {symbol: SERIES_OF_TX}
+        )
+
+
+def test_a_declared_direct_series_books_its_products_multiplier() -> None:
+    frame = _series(contracts=["TX202611"] * len(SERIES_D1))
+    frame.iloc[2:, :4] = 20_300.0  # +300 points after the entry fill at bar 1's open
+
+    result = _run_direct(frame, Scripted({0: "long"}), "finmind", {"TXR1": SERIES_OF_TX})
+
+    assert result.final_equity - INITIAL_CASH == pytest.approx(300.0 * 200.0)
+
+
+def test_a_direct_cost_model_contradicting_the_products_multiplier_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"'TXR1' has multiplier=200.0 .* multiplier=200.0"):
+        _run_direct(_series(), Scripted({}), "finmind", {"TXR1": SERIES_OF_TX}, CostModel.zero())
+
+
+def test_a_direct_product_declaration_must_select_a_contract() -> None:
+    with pytest.raises(ValueError, match="exactly one of continuous_alias=True"):
+        _run_direct(_series(), Scripted({}), "finmind", {"TXR1": {"product": "TX"}})
 
 
 def test_contracts_on_some_bars_only_are_refused() -> None:

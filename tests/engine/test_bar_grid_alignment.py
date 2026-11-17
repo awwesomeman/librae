@@ -19,7 +19,7 @@ from librae.core.strategy import Context, OrderIntent, PortfolioWeights, Strateg
 from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
 
-from tests.conftest import make_test_cfg
+from tests.conftest import declare_instruments, make_test_cfg
 from tests.engine.live_factories import halt_file_of
 from tests.engine.test_live_runner import _broker_report, _mock_order_adapter
 
@@ -199,6 +199,7 @@ def _run(strategy: Strategy, data: pd.DataFrame, **kwargs):
         strategy_name="grid",
         cost_model=CostModel.zero(),
         primary_subscriptions=_MIXED,
+        instrument_overrides=declare_instruments(data),
         **kwargs,
     )
     return backtest.run()
@@ -357,7 +358,13 @@ def test_a_direct_backtest_cannot_skip_the_grid_check_by_omitting_subscriptions(
         ]
     )
     with pytest.raises(ValueError, match="requires primary_subscriptions"):
-        Backtest(data, _Idle(), strategy_name="grid", cost_model=CostModel.zero())
+        Backtest(
+            data,
+            _Idle(),
+            strategy_name="grid",
+            cost_model=CostModel.zero(),
+            instrument_overrides=declare_instruments(data),
+        )
 
 
 _EXECUTION = ExecutionPolicy(max_bar_volume_participation_rate=None, warmup_periods=1)

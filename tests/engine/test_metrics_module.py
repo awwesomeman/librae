@@ -29,6 +29,7 @@ from librae.core.metrics import (
 )
 from librae.core.strategy import OrderIntent, Strategy
 
+from tests.conftest import declare_instruments
 from tests.signal_outcome_contract import (
     SIGNAL_OUTCOME_LONG_FRACTIONS,
     SIGNAL_OUTCOME_LONG_PERCENTAGE_POINTS,
@@ -622,7 +623,12 @@ class TestComputeAllWithEngine:
             tax_rate=0.0,
         )
         bt = Backtest(
-            df, BuyBar10CloseBar30(), initial_balance=10_000, cost_model=cost, data_source="test"
+            df,
+            BuyBar10CloseBar30(),
+            initial_balance=10_000,
+            cost_model=cost,
+            data_source="test",
+            instrument_overrides=declare_instruments(df),
         )
         bt.run()
         output = bt.build_output()

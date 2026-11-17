@@ -14,7 +14,9 @@ patterns live in the [examples index](../examples/README.md).
 
 The base install depends only on NumPy and pandas. TimescaleDB, the
 monitoring console, chart viewing, exchange calendars, CLI wiring, notification clients, and
-broker SDKs are optional. A direct Python backtest needs none of them.
+broker SDKs are optional. A direct Python backtest needs none of them unless
+an instrument's trading calendar is used: a TAIFEX futures series, for example,
+needs the `calendars` extra.
 
 ## Choose an installation workflow
 
@@ -146,6 +148,7 @@ backtest = Backtest(
     data=data,
     strategy=BuyOnce(),
     initial_balance=10_000.0,
+    currency="USDT",
     cost_model=CostModel.zero(),
     data_source="synthetic",
 )

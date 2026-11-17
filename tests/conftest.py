@@ -87,6 +87,29 @@ def make_test_cfg(**overrides) -> RunConfig:
     return RunConfig(**defaults)
 
 
+def declare_instruments(
+    data,
+    *,
+    currency: str = "USD",
+    instrument_type: str = "spot",
+) -> dict[str, dict[str, object]]:
+    """Declare every unregistered symbol of a direct-Backtest frame as one instrument type.
+
+    Registered symbols resolve from the registry and are left out.
+    """
+    from librae.config.symbols import load_symbol_registry
+
+    registry = load_symbol_registry()
+    if "symbol" not in data.index.names:
+        return {}
+    symbols = dict.fromkeys(data.index.get_level_values("symbol"))
+    return {
+        symbol: {"instrument_type": instrument_type, "currency": currency}
+        for symbol in symbols
+        if symbol not in registry
+    }
+
+
 def primary_subscriptions_for(
     data,
     timeframe: str | None = None,

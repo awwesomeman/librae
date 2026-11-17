@@ -20,7 +20,7 @@ from librae.core.strategy import Context, OrderIntent, Strategy
 from librae.core.trading_calendar import next_session_open, session_label
 from librae.live.engine import LiveTrader
 
-from tests.conftest import make_test_cfg
+from tests.conftest import declare_instruments, make_test_cfg
 from tests.engine.live_factories import _test_cfg, make_live_trader
 from tests.engine.test_live_runner import _mock_order_adapter
 
@@ -308,6 +308,7 @@ def _backtest(
             )
             for symbol, calendar_id in calendars.items()
         ],
+        instrument_overrides=declare_instruments(frame.set_index(["symbol", "datetime"])),
     ).run()
 
 

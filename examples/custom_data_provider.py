@@ -146,6 +146,7 @@ def main() -> None:
     backtest = Backtest(
         data=backtest_data,
         strategy=FactorThresholdStrategy(),
+        currency="USDT",
         cost_model=CostModel.zero(),
         data_source="demo",
     )

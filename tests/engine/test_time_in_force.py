@@ -17,6 +17,8 @@ from librae.core.resting_orders import expire_day_intents
 from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import OrderIntent, PortfolioWeights, Strategy
 
+from tests.conftest import declare_instruments
+
 
 def _panel(periods: int = 6, volume: float = 100.0) -> pd.DataFrame:
     index = pd.MultiIndex.from_product(
@@ -51,6 +53,7 @@ def _run(intent: OrderIntent, *, participation: float | None = 0.1, periods: int
         cost_model=CostModel.zero(),
         data_source="test",
         execution=ExecutionPolicy(max_bar_volume_participation_rate=participation),
+        instrument_overrides=declare_instruments(_panel(periods=periods)),
     ).run()
 
 
@@ -266,6 +269,8 @@ def _run_panel(panel: pd.DataFrame, intent: OrderIntent):
         initial_balance=100_000.0,
         cost_model=CostModel.zero(),
         data_source="test",
+        instrument_overrides=declare_instruments(panel, currency="USDT"),
+        currency="USDT",
     ).run()
 
 
@@ -541,6 +546,7 @@ class TestReEmissionReplacesARestingOrder:
             initial_balance=100_000.0,
             cost_model=CostModel.zero(),
             data_source="test",
+            instrument_overrides=declare_instruments(panel),
         ).run()
 
         opened = [event for event in result.position_events if event.event_type == "open"]
@@ -574,6 +580,7 @@ class TestCloseHonoursTimeInForce:
             cost_model=CostModel.zero(),
             data_source="test",
             execution=ExecutionPolicy(max_bar_volume_participation_rate=0.05),
+            instrument_overrides=declare_instruments(panel),
         ).run()
 
     def test_fok_close_cancels_instead_of_booking_a_partial_reduce(self) -> None:

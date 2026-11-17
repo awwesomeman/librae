@@ -79,21 +79,39 @@ class TestBuildOutputValid:
 
     def test_returns_backtest_output(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         output = bt.build_output()
         assert isinstance(output, BacktestOutput)
 
     def test_validate_passes(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         output = bt.build_output()
         output.validate()
 
     def test_has_run_metadata(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         output = bt.build_output()
         meta = output.run_metadata
@@ -110,6 +128,7 @@ class TestBuildOutputValid:
             strategy_name="my_custom_name",
             data_source="test",
             cost_model=CostModel.zero(),
+            currency="USDT",
         )
         bt.run()
         output = bt.build_output()
@@ -130,6 +149,7 @@ class TestBuildOutputValid:
             data_source="fixture",
             session_mode="regular",
             cost_model=CostModel.zero(),
+            currency="USDT",
         )
         direct.run()
         assert direct.build_output().run_metadata.session_mode == "regular"
@@ -139,7 +159,13 @@ class TestBuildOutputValid:
 
     def test_has_close_events(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         output = bt.build_output()
         close_events = [e for e in output.position_events if e.event_type == "close"]
@@ -147,14 +173,26 @@ class TestBuildOutputValid:
 
     def test_has_equity_curve(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         output = bt.build_output()
         assert len(output.equity_curve) == 50
 
     def test_metrics_accessible(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         output = bt.build_output()
         assert isinstance(output.metrics, StrategyMetrics)
@@ -177,6 +215,7 @@ class TestBuildOutputValid:
             cost_model=cost,
             data_source="test",
             record_position_snapshots=True,
+            currency="USDT",
         )
 
         result = bt.run()
@@ -197,13 +236,25 @@ class TestBuildOutputBeforeRun:
 
     def test_raises_runtime_error(self) -> None:
         df = _make_df()
-        bt = Backtest(df, HoldStrategy(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            HoldStrategy(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         with pytest.raises(RuntimeError, match="Call run"):
             bt.build_output()
 
     def test_metrics_before_build_raises(self) -> None:
         df = _make_df()
-        bt = Backtest(df, HoldStrategy(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            HoldStrategy(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         with pytest.raises(RuntimeError, match="build_output"):
             _ = bt.metrics
@@ -214,7 +265,13 @@ class TestPeriodMetrics:
 
     def test_build_output_contains_nonannualized_period_metrics(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         output = bt.build_output()
         assert output.metrics.mean_period_return is not None
@@ -222,7 +279,13 @@ class TestPeriodMetrics:
 
     def test_first_point_has_no_return_and_the_rest_summarize_to_the_run_metrics(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         output = bt.build_output()
         curve = output.equity_curve
@@ -253,7 +316,11 @@ class TestRuntimeEvents:
         df = _make_df(symbol="BTCUSDT_QUARTERLY")
         df["contract"] = "BTCUSDT_260327"  # a continuous series names each bar's contract
         bt = Backtest(
-            df, LongThenReverseWhileOpen(), data_source="test", cost_model=CostModel.zero()
+            df,
+            LongThenReverseWhileOpen(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
         )
         bt.run()
         output = bt.build_output()
@@ -264,6 +331,12 @@ class TestRuntimeEvents:
 
     def test_clean_run_reports_no_events(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         assert bt.build_output().runtime_events == ()

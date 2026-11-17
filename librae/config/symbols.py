@@ -1023,18 +1023,102 @@ def resolve_symbol(
     unregistered universes; ``instrument_overrides`` supplies per-symbol
     routing metadata.
     """
-    registered = _BUILTIN_SYMBOLS.get(symbol)
-    route = (config.instrument_overrides or {}).get(symbol, {})
-    specs = declared_specs(symbol, route)
     costs = dict(config.cost_overrides or {})
     costs.update((config.symbol_cost_overrides or {}).get(symbol, {}))
+    return _resolve_instrument(
+        symbol,
+        (config.instrument_overrides or {}).get(symbol, {}),
+        costs=costs,
+        multiplier=multiplier,
+        market=config.market,
+        data_source=config.data_source,
+        data_adapter=None,
+        calendar_id=config.calendar_id,
+        account_id=config.account_id,
+        account_currency=config.account.currency,
+        execution_broker=config.broker_for(symbol),
+    )
 
-    market = route.get("market") or (specs.market if specs else config.market)
+
+# A Backtest handed its bars directly fetches nothing, so a symbol there that
+# routes to no adapter names this one.
+_SUPPLIED_BARS_ADAPTER = "supplied"
+
+
+def resolve_direct_symbol(
+    symbol: str,
+    instrument_overrides: Mapping[str, Mapping[str, object]],
+    *,
+    data_source: str,
+    account_id: str,
+    currency: str,
+    multiplier: float,
+) -> SymbolInfo:
+    """Resolve one symbol of a Backtest built without a RunConfig.
+
+    The rules are resolve_symbol's, but a symbol must be registered or
+    declared in ``instrument_overrides``: an undeclared one has no instrument
+    type, so the engine could not tell a continuous futures series, which must
+    not be held across a roll, from spot. ``multiplier`` is the run's cost
+    model's and applies only where neither the registry nor a product gives one.
+    """
+    if symbol not in _BUILTIN_SYMBOLS and symbol not in instrument_overrides:
+        raise ValueError(
+            f"{symbol!r} is neither a registered symbol nor declared in "
+            "instrument_overrides, so a backtest cannot tell what it trades or whether "
+            "its bars roll between contracts; declare it, for example "
+            f"instrument_overrides={{{symbol!r}: {{'product': 'TX', 'continuous_alias': True}}}} "
+            "for a continuous series of a known product (contract_month='YYYYMM' for one "
+            "contract), or {'instrument_type': 'spot', 'currency': 'USD'} for an "
+            "instrument with its own specs"
+        )
+    route = instrument_overrides.get(symbol, {})
+    return _resolve_instrument(
+        symbol,
+        route,
+        costs={},
+        multiplier=None if declared_specs(symbol, route) else multiplier,
+        market="",
+        data_source=data_source,
+        data_adapter=_SUPPLIED_BARS_ADAPTER,
+        calendar_id=None,
+        account_id=account_id,
+        account_currency=currency,
+        execution_broker=None,
+    )
+
+
+def _resolve_instrument(
+    symbol: str,
+    route: Mapping[str, object],
+    *,
+    costs: Mapping[str, object],
+    multiplier: float | None,
+    market: str,
+    data_source: str,
+    data_adapter: str | None,
+    calendar_id: str | None,
+    account_id: str,
+    account_currency: str,
+    execution_broker: str | None,
+) -> SymbolInfo:
+    """Build one SymbolInfo from its registry entry, product and route.
+
+    ``market``, ``data_source``, ``data_adapter`` and ``calendar_id`` are the
+    run's fallbacks for a symbol whose registry entry, product and route set
+    none.
+    """
+    registered = _BUILTIN_SYMBOLS.get(symbol)
+    specs = declared_specs(symbol, route)
+
+    market = route.get("market") or (specs.market if specs else market)
     data_source = route.get("data_source") or (
-        registered.data_source if registered else config.data_source
+        registered.data_source if registered else data_source
     )
     data_adapter = route.get("data_adapter") or (
-        registered.data_adapter if registered else _ADAPTER_BY_DATA_SOURCE.get(data_source)
+        registered.data_adapter
+        if registered
+        else _ADAPTER_BY_DATA_SOURCE.get(data_source, data_adapter)
     )
     if not isinstance(data_adapter, str) or not data_adapter:
         raise ValueError(
@@ -1068,15 +1152,16 @@ def resolve_symbol(
             f"instrument_overrides[{symbol!r}].account_id is not supported; "
             "one run owns exactly RunConfig.account"
         )
-    account_currency = config.account.currency
     if currency != account_currency:
         raise ValueError(
             f"Currency mismatch for symbol={symbol!r}: instrument={currency!r}, "
-            f"account {config.account_id!r}={account_currency!r}"
+            f"account {account_id!r}={account_currency!r}; set the account currency to "
+            f"{currency!r} (RunConfig.account.currency, or Backtest(currency={currency!r}) "
+            "without a RunConfig)"
         )
     security_type = route.get("security_type") or (registered.security_type if registered else None)
     exchange = route.get("exchange") or (registered.exchange if registered else None)
-    calendar_id = route.get("calendar_id") or (specs.calendar_id if specs else config.calendar_id)
+    calendar_id = route.get("calendar_id") or (specs.calendar_id if specs else calendar_id)
     quantity_step = route.get("quantity_step", specs.quantity_step if specs else None)
     min_quantity = route.get("min_quantity", specs.min_quantity if specs else None)
     price_increment = route.get("price_increment", specs.price_increment if specs else None)
@@ -1084,7 +1169,6 @@ def resolve_symbol(
         "min_notional",
         registered.min_notional if registered else None,
     )
-    execution_broker = config.broker_for(symbol)
     if (data_adapter == "ibkr" or execution_broker == "ibkr") and not security_type:
         raise ValueError(
             f"No security_type for IBKR-routed symbol={symbol!r}; set "

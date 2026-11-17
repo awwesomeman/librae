@@ -13,7 +13,7 @@ from librae.core.run_config import AuxiliarySubscription, ExecutionPolicy
 from librae.core.strategy import Context, OrderIntent, Strategy
 from librae.live.engine import LiveTrader
 
-from tests.conftest import make_test_cfg
+from tests.conftest import declare_instruments, make_test_cfg
 
 
 def _subscription(symbol: str, timeframe: str = "H1") -> MarketDataSubscription:
@@ -132,6 +132,7 @@ def test_backtest_batch_features_use_one_ordered_snapshot_per_cohort() -> None:
         primary_subscriptions=subscriptions,
         auxiliary_data={auxiliary: _auxiliary_frame()},
         batch_feature_fn=features,
+        instrument_overrides=declare_instruments(primary),
     ).run()
 
     expected_as_of = pd.Timestamp("2026-01-01T10:00Z").to_pydatetime()
@@ -167,6 +168,7 @@ def test_backtest_batch_output_is_validated_before_strategy_publication() -> Non
         cost_model=CostModel.zero(),
         primary_subscriptions=subscriptions,
         batch_feature_fn=missing_symbol,
+        instrument_overrides=declare_instruments(primary),
     )
 
     with pytest.raises(ValueError, match="exactly cover active primary subscriptions"):
@@ -190,6 +192,7 @@ def test_direct_batch_backtest_requires_explicit_primary_identities() -> None:
             _Capture(),
             cost_model=CostModel.zero(),
             batch_feature_fn=lambda _batch: {},
+            instrument_overrides=declare_instruments(primary),
         )
 
 
