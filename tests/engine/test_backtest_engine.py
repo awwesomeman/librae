@@ -1096,12 +1096,15 @@ class TestBacktestDataContract:
             names=["symbol", "datetime"],
         )
 
-        with pytest.raises(ValueError, match=r"canonical timeframe=D1 period starts"):
+        with pytest.raises(ValueError, match=r"canonical timeframe=D1 period starts") as raised:
             Backtest(
                 frame,
                 HoldStrategy(),
                 cost_model=_zero_cost(),
             ).run()
+        message = str(raised.value)
+        assert "2026-03-09T15:30:00+00:00 should be " in message
+        assert "session_mode='extended'" in message
 
     def test_xnys_daily_timeframe_rejects_off_session_timestamp(self) -> None:
         timestamps = pd.to_datetime(

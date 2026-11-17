@@ -119,7 +119,9 @@ class CostModel:
                 )
             if mode == "unlevered" and getattr(self, rate_name) != 1.0:
                 raise ValueError(
-                    f"{mode_name}='unlevered' requires {rate_name}=1.0, got {getattr(self, rate_name)}"
+                    f"{mode_name}='unlevered' requires {rate_name}=1.0, got "
+                    f"{getattr(self, rate_name)}; set {mode_name}='fixed' (a rate the "
+                    "exchange or regulator sets) or 'dynamic' (leverage the trader chooses)"
                 )
 
     @classmethod

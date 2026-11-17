@@ -80,7 +80,8 @@ class MarketConfig:
             if getattr(self, mode_name) == "unlevered" and getattr(self, rate_name) != 1.0:
                 raise ValueError(
                     f"{mode_name}='unlevered' requires {rate_name}=1.0, "
-                    f"got {getattr(self, rate_name)}"
+                    f"got {getattr(self, rate_name)}; set {mode_name}='fixed' (a rate the "
+                    "exchange or regulator sets) or 'dynamic' (leverage the trader chooses)"
                 )
 
 
