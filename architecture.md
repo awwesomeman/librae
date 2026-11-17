@@ -285,6 +285,12 @@ Within those events:
   acts on the earlier decision. After that the bar is
   decided without them, reading every symbol only through its start, as of
   its own availability, so its fills do not wait for the later bars.
+  A start decided again rewrites its equity point, its return still taken
+  over the point before it and its turnover counting every fill since then.
+  A bar decided once a later event is committed, a later bar has executed
+  or a later point is written writes no point: its start keeps the point written then, if any, and its
+  fills are valued at the next point. A backtest has a point at every
+  start, so a start where only the late symbol had a bar has none in sim.
 - Known gap: where one symbol's segment-ending bar carries the settle, live
   decides the others at their own availability without it and that bar in a
   later event, while a backtest decides them together at the settled
@@ -783,7 +789,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | Param | Called as |
 |---|---|
 | `adapter` | callable `adapter(symbol, timeframe, limit, *, drop_incomplete=False) -> pd.DataFrame`, a concrete object with `fetch_ohlcv`, or a per-symbol mapping; UTC `ts` + OHLCV are required and extra point-in-time columns are preserved |
-| `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return, gross_exposure, net_exposure, concentration, turnover)` |
+| `on_bar` | `on_bar(run_id, ts, account_id, currency, equity, drawdown, period_return, gross_exposure, net_exposure, concentration, turnover)` — the equity callback, once per point; a start decided again calls it again with the point rewritten, and a bar decided late does not call it ([Data acquisition and ownership boundary](#data-acquisition-and-ownership-boundary)) |
 | `on_position_event` | `on_position_event(event, sequence)` — an `OrderEvent` plus its restart-stable sequence; fires on open/add/reduce/close, only after a checkpoint holds the fill. A failed call propagates by default. A sink that declares `durable_position_event_delivery = True` instead has a failed event kept in memory and offered again, in sequence order, every later cycle, so it must be idempotent on `sequence`; the queue is not checkpointed, so a crash drops it. The first refusal sets `position_event_delivery_degraded` and alerts once; the flag clears after `POSITION_EVENT_RECOVERY_CYCLES` clean poll cycles, and only then can it alert again. An event refused for `MAX_POSITION_EVENT_ATTEMPTS` poll cycles, or the oldest once the queue passes `MAX_PENDING_POSITION_EVENTS`, is dropped, so one event the sink never accepts cannot hold back later ones. A dropped sequence is always logged and listed in `dropped_position_event_sequences` for the process; it is also offered as a runtime event, which a runtime-event sink on the same unavailable database will not keep |
 | `on_financing_cash_flow` | `on_financing_cash_flow(cash_flow)` — a `FinancingCashFlow`; simulation only |
 | `on_runtime_event` | `on_runtime_event(event)` — a `RuntimeEvent`; operational audit trail (state restoration, skipped decisions, halts, halt resets, group failures), not a fill. A halt, reset or group failure is offered only after it has happened, stamped with the wall clock, and a failed call for one is logged, never raised. One recorded while the checkpoint is failing is held in memory and offered once a checkpoint lands, so a sink on the same database does not drop it; shutdown offers it or logs it as dropped, and a crash before then loses it, even from a run that restores halted |

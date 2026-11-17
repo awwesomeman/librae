@@ -1145,6 +1145,9 @@ class LiveTrader:
         self._live_rebalance: LiveRebalance | None = None
         self._equity_peak = self._cash
         self._prev_equity = self._cash
+        self._prev_equity_ts: datetime | None = None
+        self._prev_equity_base: float | None = None
+        self._prev_equity_traded_notional = 0.0
         self._status_window_equity = self._cash
         self._trade_count: int = 0
         self._event_sequence: int = 0
@@ -1553,6 +1556,10 @@ class LiveTrader:
             live_rebalance=deepcopy(self._live_rebalance),
             equity_peak=self._equity_peak,
             prev_equity=self._prev_equity,
+            prev_equity_ts=self._prev_equity_ts,
+            prev_equity_base=self._prev_equity_base,
+            prev_equity_traded_notional=self._prev_equity_traded_notional,
+            pending_traded_notional=self._pending_traded_notional,
             status_window_equity=self._status_window_equity,
             trade_count=self._trade_count,
             event_sequence=self._event_sequence,
@@ -1624,6 +1631,10 @@ class LiveTrader:
         self._live_rebalance = state.live_rebalance
         self._equity_peak = state.equity_peak
         self._prev_equity = state.prev_equity
+        self._prev_equity_ts = state.prev_equity_ts
+        self._prev_equity_base = state.prev_equity_base
+        self._prev_equity_traded_notional = state.prev_equity_traded_notional
+        self._pending_traded_notional = state.pending_traded_notional
         self._status_window_equity = state.status_window_equity
         self._trade_count = state.trade_count
         self._event_sequence = state.event_sequence
@@ -3672,6 +3683,8 @@ class LiveTrader:
             self._unfunded_entry_alerts.clear()
             self._equity_peak = equity
             self._prev_equity = equity
+            self._prev_equity_ts = self._prev_equity_base = None
+            self._prev_equity_traded_notional = 0.0
             self._status_window_equity = equity
             detail = {"was_halted": was_halted, "equity": equity}
             try:
@@ -3971,9 +3984,7 @@ class LiveTrader:
                 # after it, as a backtest decides them once, but only while no
                 # later bar has executed: that bar acted on the earlier
                 # decision, which deciding again could no longer replace.
-                if self._executor.simulation and all(
-                    executed <= cycle_ts for executed in self._last_execution_bar_ts.values()
-                ):
+                if self._executor.simulation and not self._book_past(cycle_ts):
                     event_symbols.update(
                         symbol
                         for symbol, frame in frames.items()
@@ -7170,12 +7181,7 @@ class LiveTrader:
         cutoffs: dict[str, datetime] = {}
         active_set = set(active_symbols)
         starts = {symbol: (bar_ts or {}).get(symbol, ts) for symbol in active_symbols}
-        late = (
-            self._executor.simulation
-            and as_of is None
-            and self._last_cycle_ts is not None
-            and ts < self._last_cycle_ts
-        )
+        late = self._executor.simulation and as_of is None and self._book_past(ts)
         for symbol in self._symbols:
             raw_frame = raw_frames.get(symbol)
             if raw_frame is None:
@@ -7565,11 +7571,17 @@ class LiveTrader:
         # ── Step 1.5: equity/drawdown check — right after this bar's fills
         # and stops are applied, before the strategy sees the bar. Mirrors
         # the backtest engine's ordering so a drawdown breach halts new
-        # entries on the same cycle it's detected, not one cycle later ──
-        self._record_equity(ts, decided_at=decided_at)
+        # entries on the same cycle it's detected, not one cycle later.
+        # Once the book is past this bar it holds later prices and fills, so
+        # the bar is checked for drawdown but writes no point: its fills are
+        # valued at the next one ──
+        if self._book_past(ts):
+            self._check_drawdown(ts, decided_at=decided_at)
+        else:
+            self._record_equity(ts, decided_at=decided_at)
         if self._halted:
             self._age_positions(steps)
-            # Equity is still marked on this bar, so the bar is recorded too.
+            # The book was valued on this bar, so the bar is recorded too.
             self._commit_cycle_bars(audit_bars, audit_histories, bar_ts)
             return feature_batch.as_of if feature_batch is not None else None
 
@@ -8094,6 +8106,22 @@ class LiveTrader:
             FUNDING_SETTLED_AT_FIELD: due[-1],
         }
 
+    def _book_past(self, ts: datetime) -> bool:
+        """Whether a later event is committed, bar executed or equity point written.
+
+        The book then holds later fills or prices, so an event at ``ts`` is
+        decided late: it no longer replaces what a later bar acted on, and its
+        point would be valued with prices from after it. Each condition can
+        hold alone: a live decision whose orders fail commits its event
+        without an execution watermark or point, and off one grid a later
+        event's bars can start before ``ts``.
+        """
+        return (
+            any(executed > ts for executed in self._last_execution_bar_ts.values())
+            or (self._prev_equity_ts is not None and ts < self._prev_equity_ts)
+            or (self._last_cycle_ts is not None and ts < self._last_cycle_ts)
+        )
+
     def _calc_account_snapshot(self) -> tuple[float, dict[str, Position]]:
         return calc_equity(
             self._cash,
@@ -8193,8 +8221,17 @@ class LiveTrader:
         breaker, call on_bar callback, and send periodic status."""
         equity, drawdown = self._check_drawdown(ts, decided_at=decided_at)
 
-        period_return = equity / self._prev_equity - 1.0 if self._prev_equity > 0 else 0.0
-        self._prev_equity = equity
+        # A point written again, when its bar is decided again or its cycle
+        # retried, keeps its return over the point before it and counts every
+        # fill since that point in its turnover.
+        rewrite = ts == self._prev_equity_ts and self._prev_equity_base is not None
+        base = self._prev_equity_base if rewrite else self._prev_equity
+        traded_notional = self._pending_traded_notional + (
+            self._prev_equity_traded_notional if rewrite else 0.0
+        )
+        period_return = equity / base - 1.0 if base > 0 else 0.0
+        self._prev_equity, self._prev_equity_ts, self._prev_equity_base = equity, ts, base
+        self._prev_equity_traded_notional = traded_notional
         signed_weights = calculate_position_weights(
             self._positions,
             equity,
@@ -8205,7 +8242,7 @@ class LiveTrader:
             sum(abs(weight) for weight in signed_weights.values()),
             sum(signed_weights.values()),
             max((abs(weight) for weight in signed_weights.values()), default=0.0),
-            self._pending_traded_notional / equity if equity > EPSILON else 0.0,
+            traded_notional / equity if equity > EPSILON else 0.0,
         )
         self._pending_traded_notional = 0.0
         if self._on_bar:

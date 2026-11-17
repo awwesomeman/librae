@@ -15,6 +15,7 @@ from librae.db.timescale_reader import (
     get_run,
     get_run_by_backtest_cache_key,
     load_backtest_output,
+    load_position_events,
     load_run_bars,
     load_signal_events,
     row_to_strategy_metrics,
@@ -122,6 +123,23 @@ class TestLoadRunBars:
         mock_conn_ctx.return_value = _mock_conn(MagicMock())
 
         assert load_run_bars("backtest-without-bars").empty
+
+
+class TestLoadPositionEvents:
+    @patch("librae.db.timescale_reader.pd.read_sql", return_value=pd.DataFrame())
+    @patch("librae.db.timescale_reader.get_conn")
+    def test_events_of_one_timestamp_come_back_in_sequence_order(
+        self, mock_conn_ctx, mock_read_sql
+    ):
+        """Event ids carry a numeric suffix, so text order alone puts
+        "-e10000" before "-e9999"; refresh_performance replays them in the
+        order read."""
+        mock_conn_ctx.return_value = _mock_conn(MagicMock())
+
+        load_position_events("run-1")
+
+        sql = " ".join(mock_read_sql.call_args.args[0].split())
+        assert sql.endswith("ORDER BY ts, length(event_id), event_id")
 
 
 class TestLoadSignalEvents:

@@ -450,6 +450,132 @@ def test_a_bar_decided_again_counts_a_held_position_once(plain):
     assert trader._positions["A"].periods_held == 3
 
 
+@pytest.mark.parametrize("plain", [True, False])
+def test_a_bar_decided_again_takes_its_return_from_the_bar_before(plain):
+    """A is held into its 02:00 bar, which closes up, and 02:00 is decided
+    again with B's late bar. The point written again keeps 02:00's return
+    over 01:00, not a zero return over its own first write."""
+    newest = {"A": BAR - pd.Timedelta(hours=1), "B": BAR - pd.Timedelta(hours=1)}
+    clock = {"now": CLOSE - timedelta(minutes=30)}
+
+    def a_bars(*_args, **_kwargs) -> pd.DataFrame:
+        frame = _bars(newest["A"], "2026-01-01T00:00Z", "h")
+        frame.loc[frame["ts"] == BAR, ["high", "close"]] = 2.0
+        return frame
+
+    trader = _trader(
+        newest,
+        clock,
+        [],
+        strategy=_BuyA(BAR - pd.Timedelta(hours=1)),
+        plain=plain,
+        adapters={
+            "A": a_bars,
+            "B": lambda *_args, **_kwargs: _bars(newest["B"], "2026-01-01T00:00Z", "h"),
+        },
+    )
+    points: list[tuple[pd.Timestamp, float, float]] = []
+    trader._on_bar = lambda _run, ts, _account, _currency, equity, _dd, period_return, *_rest: (
+        points.append((pd.Timestamp(ts), equity, period_return))
+    )
+    trader._poll_cycle()
+    newest["A"] = BAR
+    clock["now"] = CLOSE + LiveTrader.COHORT_HOLD
+    trader._poll_cycle()
+    newest["B"] = BAR
+    clock["now"] += timedelta(seconds=30)
+    trader._poll_cycle()
+
+    assert [ts for ts, _, _ in points[-3:]] == [BAR - pd.Timedelta(hours=1), BAR, BAR]
+    (_, before, _), (_, first, _), (_, again, period_return) = points[-3:]
+    assert first == again == before + 1.0
+    assert period_return == pytest.approx(again / before - 1.0)
+
+
+@pytest.mark.parametrize("plain", [True, False])
+def test_a_bar_decided_again_counts_every_fill_of_its_start_in_turnover(plain):
+    """A and B are bought on 01:00 and both fill on 02:00, A's when 02:00 is
+    first decided and B's when it is decided again with B's late bar. The
+    point written again counts both, as a backtest's one point does."""
+    newest = {"A": BAR - pd.Timedelta(hours=1), "B": BAR - pd.Timedelta(hours=1)}
+    clock = {"now": CLOSE - timedelta(minutes=30)}
+    trader = _trader(newest, clock, [], strategy=_BuyEach(BAR - pd.Timedelta(hours=1)), plain=plain)
+    points: list[tuple[pd.Timestamp, float, float]] = []
+    trader._on_bar = lambda _run, ts, _account, _currency, equity, *rest: points.append(
+        (pd.Timestamp(ts), equity, rest[-1])
+    )
+    trader._poll_cycle()
+    newest["A"] = BAR
+    clock["now"] = CLOSE + LiveTrader.COHORT_HOLD
+    trader._poll_cycle()
+    newest["B"] = BAR
+    clock["now"] += timedelta(seconds=30)
+    trader._poll_cycle()
+
+    assert [ts for ts, _, _ in points[-2:]] == [BAR, BAR]
+    _, equity, turnover = points[-1]
+    assert turnover == pytest.approx(2.0 / equity)
+
+
+class _FailOnce(_BuyA):
+    """_BuyA that raises the first time it is shown ``fail_at``."""
+
+    def __init__(self, since: pd.Timestamp, fail_at: pd.Timestamp) -> None:
+        super().__init__(since)
+        self._fail_at = fail_at
+
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
+        if pd.Timestamp(ctx.ts) == self._fail_at:
+            self._fail_at = None
+            raise RuntimeError("strategy failed")
+        return super().on_bar(ctx)
+
+
+@pytest.mark.parametrize("plain", [True, False])
+def test_a_late_bar_after_a_failed_later_cycle_keeps_its_equity_point(plain):
+    """A's 03:00 bar executes and closes up, then the strategy fails on it,
+    so 03:00 is not committed. B's 02:00 bar then arrives: A has executed
+    past 02:00, so 02:00's point keeps the valuation known at 02:00."""
+    newest = {"A": BAR - pd.Timedelta(hours=1), "B": BAR - pd.Timedelta(hours=1)}
+    clock = {"now": CLOSE - timedelta(minutes=30)}
+    up = BAR + pd.Timedelta(hours=1)
+
+    def a_bars(*_args, **_kwargs) -> pd.DataFrame:
+        frame = _bars(newest["A"], "2026-01-01T00:00Z", "h")
+        frame.loc[frame["ts"] == up, ["high", "close"]] = 2.0
+        return frame
+
+    trader = _trader(
+        newest,
+        clock,
+        [],
+        strategy=_FailOnce(BAR - pd.Timedelta(hours=1), fail_at=up),
+        plain=plain,
+        adapters={
+            "A": a_bars,
+            "B": lambda *_args, **_kwargs: _bars(newest["B"], "2026-01-01T00:00Z", "h"),
+        },
+    )
+    points: list[tuple[pd.Timestamp, float]] = []
+    trader._on_bar = lambda _run, ts, _account, _currency, equity, *_rest: points.append(
+        (pd.Timestamp(ts), equity)
+    )
+    trader._poll_cycle()
+    newest["A"] = BAR
+    clock["now"] = CLOSE + LiveTrader.COHORT_HOLD
+    trader._poll_cycle()
+    newest["A"] = up
+    clock["now"] = CLOSE + timedelta(hours=1) + LiveTrader.COHORT_HOLD
+    with pytest.raises(RuntimeError, match="strategy failed"):
+        trader._poll_cycle()
+    newest["B"] = BAR
+    clock["now"] += timedelta(seconds=30)
+    trader._poll_cycle()
+
+    first_at_bar = next(equity for ts, equity in points if ts == BAR)
+    assert [equity for ts, equity in points if ts == BAR] == [first_at_bar]
+
+
 class _BuyEach(Strategy):
     """Buys each symbol it is shown from ``since`` on while that symbol is flat."""
 
@@ -513,6 +639,51 @@ def test_a_bar_arriving_after_the_others_moved_past_it_is_decided_alone(plain):
     )
     hour = BAR + pd.Timedelta(hours=1)
     assert _opens(events) == _opens(backtest.position_events) == [(hour, "A"), (hour, "B")]
+
+
+@pytest.mark.parametrize("plain", [True, False])
+def test_a_bar_decided_after_a_later_one_keeps_its_equity_point(plain):
+    """B's 02:00 bar is decided after A's 03:00 bar, which bought A and closed
+    up. 02:00's point keeps the valuation known at 02:00, as a backtest's
+    does, rather than being written again with A's 03:00 close."""
+    newest = {"A": BAR - pd.Timedelta(hours=1), "B": BAR - pd.Timedelta(hours=1)}
+    clock = {"now": CLOSE - timedelta(minutes=30)}
+    up = BAR + pd.Timedelta(hours=1)
+
+    def a_bars(*_args, **_kwargs) -> pd.DataFrame:
+        frame = _bars(newest["A"], "2026-01-01T00:00Z", "h")
+        frame.loc[frame["ts"] == up, ["high", "close"]] = 2.0
+        return frame
+
+    trader = _trader(
+        newest,
+        clock,
+        [],
+        strategy=_BuyEach(BAR),
+        plain=plain,
+        adapters={
+            "A": a_bars,
+            "B": lambda *_args, **_kwargs: _bars(newest["B"], "2026-01-01T00:00Z", "h"),
+        },
+    )
+    points: list[tuple[pd.Timestamp, float]] = []
+    trader._on_bar = lambda _run, ts, _account, _currency, equity, *_rest: points.append(
+        (pd.Timestamp(ts), equity)
+    )
+    trader._poll_cycle()
+    for hours in (0, 1):
+        newest["A"] = BAR + pd.Timedelta(hours=hours)
+        clock["now"] = CLOSE + timedelta(hours=hours) + LiveTrader.COHORT_HOLD
+        trader._poll_cycle()
+    newest["B"] = BAR
+    clock["now"] += timedelta(seconds=30)
+    trader._poll_cycle()
+
+    assert not trader._halted
+    assert [ts for ts, _ in points] == sorted({ts for ts, _ in points})
+    equity = dict(points)
+    assert equity[BAR] == points[0][1]
+    assert equity[up] == points[0][1] + 1.0
 
 
 class _RestOnceForC(Strategy):
@@ -606,6 +777,7 @@ def test_only_sim_reads_a_bar_decided_after_a_later_one_through_its_own_start(mo
     frames = {symbol: _bars(BAR + hour, "2026-01-01T00:00Z", "h") for symbol in "AB"}
     frames["B"] = frames["B"].loc[frames["B"]["ts"] <= BAR]
     trader._last_bar_ts = {"A": (BAR + hour).to_pydatetime(), "B": (BAR - hour).to_pydatetime()}
+    trader._last_execution_bar_ts = {"A": (BAR + hour).to_pydatetime()}
     trader._last_cycle_ts = (BAR + hour).to_pydatetime()
     trader._last_feature_as_of = (BAR + 2 * hour).to_pydatetime()
 
@@ -615,6 +787,39 @@ def test_only_sim_reads_a_bar_decided_after_a_later_one_through_its_own_start(mo
     assert pd.Timestamp(batch.as_of) == (BAR + hour if sim else BAR + 2 * hour)
     a_history = batch.market_data.history(trader._market_data_subscriptions["A"])
     assert pd.Timestamp(a_history.index[-1]) == (BAR if sim else BAR + hour)
+
+
+@pytest.mark.parametrize("path", ["live_decision_failed", "no_later_point_or_execution"])
+def test_a_bar_decided_after_a_committed_later_event_writes_no_point(path):
+    """A's 03:00 event is committed, then B's 02:00 bar is decided. Neither a
+    later execution nor a later point need show it: a live decision whose
+    orders fail commits the event without its execution watermark or point,
+    and off one grid after a halt reset or a restart from an older
+    checkpoint, no later bar start or point is known. The 02:00 point is not
+    written again with A's 03:00 close."""
+    mode = "live" if path == "live_decision_failed" else "sim"
+    trader = make_live_trader(
+        _Hold(), _mock_order_adapter(), config=_test_cfg(mode=mode, symbols=["A", "B"])
+    )
+    hour = pd.Timedelta(hours=1)
+    later = (BAR + hour).to_pydatetime()
+    frame = _bars(BAR, "2026-01-01T00:00Z", "h")
+    trader._last_bar_ts = {"A": later, "B": (BAR - hour).to_pydatetime()}
+    trader._last_execution_bar_ts = {
+        "A": BAR.to_pydatetime(),
+        "B": (BAR - hour).to_pydatetime(),
+    }
+    trader._last_cycle_ts = later
+    trader._last_prices = {"A": 2.0, "B": 1.0}
+    if path == "live_decision_failed":
+        trader._prev_equity_ts = BAR.to_pydatetime()
+        trader._prev_equity_base = trader._prev_equity
+    points: list = []
+    trader._on_bar = lambda *args: points.append(args[1])
+
+    trader._process_cycle({"B": frame}, BAR.to_pydatetime())
+
+    assert points == []
 
 
 def test_a_bar_delivered_past_the_hold_is_decided_late_rather_than_refused():
