@@ -73,9 +73,30 @@ def query(sql: str, params: tuple = ()) -> pd.DataFrame:
                 "commission": 2.0,
                 "slippage": 1.0,
                 "tax": 0.0,
+                "entry_commission": 2.0,
+                "entry_slippage": 1.0,
+                "entry_tax": 0.0,
                 "group_id": None,
                 "periods_held": 10,
                 "reason": "Signal exit",
+            }
+            for i in range(20, 240, 15)
+        ]
+    )
+    financing = pd.DataFrame(
+        [
+            {
+                "ts": times[i - 5],
+                "symbol": "BTCUSDT",
+                "kind": "funding",
+                "side": "long",
+                "quantity": 0.2,
+                "mark_price": close[i - 5],
+                "multiplier": 1.0,
+                "rate": 0.0001,
+                "cash_flow": -close[i - 5] * 0.2 * 0.0001,
+                "group_id": None,
+                "entry_at": times[i - 10],
             }
             for i in range(20, 240, 15)
         ]
@@ -179,6 +200,8 @@ def query(sql: str, params: tuple = ()) -> pd.DataFrame:
         )
     if sql == queries.POSITION_EVENTS:
         return events.iloc[::-1].reset_index(drop=True)
+    if sql == queries.FINANCING_CASH_FLOWS:
+        return financing.iloc[::-1].reset_index(drop=True)
     if sql in (queries.BAR_SYMBOLS, queries.SIGNAL_SYMBOLS):
         return pd.DataFrame({"symbol": ["BTCUSDT"]})
     if sql == queries.RUN_BARS:

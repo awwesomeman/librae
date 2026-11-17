@@ -48,6 +48,7 @@ from librae.core.executor import (
     execute_order_intents,
     execute_pending_decision_and_stops,
     execute_portfolio_weights,
+    log_opposite_side_refusals,
     merge_pending_decisions,
     normalize_order_intents,
     order_side_is_tradable,
@@ -1162,6 +1163,9 @@ class LiveTrader:
         self._skipped_close_alerts: dict[tuple[str, str], float] = {}
         # Not checkpointed: a restart re-alerts once.
         self._unfunded_entry_alerts: set[tuple[str, str]] = set()
+        # Symbols whose refused opposite-side entry was logged. Not checkpointed:
+        # a restart logs it once more.
+        self._opposite_side_logged: set[str] = set()
         # Queued groups that have sent no leg, which the funding and pause
         # checks still judge. Checkpointed: a restart must neither send an
         # unjudged group nor re-judge a started one.
@@ -4876,6 +4880,7 @@ class LiveTrader:
 
     def _publish_action_results(self, result: ExecutionResult) -> None:
         """Publish notifications and analytics after state is committed."""
+        log_opposite_side_refusals(result.runtime_events, self._opposite_side_logged)
         fills: list[dict[str, object]] = []
 
         for event in result.events:
@@ -5396,6 +5401,7 @@ class LiveTrader:
             )
             if not result.events and temporarily_blocked:
                 raise ExecutionLiquidityUnavailableError(temporarily_blocked)
+            log_opposite_side_refusals(result.runtime_events, self._opposite_side_logged)
             if self._on_runtime_event:
                 for runtime_event in result.runtime_events:
                     self._on_runtime_event(runtime_event)
@@ -5621,6 +5627,10 @@ class LiveTrader:
                         validate_intent_prices=self._validate_intent_prices,
                         get_min_notional=self._get_min_notional,
                     )
+                    if not grouped:
+                        log_opposite_side_refusals(
+                            result.runtime_events, self._opposite_side_logged
+                        )
                     if not grouped and self._on_runtime_event:
                         for runtime_event in result.runtime_events:
                             self._on_runtime_event(runtime_event)
@@ -6004,6 +6014,8 @@ class LiveTrader:
             if not polled:
                 if not submit_planned:
                     return
+                if self._halt_on_entry_behind_unfilled_close(tracked):
+                    return
                 if self._drop_paused_entry(tracked) or self._drop_unfunded_entry(tracked):
                     continue
                 # Persist placement-attempted before network I/O. A crash in
@@ -6280,6 +6292,32 @@ class LiveTrader:
         )
         if timed_out:
             self._cancel_timed_out_order(tracked, None, status_error=error)
+
+    def _halt_on_entry_behind_unfilled_close(self, tracked: TrackedOrder) -> bool:
+        """Halt instead of sending an ``open`` while the book still holds its symbol.
+
+        An open is planned against a book that the orders queued ahead of it
+        leave flat: a reversal's entry depends on its close filling. The close
+        can end short of that in many ways (rejected, cancelled, expired, timed
+        out, partly filled), and one closing a grouped position fails only its
+        group, so the queue would go on to the entry and leave both sides open.
+        Judging the dependency from the ledger as the entry is about to go out
+        covers every one of those ends, and a restart between the legs. The
+        halt drops the unsent entry. Returns whether it halted.
+        """
+        request = tracked.request
+        held = self._positions.get(request.symbol)
+        if request.position_effect != "open" or held is None:
+            return False
+        self._halt_live(
+            title="Entry Behind Unfilled Close",
+            message=(
+                f"{request.symbol} {request.side} {request.quantity:g} to open not submitted: "
+                f"the book still holds {held.side} {held.quantity:g}, so the close queued "
+                "ahead of it did not fill"
+            ),
+        )
+        return True
 
     def _drop_paused_entry(self, tracked: TrackedOrder) -> bool:
         """Drop an unsubmitted entry, with its group, while entries are paused.

@@ -24,7 +24,6 @@ import pandas as pd
 
 if TYPE_CHECKING:
     from librae.backtest.schema import PositionEventRecord, StrategyMetrics
-    from librae.core.executor import TradePnL
 
 from librae.core import EPSILON
 
@@ -267,75 +266,223 @@ def _as_positive_finite_array(values: Sequence[float], name: str) -> np.ndarray:
     return array
 
 
-def _collapse_trades_by_group(
-    trade_pnls: Sequence[TradePnL],
-    trade_notionals: Sequence[float],
-    trade_group_ids: Sequence[str | None],
-    trade_entry_ats: Sequence[datetime],
-) -> tuple[list[TradePnL], list[float]]:
-    """Merge trades sharing a non-None group_id into one synthetic trade
-    before any stat below treats each leg as its own trade — e.g. a hedge's
-    spot+perp legs, opened/closed together under one OrderIntent.group_id
-    (see librae.core.strategy.OrderIntent.group_id), net to one combined P&L
-    and combined notional instead of two individually-volatile legs. A trade
-    with group_id=None is its own singleton group (current, non-hedged
-    behavior, unchanged).
+_CLOSED_TRADE_COLUMNS = (
+    "symbol",
+    "side",
+    "group_id",
+    "entry_at",
+    "exit_at",
+    "net_pnl",
+    "financing",
+    "commission",
+    "slippage",
+    "tax",
+    "entry_notional",
+    "net_return",
+    "periods_held",
+)
+_EXIT_EVENT_TYPES = ("reduce", "close")
+_EXIT_FIELDS = (
+    "ts",
+    "symbol",
+    "side",
+    "entry_at",
+    "fill_quantity",
+    "price",
+    "entry_price",
+    "notional",
+    "realized_pnl",
+    "commission",
+    "slippage",
+    "tax",
+    "entry_commission",
+    "entry_slippage",
+    "entry_tax",
+)
+_LIFECYCLE_FIELDS = (
+    "ts",
+    "symbol",
+    "entry_at",
+    "event_type",
+    "fill_quantity",
+    "remaining_quantity",
+)
+_FINANCING_FIELDS = (
+    "ts",
+    "symbol",
+    "kind",
+    "side",
+    "quantity",
+    "mark_price",
+    "multiplier",
+    "rate",
+    "cash_flow",
+    "group_id",
+    "entry_at",
+)
 
-    group_id alone is not a unique key — a strategy may reuse the same
-    literal group_id across every round-trip of a run. The merge key is
-    therefore (group_id, entry_at): legs of the same round-trip share both.
-    """
-    from librae.core.executor import TradePnL as _TradePnL
 
-    if len(trade_group_ids) != len(trade_pnls):
-        raise ValueError("trade_group_ids length must match trade_pnls length")
-    if len(trade_notionals) != len(trade_pnls):
-        raise ValueError("trade_notionals length must match trade_pnls length")
-    if len(trade_entry_ats) != len(trade_pnls):
-        raise ValueError("trade_entry_ats length must match trade_pnls length")
+def _require_columns(frame: pd.DataFrame, name: str, columns: Sequence[str]) -> None:
+    missing = [column for column in columns if column not in frame.columns]
+    if missing:
+        raise ValueError(f"{name} is missing columns: {', '.join(missing)}")
 
-    groups: dict[tuple[str, datetime], list[int]] = {}
-    collapsed_pnls: list[TradePnL] = []
-    collapsed_notionals: list[float] = []
-    for i, group_id in enumerate(trade_group_ids):
-        if group_id is None:
-            collapsed_pnls.append(trade_pnls[i])
-            collapsed_notionals.append(trade_notionals[i])
-        else:
-            groups.setdefault((group_id, trade_entry_ats[i]), []).append(i)
 
-    for members in groups.values():
-        pnls = [trade_pnls[i] for i in members]
-        notional = float(sum(trade_notionals[i] for i in members))
-        net_pnl = float(sum(p.net_pnl for p in pnls))
-        gross_pnl = float(sum(p.gross_pnl for p in pnls))
-        collapsed_pnls.append(
-            _TradePnL(
-                gross_pnl=gross_pnl,
-                net_pnl=net_pnl,
-                commission=float(sum(p.commission for p in pnls)),
-                slippage=float(sum(p.slippage for p in pnls)),
-                tax=float(sum(p.tax for p in pnls)),
-                gross_return=(gross_pnl / notional * 100.0) if notional > EPSILON else 0.0,
-                net_return=(net_pnl / notional * 100.0) if notional > EPSILON else 0.0,
-                exit_commission=float(sum(p.exit_commission for p in pnls)),
-                exit_slippage=float(sum(p.exit_slippage for p in pnls)),
-                exit_tax=float(sum(p.exit_tax for p in pnls)),
-            )
+def _require_values(rows: pd.DataFrame, what: str, fields: Sequence[str]) -> None:
+    missing = [field for field in fields if rows[field].isna().any()]
+    if missing:
+        raise ValueError(f"{what} missing required fields: {', '.join(missing)}")
+
+
+def _financing_by_exit(events: pd.DataFrame, financing_cash_flows: pd.DataFrame) -> list[float]:
+    """Financing released by each exit, in exit order."""
+    from librae.core.executor import REASON_FORCE_CLOSE
+    from librae.core.financing import (
+        FinancingCashFlow,
+        FinancingLifecycleEvent,
+        attribute_financing_to_closes,
+    )
+
+    _require_columns(events, "position_events", (*_LIFECYCLE_FIELDS, "reason"))
+    _require_values(events, "position event", _LIFECYCLE_FIELDS)
+    _require_columns(financing_cash_flows, "financing_cash_flows", _FINANCING_FIELDS)
+    lifecycle = [
+        FinancingLifecycleEvent(
+            ts=row.ts,
+            symbol=str(row.symbol),
+            entry_at=row.entry_at,
+            event_type=row.event_type,
+            fill_quantity=float(row.fill_quantity),
+            remaining_quantity=float(row.remaining_quantity),
+            # The end-of-run liquidation runs after the last bar's accrual; its
+            # reason is the only trace of that order a stored event keeps.
+            after_bar_accrual=row.reason == REASON_FORCE_CLOSE,
         )
-        collapsed_notionals.append(notional)
-    return collapsed_pnls, collapsed_notionals
+        for row in events.itertuples(index=False)
+    ]
+    flows = [
+        FinancingCashFlow(
+            ts=row.ts,
+            symbol=str(row.symbol),
+            side=row.side,
+            quantity=float(row.quantity),
+            mark_price=float(row.mark_price),
+            multiplier=float(row.multiplier),
+            rate=float(row.rate),
+            cash_flow=float(row.cash_flow),
+            group_id=row.group_id if pd.notna(row.group_id) else None,
+            entry_at=row.entry_at,
+            kind=row.kind,
+        )
+        for row in financing_cash_flows.itertuples(index=False)
+    ]
+    return attribute_financing_to_closes(lifecycle, flows)
+
+
+def closed_trades(
+    position_events: pd.DataFrame,
+    financing_cash_flows: pd.DataFrame,
+) -> pd.DataFrame:
+    """The closed trades ``StrategyMetrics`` counts, one row per trade, in exit order.
+
+    Each ``reduce`` or ``close`` is a trade. It carries the entry and exit
+    costs of the quantity it closed, and the financing accrued on that
+    quantity as ``attribute_financing_to_closes`` allocates it. Exits sharing a
+    non-null ``group_id`` and ``entry_at`` (the legs of one hedge, all of their
+    exits) are one trade: their amounts sum, ``exit_at`` and ``periods_held``
+    are the last leg's, ``symbol`` joins the legs' symbols with ``" / "``, and
+    ``side`` is null unless every leg has the same one. ``group_id`` alone may
+    repeat across a run's round trips, so ``entry_at`` scopes the merge.
+
+    Args:
+        position_events: One account's position events in the order they
+            happened, with ``PositionEventRecord`` field names as columns, e.g.
+            ``pd.DataFrame(output.position_events)`` or rows of the
+            ``position_events`` table.
+        financing_cash_flows: The same account's financing payments, with
+            ``FinancingCashFlowRecord`` field names as columns; may be empty.
+
+    Returns:
+        DataFrame with columns ``symbol``, ``side``, ``group_id``,
+        ``entry_at``, ``exit_at``, ``net_pnl`` (financing included),
+        ``financing``, ``commission``, ``slippage``, ``tax`` (entry plus exit),
+        ``entry_notional``, ``net_return`` (``net_pnl`` over
+        ``entry_notional``, as a fraction) and ``periods_held``.
+    """
+    if position_events.empty:
+        return pd.DataFrame(columns=list(_CLOSED_TRADE_COLUMNS))
+    _require_columns(
+        position_events,
+        "position_events",
+        (*_EXIT_FIELDS, "event_type", "group_id", "periods_held"),
+    )
+    events = position_events.reset_index(drop=True)
+    exits = events[events["event_type"].isin(_EXIT_EVENT_TYPES)]
+    _require_values(exits, "closed trade event", _EXIT_FIELDS)
+    # Only the exit's notional carries the contract multiplier, so the entry
+    # notional is recovered through the exit price. The executor rejects a
+    # fill whose price is not positive; a row that has one is not its output.
+    if (exits["price"] <= 0).any():
+        raise ValueError("closed trade event price must be positive")
+    if financing_cash_flows.empty:
+        financing = [0.0] * len(exits)
+    else:
+        financing = _financing_by_exit(events, financing_cash_flows)
+
+    legs = pd.DataFrame(
+        {
+            "symbol": exits["symbol"].astype(str),
+            "side": exits["side"],
+            "group_id": exits["group_id"].where(exits["group_id"].notna(), None),
+            "entry_at": exits["entry_at"],
+            "exit_at": exits["ts"],
+            "net_pnl": exits["realized_pnl"].astype(float) + financing,
+            "financing": financing,
+            "commission": exits["entry_commission"] + exits["commission"],
+            "slippage": exits["entry_slippage"] + exits["slippage"],
+            "tax": exits["entry_tax"] + exits["tax"],
+            "entry_notional": (exits["notional"] * exits["entry_price"] / exits["price"]).abs(),
+            "periods_held": exits["periods_held"],
+            "_exit_order": np.arange(len(exits)),
+        },
+        index=exits.index,
+    )
+    single = legs[legs["group_id"].isna()]
+    grouped = legs[legs["group_id"].notna()]
+    if not grouped.empty:
+        grouped = grouped.groupby(["group_id", "entry_at"], as_index=False, sort=False).agg(
+            symbol=("symbol", lambda symbols: " / ".join(sorted(set(symbols)))),
+            side=("side", lambda sides: sides.iloc[0] if sides.nunique() == 1 else None),
+            exit_at=("exit_at", "max"),
+            net_pnl=("net_pnl", "sum"),
+            financing=("financing", "sum"),
+            commission=("commission", "sum"),
+            slippage=("slippage", "sum"),
+            tax=("tax", "sum"),
+            entry_notional=("entry_notional", "sum"),
+            periods_held=("periods_held", "max"),
+            _exit_order=("_exit_order", "max"),
+        )
+    parts = [part for part in (single, grouped) if not part.empty]
+    trades = (
+        pd.concat(parts, ignore_index=True).sort_values("_exit_order", ignore_index=True)
+        if parts
+        else legs
+    )
+    trades["net_return"] = (trades["net_pnl"] / trades["entry_notional"]).where(
+        trades["entry_notional"] > EPSILON, 0.0
+    )
+    for column in ("side", "group_id"):
+        trades[column] = trades[column].astype(object).where(trades[column].notna(), None)
+    return trades[list(_CLOSED_TRADE_COLUMNS)]
 
 
 def compute_all(
     equity_values: Sequence[float],
     timestamps: Sequence[datetime],
-    trade_pnls: Sequence[TradePnL],
+    trades: pd.DataFrame,
     total_periods: int,
     exposed_periods: int | None = None,
-    trade_notionals: Sequence[float] | None = None,
-    trade_group_ids: Sequence[str | None] | None = None,
-    trade_entry_ats: Sequence[datetime] | None = None,
     turnover_values: Sequence[float] | None = None,
     gross_exposure_values: Sequence[float] | None = None,
     net_exposure_values: Sequence[float] | None = None,
@@ -347,22 +494,11 @@ def compute_all(
     Args:
         equity_values: Finite, strictly positive equity values per bar.
         timestamps: Corresponding timestamps used to index the return series.
-        trade_pnls: TradePnL from core.executor.calc_trade_pnl().
+        trades: The run's closed trades as ``closed_trades()`` returns them;
+            every trade-level stat counts its rows, and ``avg_trade_return``
+            weights their ``net_return`` by ``entry_notional``.
         total_periods: Total bar count (for exposure_ratio).
         exposed_periods: Number of bars with at least one open position.
-        trade_notionals: Per-trade absolute notional weight for averaging returns
-            across instruments with different prices or multipliers.
-        trade_group_ids: Per-trade OrderIntent.group_id (or None), same length
-            as trade_pnls/trade_notionals. When given, trades sharing a
-            non-None group_id AND entry_at (see trade_entry_ats) are combined
-            into one trade (see _collapse_trades_by_group) before every
-            trade-level stat below — win_rate, profit_factor, payoff_ratio,
-            avg_trade_return, trades count. Requires trade_notionals and
-            trade_entry_ats. Omit for the unchanged per-trade-row behavior.
-        trade_entry_ats: Per-trade entry timestamp, same length as
-            trade_pnls. Required when trade_group_ids is given — group_id
-            alone may repeat across an entire run's round-trips, so entry_at
-            scopes the merge to one round-trip's legs.
         turnover_values: Per-event absolute traded notional divided by equity.
         gross_exposure_values: Per-event sum of absolute realized weights.
         net_exposure_values: Per-event sum of signed realized weights.
@@ -375,18 +511,15 @@ def compute_all(
     """
     from librae.backtest.schema import StrategyMetrics
 
+    _require_columns(
+        trades,
+        "trades",
+        ("net_pnl", "commission", "slippage", "tax", "entry_notional", "net_return"),
+    )
     if len(equity_values) == 0:
         return StrategyMetrics(total_return=0.0, trades=0)
     if len(timestamps) != len(equity_values):
         raise ValueError("timestamps length must match equity_values")
-    if trade_group_ids is not None:
-        if trade_notionals is None:
-            raise ValueError("trade_group_ids requires trade_notionals")
-        if trade_entry_ats is None:
-            raise ValueError("trade_group_ids requires trade_entry_ats")
-        trade_pnls, trade_notionals = _collapse_trades_by_group(
-            trade_pnls, trade_notionals, trade_group_ids, trade_entry_ats
-        )
     eq_arr = _as_positive_finite_array(equity_values, "equity_values")
 
     with np.errstate(over="ignore", invalid="ignore"):
@@ -410,11 +543,11 @@ def compute_all(
         value = summary.get(name, np.nan)
         return float(value) if np.isfinite(value) else None
 
-    n_trades = len(trade_pnls)
-    net_pnls = np.array([t.net_pnl for t in trade_pnls], dtype=np.float64)
-    commissions = np.array([t.commission for t in trade_pnls], dtype=np.float64)
-    slippages = np.array([t.slippage for t in trade_pnls], dtype=np.float64)
-    taxes = np.array([t.tax for t in trade_pnls], dtype=np.float64)
+    n_trades = len(trades)
+    net_pnls = trades["net_pnl"].to_numpy(dtype=np.float64)
+    commissions = trades["commission"].to_numpy(dtype=np.float64)
+    slippages = trades["slippage"].to_numpy(dtype=np.float64)
+    taxes = trades["tax"].to_numpy(dtype=np.float64)
 
     wins = net_pnls[net_pnls > 0]
     losses_abs = np.abs(net_pnls[net_pnls < 0])
@@ -427,25 +560,14 @@ def compute_all(
         float(wins.mean() / losses_abs.mean()) if len(wins) > 0 and len(losses_abs) > 0 else None
     )
 
-    # WHY: TradePnL.net_return is percentage (*100); convert to ratio
-    # for consistency with other StrategyMetrics return fields.
-    trade_returns = np.array([t.net_return for t in trade_pnls], dtype=np.float64)
-    avg_trade_return: float | None = None
-    notional_weights: np.ndarray | None = None
-    if trade_notionals is not None and len(trade_notionals) != n_trades:
-        raise ValueError(
-            f"trade_notionals length ({len(trade_notionals)}) "
-            f"must match trade_pnls length ({n_trades})"
-        )
-    if trade_notionals is not None:
-        notional_weights = np.asarray(trade_notionals, dtype=np.float64)
-        if not np.isfinite(notional_weights).all() or np.any(notional_weights <= 0):
-            raise ValueError("trade_notionals must be finite and positive")
-
-    if n_trades > 0 and notional_weights is not None:
-        avg_trade_return = float(np.average(trade_returns, weights=notional_weights)) / 100.0
-    elif n_trades > 0:
-        avg_trade_return = float(np.mean(trade_returns)) / 100.0
+    notional_weights = trades["entry_notional"].to_numpy(dtype=np.float64)
+    if not np.isfinite(notional_weights).all() or np.any(notional_weights <= 0):
+        raise ValueError("trade entry_notional must be finite and positive")
+    avg_trade_return = (
+        float(np.average(trades["net_return"].to_numpy(dtype=np.float64), weights=notional_weights))
+        if n_trades > 0
+        else None
+    )
 
     exposure_ratio: float | None = None
     if exposed_periods is not None and total_periods > 0:

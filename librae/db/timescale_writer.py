@@ -1284,154 +1284,26 @@ def refresh_performance(
     Only the upsert is bounded (``_bounded_statements``): the reads cover the
     whole run, so a long run may legitimately take longer than the bound.
     """
-    from librae.core import EPSILON
-    from librae.core.executor import REASON_FORCE_CLOSE, TradePnL
-    from librae.core.financing import (
-        FinancingCashFlow,
-        FinancingLifecycleEvent,
-        attribute_financing_to_closes,
-    )
+    from librae.core.metrics import closed_trades, compute_all
     from librae.db.timescale_reader import (
         load_equity_curve,
         load_financing_cash_flows,
         load_position_events,
     )
 
-    _CLOSE_TYPES = ["close", "reduce"]
-    from librae.core.metrics import compute_all
-
     eq_df = load_equity_curve(run_id, account_id=account_id)
     if eq_df.empty or len(eq_df) < 2:
         return
 
-    events_df = load_position_events(run_id, account_id=account_id)
-    event_rows = events_df.to_dict("records") if not events_df.empty else []
-    trade_rows = [
-        row
-        for row in event_rows
-        if row.get("event_type") in _CLOSE_TYPES or "event_type" not in row
-    ]
-    required_trade_fields = (
-        "realized_pnl",
-        "commission",
-        "slippage",
-        "tax",
-        "entry_commission",
-        "entry_slippage",
-        "entry_tax",
-        "net_return",
-        "fill_quantity",
-        "price",
-        "entry_price",
-        "notional",
-        "entry_at",
+    # The readers name the timestamp column ``_time``; closed_trades takes the
+    # tables' own column names.
+    trades = closed_trades(
+        load_position_events(run_id, account_id=account_id).rename(columns={"_time": "ts"}),
+        load_financing_cash_flows(run_id, account_id=account_id).rename(columns={"_time": "ts"}),
     )
-    for row in trade_rows:
-        missing = [
-            field for field in required_trade_fields if field not in row or pd.isna(row[field])
-        ]
-        if missing:
-            raise ValueError(
-                "closed trade event missing required performance fields: " + ", ".join(missing)
-            )
-
-    funding_df = load_financing_cash_flows(run_id, account_id=account_id)
-    funding_rows = funding_df.to_dict("records") if not funding_df.empty else []
-    financing_by_close = [0.0] * len(trade_rows)
-    if funding_rows:
-        required_lifecycle_fields = (
-            "_time",
-            "symbol",
-            "event_type",
-            "fill_quantity",
-            "remaining_quantity",
-            "entry_at",
-        )
-        for row in event_rows:
-            missing = [
-                field
-                for field in required_lifecycle_fields
-                if field not in row or pd.isna(row[field])
-            ]
-            if missing:
-                raise ValueError(
-                    "position event missing required financing fields: " + ", ".join(missing)
-                )
-        lifecycle_events = [
-            FinancingLifecycleEvent(
-                ts=row["_time"],
-                symbol=str(row["symbol"]),
-                entry_at=row["entry_at"],
-                event_type=row["event_type"],
-                fill_quantity=float(row["fill_quantity"]),
-                remaining_quantity=float(row["remaining_quantity"]),
-                # Same ordering the engine applies in memory, read back off the
-                # stored reason — otherwise a run that attributes in memory
-                # fails once persisted.
-                after_bar_accrual=row.get("reason") == REASON_FORCE_CLOSE,
-            )
-            for row in event_rows
-        ]
-        cash_flows = [
-            FinancingCashFlow(
-                ts=row["_time"],
-                symbol=str(row["symbol"]),
-                side=row["side"],
-                quantity=float(row["quantity"]),
-                mark_price=float(row["mark_price"]),
-                multiplier=float(row["multiplier"]),
-                rate=float(row["rate"]),
-                cash_flow=float(row["cash_flow"]),
-                group_id=row.get("group_id") if pd.notna(row.get("group_id")) else None,
-                entry_at=row["entry_at"],
-                kind=row["kind"],
-            )
-            for row in funding_rows
-        ]
-        financing_by_close = attribute_financing_to_closes(lifecycle_events, cash_flows)
-
-    # WHY: compute_all accepts primitive sequences — build them from DB rows
     eq_records = eq_df.to_dict("records")
     equity_values = [float(r["equity"]) for r in eq_records]
     timestamps = [r["_time"] for r in eq_records]
-    trade_notionals = [
-        abs(float(r["notional"] * r["entry_price"] / r["price"])) for r in trade_rows
-    ]
-    trade_pnls = []
-    for r, notional, financing_pnl in zip(
-        trade_rows,
-        trade_notionals,
-        financing_by_close,
-        strict=True,
-    ):
-        financing_return = financing_pnl / notional * 100.0 if notional > EPSILON else 0.0
-        trade_pnls.append(
-            TradePnL(
-                gross_pnl=float(
-                    r["realized_pnl"]
-                    + r["entry_commission"]
-                    + r["entry_slippage"]
-                    + r["entry_tax"]
-                    + r["commission"]
-                    + r["slippage"]
-                    + r["tax"]
-                    + financing_pnl
-                ),
-                net_pnl=float(r["realized_pnl"]) + financing_pnl,
-                commission=float(r["entry_commission"] + r["commission"]),
-                slippage=float(r["entry_slippage"] + r["slippage"]),
-                tax=float(r["entry_tax"] + r["tax"]),
-                gross_return=financing_return,
-                net_return=float(r["net_return"]) + financing_return,
-                exit_commission=0.0,
-                exit_slippage=0.0,
-                exit_tax=0.0,
-            )
-        )
-    trade_group_ids = [
-        r.get("group_id") if pd.notna(r.get("group_id")) else None for r in trade_rows
-    ]
-    trade_entry_ats = [r["entry_at"] for r in trade_rows]
 
     def complete_optional_series(field: str) -> list[float] | None:
         values = [row.get(field) for row in eq_records]
@@ -1449,12 +1321,9 @@ def refresh_performance(
     metrics = compute_all(
         equity_values=equity_values,
         timestamps=timestamps,
-        trade_pnls=trade_pnls,
+        trades=trades,
         total_periods=len(equity_values),
         exposed_periods=exposed_periods,
-        trade_notionals=trade_notionals,
-        trade_group_ids=trade_group_ids,
-        trade_entry_ats=trade_entry_ats,
         turnover_values=complete_optional_series("turnover"),
         gross_exposure_values=complete_optional_series("gross_exposure"),
         net_exposure_values=complete_optional_series("net_exposure"),

@@ -14,6 +14,7 @@ import pandas as pd
 from librae.core.metrics import (
     SignalDirection,
     SignalPriceColumn,
+    closed_trades,
     compute_performance_series,
     compute_signal_outcomes,
 )
@@ -167,10 +168,20 @@ OPEN_POSITIONS = """
 POSITION_EVENTS = """
     SELECT ts, symbol, event_type, side, fill_quantity, price, notional, cash_flow,
            realized_pnl, net_return, margin_roi, margin_mode, entry_price, entry_at,
-           remaining_quantity, commission, slippage, tax, group_id, periods_held, reason
+           remaining_quantity, commission, slippage, tax, entry_commission, entry_slippage,
+           entry_tax, group_id, periods_held, reason
     FROM position_events
     WHERE run_id = %s AND account_id = %s
     ORDER BY ts DESC, length(event_id) DESC, event_id DESC
+    LIMIT %s
+"""
+
+FINANCING_CASH_FLOWS = """
+    SELECT ts, symbol, kind, side, quantity, mark_price, multiplier, rate, cash_flow,
+           group_id, entry_at
+    FROM financing_cash_flows
+    WHERE run_id = %s AND account_id = %s
+    ORDER BY ts DESC, symbol DESC, kind DESC
     LIMIT %s
 """
 
@@ -248,28 +259,17 @@ def oldest_first(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.iloc[::-1].reset_index(drop=True)
 
 
-def trade_returns(events: pd.DataFrame) -> pd.Series:
-    """Net return per closed trade, grouped the way ``strategy_performance`` counts trades.
+def trade_returns(events: pd.DataFrame, financing: pd.DataFrame) -> pd.Series:
+    """Net return per closed trade, financing included, as ``strategy_performance`` counts it.
 
-    Exits sharing a ``group_id`` and ``entry_at`` (the legs of one hedge) are
-    one trade: their realized P&L over their summed entry notional. Exits
-    without a group keep their own stored return. Financing is not included.
+    ``events`` and ``financing`` are a run's newest rows in time order. When
+    the events were cut at ``HISTORY_ROWS``, financing from before the oldest
+    event shown is left out: it accrued on quantity whose earlier events are
+    missing, so it cannot be attributed against them.
     """
-    exits = events[events["net_return"].notna()]
-    if exits.empty:
-        return pd.Series(dtype=float)
-    single = exits[exits["group_id"].isna()]["net_return"] / 100.0
-    grouped = exits[exits["group_id"].notna()]
-    if grouped.empty:
-        return single.reset_index(drop=True)
-    entry_notional = (grouped["notional"] * grouped["entry_price"] / grouped["price"]).abs()
-    sums = (
-        grouped.assign(entry_notional=entry_notional)
-        .groupby(["group_id", "entry_at"])[["realized_pnl", "entry_notional"]]
-        .sum()
-    )
-    combined = sums["realized_pnl"] / sums["entry_notional"].replace(0, np.nan)
-    return pd.concat([single, combined], ignore_index=True)
+    if len(events) == HISTORY_ROWS and not financing.empty:
+        financing = financing[financing["ts"] > events["ts"].min()]
+    return closed_trades(events, financing)["net_return"].astype(float)
 
 
 def run_status(

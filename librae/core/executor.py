@@ -18,7 +18,7 @@ for initial entries only. Scaling requires explicit quantity.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -505,6 +505,27 @@ def coalesce_runtime_events(events: list[RuntimeEvent]) -> list[RuntimeEvent]:
         primary_event = event if event_priority > existing_priority else existing
         coalesced[existing_index] = replace(primary_event, detail=detail)
     return coalesced
+
+
+def log_opposite_side_refusals(events: Iterable[RuntimeEvent], logged: set[str]) -> None:
+    """Warn of a refused opposite-side entry once per symbol in ``logged``, the run's record.
+
+    A strategy that keeps asking for the other side while a position is open
+    would otherwise repeat the warning on every bar. Each refusal is still its
+    own ``decision_skipped`` event.
+    """
+    for event in events:
+        symbol = event.symbol
+        if event.detail.get("reason") != "opposite_side" or symbol is None or symbol in logged:
+            continue
+        logged.add(symbol)
+        logger.warning(
+            "Refused an entry on %s opposite its open position: no close came before it, or "
+            "the close before it (a reversal's or a weights flip's) did not complete, as when "
+            "capped by volume. Logged once per symbol per run; every refusal is a "
+            "decision_skipped event",
+            symbol,
+        )
 
 
 def side_multiplier(side: PositionSide) -> float:
@@ -2080,9 +2101,8 @@ def execute_order_intents(
                     runtime_events.append(_skipped(ts, skip_reason, symbol=sym))
 
             elif positions[sym].side == desired_side:
-                # SCALE IN — must specify quantity. Same severity as the
-                # opposite-side rejection below: both are a strategy action
-                # silently turned into a no-op, not a normal/expected path.
+                # SCALE IN — must specify quantity: a strategy action silently
+                # turned into a no-op, not a normal/expected path.
                 if action.quantity is None:
                     logger.warning("Scaling %s requires explicit quantity, skipping", sym)
                     runtime_events.append(_skipped(ts, "missing_quantity", symbol=sym))
@@ -2162,13 +2182,9 @@ def execute_order_intents(
                     runtime_events.append(_skipped(ts, skip_reason, symbol=sym))
 
             else:
-                # OPPOSITE SIDE — reject
-                logger.warning(
-                    "Rejected %s %s: already %s — close first",
-                    action.action,
-                    sym,
-                    positions[sym].side,
-                )
+                # OPPOSITE SIDE — reject. Logged by the run, once per symbol
+                # (log_opposite_side_refusals): a strategy asking for the
+                # other side on every bar would otherwise log every bar.
                 runtime_events.append(_skipped(ts, "opposite_side", symbol=sym))
 
         elif action.action == "close" and sym in positions:
@@ -2398,8 +2414,9 @@ def _execute_order_intent_groups_atomically(
     # runs, so every group is proven fillable-as-specified before the first
     # unit executes. A raise later would leave positions moved while the cash
     # delta is discarded with the exception. Reading position sizes here is
-    # sound because a decision holds at most one intent per symbol, so no
-    # earlier unit can resize a symbol a later group closes.
+    # sound because a grouped leg is its symbol's only intent in a decision
+    # (a reversal's two legs are ungrouped), so no earlier unit can resize a
+    # symbol a later group closes.
     preflight = {
         group_id: _preflight_intent_group(
             group_id,
@@ -3544,6 +3561,35 @@ def refuse_cross_grid_legs(
             )
 
 
+def _reverses_position(intents: list[OrderIntent], position: PositionState | None) -> bool:
+    """Whether one symbol's intents are ``[close, entry]`` reversing the held position.
+
+    Executed in order, the pair takes the reduce-then-add sequence a
+    PortfolioWeights flip takes: the close fills first, at the same fill
+    point in a simulation and before the entry is sent live, so an entry that
+    finds the close incomplete is refused as any opposite-side entry is and
+    the position never ends larger than asked. The close must take the whole
+    position for the same reason. Both legs are ungrouped market orders that
+    cannot rest, so they resolve on one event and the per-symbol pending
+    state (resting record, decision time) still describes one decision.
+    """
+    if len(intents) != 2 or position is None:
+        return False
+    close, entry = intents
+    return (
+        close.action == "close"
+        and entry.action in ("long", "short")
+        and entry.action != position.side
+        and (close.quantity is None or close.quantity >= position.quantity - EPSILON)
+        and all(
+            leg.group_id is None
+            and leg.limit_price is None
+            and leg.time_in_force not in RESTING_TIME_IN_FORCE
+            for leg in intents
+        )
+    )
+
+
 def validate_strategy_decision(
     decision: StrategyDecision,
     universe: set[str],
@@ -3563,6 +3609,8 @@ def validate_strategy_decision(
     strategies check readiness themselves via ctx.available_symbols before
     returning one (see examples/multi_leg_spread/strategy.py). Ungrouped
     intents may wait for their own symbol's next bar.
+
+    A symbol takes one intent, or a reversal pair (``_reverses_position``).
     """
     if isinstance(decision, PortfolioWeights):
         symbols = set(decision.weights)
@@ -3583,10 +3631,19 @@ def validate_strategy_decision(
         ]
         if invalid:
             raise TypeError(f"strategy decision contains non-OrderIntent values: {invalid}")
-        resolved_symbols = [intent.symbol or primary_symbol for intent in decision]
-        if len(resolved_symbols) != len(set(resolved_symbols)):
-            raise ValueError("strategy decision must contain at most one intent per symbol")
-        symbols = set(resolved_symbols)
+        by_symbol: dict[str, list[OrderIntent]] = {}
+        for intent in decision:
+            by_symbol.setdefault(intent.symbol or primary_symbol, []).append(intent)
+        if any(
+            len(intents) > 1 and not _reverses_position(intents, positions.get(symbol))
+            for symbol, intents in by_symbol.items()
+        ):
+            raise ValueError(
+                "strategy decision must contain at most one intent per symbol, except a "
+                "reversal: a close of the whole held position followed by an entry on the "
+                "other side, both ungrouped market orders without a resting time_in_force"
+            )
+        symbols = set(by_symbol)
 
         # WHY: the rejections below are about what this engine can express,
         # so a run with no configured broker stays venue-neutral. A market

@@ -8,8 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from librae import Backtest, Context, CostModel, OrderIntent, Strategy
-from librae.backtest.engine import _attribute_financing_to_trades
-from librae.core.executor import PositionEvent, TradeResult
+from librae.core.executor import PositionEvent
 from librae.core.financing import (
     BORROW_RATE_MAX_AGE_QUOTING_PERIODS,
     FinancingCashFlow,
@@ -20,6 +19,7 @@ from librae.core.financing import (
     calculate_borrow_cash_flows,
     calculate_funding_cash_flows,
 )
+from librae.core.metrics import closed_trades
 from librae.core.run_config import ExecutionPolicy
 from librae.core.strategy import PositionState
 from librae.core.utils import interval_to_timedelta
@@ -337,14 +337,11 @@ def test_financing_on_the_final_bar_reaches_the_end_of_run_forced_close(
     )
     assert output.position_events[-1].reason == "force_close"
     assert output.metrics.trades == 1
-    trade_pnls = _attribute_financing_to_trades(
-        result.trades,
-        [abs(trade.entry_price * trade.quantity * 10.0) for trade in result.trades],
-        result.position_events,
-        result.financing_cash_flows,
+    trades = closed_trades(
+        pd.DataFrame(output.position_events), pd.DataFrame(output.financing_cash_flows)
     )
     # Flat price and zero costs leave financing as the round-trip's whole PnL.
-    assert trade_pnls[0].net_pnl == pytest.approx(expected_financing)
+    assert trades["net_pnl"].iloc[0] == pytest.approx(expected_financing)
 
 
 def test_a_liquidity_capped_terminal_close_releases_its_share_of_the_last_accrual() -> None:
@@ -366,64 +363,26 @@ def test_a_liquidity_capped_terminal_close_releases_its_share_of_the_last_accrua
         instrument_overrides=_instruments(data),
     )
     result = backtest.run()
-    backtest.build_output()
+    output = backtest.build_output()
 
     terminal_event = result.position_events[-1]
     assert (terminal_event.event_type, terminal_event.reason) == ("reduce", "force_close")
     assert terminal_event.remaining_quantity == pytest.approx(1.0)
-    trade_pnls = _attribute_financing_to_trades(
-        result.trades,
-        [abs(trade.entry_price * trade.quantity * 10.0) for trade in result.trades],
-        result.position_events,
-        result.financing_cash_flows,
+    trades = closed_trades(
+        pd.DataFrame(output.position_events), pd.DataFrame(output.financing_cash_flows)
     )
     # Both accruals (20 each) are in the balance when half the position is
     # closed, so the closed half takes 20 and the residual keeps 20.
-    assert trade_pnls[0].net_pnl == pytest.approx(20.0)
+    assert trades["net_pnl"].iloc[0] == pytest.approx(20.0)
 
 
 def test_partial_closes_split_funding_by_closed_quantity_not_double_count_it() -> None:
-    """A partial close writes multiple TradeResults sharing one (symbol,
-    entry_at). Funding accrued over that round-trip must be split across
-    them by closed-quantity share — attributing the full amount to each row
+    """A partial close writes multiple exits sharing one (symbol, entry_at).
+    Funding accrued over that round-trip must be split across them by
+    closed-quantity share — attributing the full amount to each row
     independently would double (or N-times) count it."""
     entry_at = datetime(2026, 1, 1, tzinfo=UTC)
-    trades = [
-        TradeResult(
-            symbol="PERP",
-            entry_at=entry_at,
-            exit_at=datetime(2026, 1, 1, 2, tzinfo=UTC),
-            side="short",
-            entry_price=100.0,
-            exit_price=100.0,
-            quantity=3.0,
-            gross_pnl=0.0,
-            commission=0.0,
-            slippage=0.0,
-            tax=0.0,
-            net_pnl=0.0,
-            gross_return=0.0,
-            net_return=0.0,
-            periods_held=2,
-        ),
-        TradeResult(
-            symbol="PERP",
-            entry_at=entry_at,
-            exit_at=datetime(2026, 1, 1, 3, tzinfo=UTC),
-            side="short",
-            entry_price=100.0,
-            exit_price=100.0,
-            quantity=2.0,
-            gross_pnl=0.0,
-            commission=0.0,
-            slippage=0.0,
-            tax=0.0,
-            net_pnl=0.0,
-            gross_return=0.0,
-            net_return=0.0,
-            periods_held=3,
-        ),
-    ]
+    exits = [datetime(2026, 1, 1, 2, tzinfo=UTC), datetime(2026, 1, 1, 3, tzinfo=UTC)]
     financing_cash_flows = [
         FinancingCashFlow(
             ts=datetime(2026, 1, 1, 1, tzinfo=UTC),
@@ -438,63 +397,41 @@ def test_partial_closes_split_funding_by_closed_quantity_not_double_count_it() -
             entry_at=entry_at,
         )
     ]
-    notionals = [300.0, 200.0]  # entry_price(100) * quantity
-    lifecycle_events = [
-        FinancingLifecycleEvent(
-            ts=entry_at,
-            symbol="PERP",
-            entry_at=entry_at,
-            event_type="open",
-            fill_quantity=5.0,
-            remaining_quantity=5.0,
-        ),
-        FinancingLifecycleEvent(
-            ts=trades[0].exit_at,
-            symbol="PERP",
-            entry_at=entry_at,
-            event_type="reduce",
-            fill_quantity=3.0,
-            remaining_quantity=2.0,
-        ),
-        FinancingLifecycleEvent(
-            ts=trades[1].exit_at,
-            symbol="PERP",
-            entry_at=entry_at,
-            event_type="close",
-            fill_quantity=2.0,
-            remaining_quantity=0.0,
-        ),
-    ]
+    exit_fields = {
+        "realized_pnl": 0.0,
+        "entry_commission": 0.0,
+        "entry_slippage": 0.0,
+        "entry_tax": 0.0,
+        "periods_held": 2,
+    }
     position_events = [
         PositionEvent(
-            ts=event.ts,
-            symbol=event.symbol,
+            ts=ts,
+            symbol="PERP",
             side="short",
-            event_type=event.event_type,
-            fill_quantity=event.fill_quantity,
+            event_type=event_type,
+            fill_quantity=fill_quantity,
             price=100.0,
             entry_price=100.0,
-            remaining_quantity=event.remaining_quantity,
-            notional=event.fill_quantity * 100.0,
+            remaining_quantity=remaining_quantity,
+            notional=fill_quantity * 100.0,
             commission=0.0,
             slippage=0.0,
             tax=0.0,
-            entry_at=event.entry_at,
+            entry_at=entry_at,
+            **(exit_fields if event_type != "open" else {}),
         )
-        for event in lifecycle_events
+        for ts, event_type, fill_quantity, remaining_quantity in [
+            (entry_at, "open", 5.0, 5.0),
+            (exits[0], "reduce", 3.0, 2.0),
+            (exits[1], "close", 2.0, 0.0),
+        ]
     ]
 
-    trade_pnls = _attribute_financing_to_trades(
-        trades,
-        notionals,
-        position_events,
-        financing_cash_flows,
-    )
+    trades = closed_trades(pd.DataFrame(position_events), pd.DataFrame(financing_cash_flows))
 
     # Split 3:2 by closed quantity (5 total) — not 50.0 attributed to each.
-    assert trade_pnls[0].net_pnl == pytest.approx(30.0)
-    assert trade_pnls[1].net_pnl == pytest.approx(20.0)
-    assert sum(pnl.net_pnl for pnl in trade_pnls) == pytest.approx(50.0)
+    assert trades["net_pnl"].tolist() == pytest.approx([30.0, 20.0])
 
 
 def test_financing_after_partial_close_is_not_assigned_to_the_closed_trade() -> None:

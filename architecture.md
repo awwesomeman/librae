@@ -509,7 +509,7 @@ document scoped to layering, boundaries, and naming conventions.
 |------|------|
 | `Strategy` | abstract base class, implements `on_bar(ctx) -> list[OrderIntent] \| PortfolioWeights` |
 | `Context` | immutable event snapshot: current bars, positions, one account snapshot, callback period index, and the continuous series to exit before their next contract switch |
-| `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision |
+| `StrategyDecision` | return type: `list[OrderIntent] \| PortfolioWeights`; `[]` means no decision; one intent per symbol, except a `[close, opposite-side entry]` reversal ([engine guide](docs/guides/engine-usage.md#reversing-a-position)) |
 | `PositionSide` / `OrderAction` / `PositionEventType` | canonical literals reused by strategy, execution, live, and persistence schemas |
 | `OrderIntent` | symbol-level instruction: `action` = long / short / close; `group_id` identifies related legs — backtest/sim stage them as one local fill-or-kill unit, while live preflights them before serial broker submission and does not claim venue atomicity (see the [related multi-leg contract](docs/guides/engine-usage.md#related-multi-leg-order-contract)); `time_in_force` (`day`/`gtc`/`ioc`/`fok`) sets the order lifetime — backtest/sim model it from bar data (eligible-event count plus whether a short fill counts, measured against the engine's own participation limits, never book depth), while live delegates the real lifetime to the broker |
 | `PortfolioWeights` | timestamped portfolio weights: next-bar resolution in backtest (optionally bounded whole-book deferral on explicit untradability), next-cycle simulation resolution, immediate market-order sizing in live |
@@ -563,12 +563,14 @@ document scoped to layering, boundaries, and naming conventions.
 | `scale_into_position(pos, fill, cost_model)` | add to a position in the same direction (weighted-average entry) |
 | `reduce_position(pos, closed_qty)` | pro-rate position state after a partial close |
 | `calc_trade_pnl(...)` | single-trade PnL breakdown |
-| `compute_all(equity_values, timestamps, trade_pnls, ...)` | dependency-light performance calculation |
+| `closed_trades(position_events, financing_cash_flows)` | the closed trades `StrategyMetrics` counts, with their costs and financing, as a DataFrame |
+| `compute_all(equity_values, timestamps, trades, ...)` | dependency-light performance calculation |
 | `side_multiplier(side)` | `"long"` → +1.0, `"short"` → -1.0 |
 
 ### Design decisions
 
 - **Primitive signature**: `compute_all()` accepts `Sequence[float]` / `Sequence[datetime]` rather than depending on `BacktestResult`, so the live engine can call it directly too.
+- **One closed-trade list**: the backtest summary, `refresh_performance()` and the console all count trades through `closed_trades()`, built from stored position events and financing payments, so the in-memory and refreshed `strategy_performance` cannot drift apart. It is derived on demand; no trade table is kept.
 - **Optional integrations, caller-owned reporting**: core metrics use NumPy;
   exchange calendars, CLI YAML, DB, broker, and notification dependencies are
   loaded only by their opt-in features. `librae/core/metrics.py` computes
@@ -989,7 +991,8 @@ Use `periods_held` for the scalar number of bars a position was held.
 
 `period_return`: the return for each observation, not tied to any specific
 frequency word. A timeframe can be 1h, 4h, 1d, or caller-defined, so the name
-must not imply a daily or annual convention.
+must not imply a daily or annual convention. A backtest equity curve's first
+point has no earlier equity, so its `period_return` is `None` (SQL `NULL`).
 
 ## Python database helper conventions
 
