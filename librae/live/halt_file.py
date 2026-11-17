@@ -3,7 +3,8 @@
 The state store records a halt in its checkpoint, but a halt made while the
 store is down reaches it only once the store answers, and a restart before
 then would load the older checkpoint, unhalted. So a live halt is written here
-before it cancels anything, a start that finds it comes up halted whatever the
+before it cancels anything, and a requested one as the request is made unless
+a halt is there already; a start that finds it comes up halted whatever the
 checkpoint says, and only ``reset_halt`` removes it.
 
 The write is atomic and durable: the record goes to a temporary file in the
@@ -16,25 +17,37 @@ fsync() does not necessarily ensure that the entry in the directory containing
 the file has also reached disk. For that an explicit fsync() on a file
 descriptor for the directory is also needed"
 (https://man7.org/linux/man-pages/man2/fsync.2.html).
+
+Each write has a temporary file of its own, since a halt request may write
+from another thread, or from a signal handler that interrupts a write in
+progress. Its name comes from a counter, not ``tempfile``, whose first call
+takes a lock that the interrupted code may hold.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
 
+_write_ids = itertools.count()
+
 
 def write_halt_file(path: Path, record: Mapping[str, str]) -> None:
     """Replace ``path`` with ``record``, atomically and durably."""
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{next(_write_ids)}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump(dict(record), stream)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(dict(record), stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     directory = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(directory)
