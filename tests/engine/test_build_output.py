@@ -279,7 +279,13 @@ class TestPeriodMetrics:
 
     def test_first_point_has_no_return_and_the_rest_summarize_to_the_run_metrics(self) -> None:
         df = _make_df()
-        bt = Backtest(df, BuyBar5CloseBar15(), data_source="test", cost_model=CostModel.zero())
+        bt = Backtest(
+            df,
+            BuyBar5CloseBar15(),
+            data_source="test",
+            cost_model=CostModel.zero(),
+            currency="USDT",
+        )
         bt.run()
         output = bt.build_output()
         curve = output.equity_curve

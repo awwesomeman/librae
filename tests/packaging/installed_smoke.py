@@ -90,6 +90,7 @@ def _validate_minimal_backtest() -> None:
         data=data,
         strategy=BuyOnce(),
         initial_balance=10_000.0,
+        currency="USDT",
         cost_model=CostModel.zero(),
         data_source="synthetic",
     )
