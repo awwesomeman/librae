@@ -1280,6 +1280,9 @@ class LiveTrader:
         # which interrupts the loop thread mid-cycle, can never block on a
         # lock that thread holds.
         self._halt_requests: SimpleQueue[str] = SimpleQueue()
+        # Halt file writes a request could not make; logged by the loop, since
+        # logging from a signal handler can re-enter the stream it interrupted.
+        self._halt_request_write_failures: SimpleQueue[OSError] = SimpleQueue()
         self._halt_reset_requests: SimpleQueue[None] = SimpleQueue()
         self._flatten_request_lock = Lock()
         self._flatten_request: tuple[int, str] | None = None
@@ -2778,19 +2781,29 @@ class LiveTrader:
         if self._halt_file is None:
             return False, ""
         try:
-            write_halt_file(
-                self._halt_file,
-                {
-                    "title": title,
-                    "message": message,
-                    "run_id": self._run_id,
-                    "halted_at": self._utc_now().isoformat(),
-                },
-            )
+            write_halt_file(self._halt_file, self._halt_record(title, message))
         except OSError as exc:
             logger.error("Halt file %s not written", self._halt_file, exc_info=exc)
             return False, f"; halt file not written ({type(exc).__name__}: {exc})"
         return True, ""
+
+    def _halt_record(self, title: str, message: str) -> dict[str, str]:
+        return {
+            "title": title,
+            "message": message,
+            "run_id": self._run_id,
+            "halted_at": self._utc_now().isoformat(),
+        }
+
+    def _log_halt_request_write_failures(self) -> None:
+        while True:
+            try:
+                exc = self._halt_request_write_failures.get_nowait()
+            except Empty:
+                return
+            logger.error(
+                "Halt file %s not written for a halt request", self._halt_file, exc_info=exc
+            )
 
     def _restore_halt_file(self) -> None:
         """Halt a starting run whose halt file holds a halt its checkpoint does not.
@@ -3374,8 +3387,18 @@ class LiveTrader:
         """Refuse further operator calls and release the account; hold the cycle lock."""
         self._closed = True
         dropped = self._drain_halt_requests()
+        self._log_halt_request_write_failures()
         if dropped:
-            logger.warning("Dropped halt requests at shutdown: %s", "; ".join(dropped))
+            # os.path.exists, unlike Path.exists before Python 3.14, never
+            # raises, so a volume error cannot skip releasing the account.
+            if self._halt_file is not None and os.path.exists(self._halt_file):
+                logger.warning(
+                    "Halt requests not applied before shutdown; the halt file keeps the "
+                    "next start halted: %s",
+                    "; ".join(dropped),
+                )
+            else:
+                logger.warning("Dropped halt requests at shutdown: %s", "; ".join(dropped))
         if self._drain_halt_reset_requests():
             logger.warning("Dropped a halt reset request at shutdown")
         self._offer_held_runtime_events()
@@ -3514,12 +3537,28 @@ class LiveTrader:
     def request_halt(self, reason: str = "operator requested halt") -> None:
         """Ask the polling loop to halt as ``halt`` does, without waiting.
 
-        Safe from any thread and from a signal handler: it only records the
-        request and wakes a sleeping loop. The loop applies it first thing in
-        its next cycle, before any order work or a pending flatten; a cycle
-        already running finishes first. A restart drops a pending one.
+        Safe from any thread and from a signal handler: it records the
+        request, in live mode in the halt file too unless that already holds a
+        halt, and wakes a sleeping loop, taking no lock and logging nothing.
+        The loop applies it first thing in its next cycle, before any order
+        work or a pending flatten; a cycle already running finishes first. A
+        live restart before then comes up halted from the halt file; in sim a
+        restart drops a pending one.
         """
-        self._halt_requests.put(_validated_reason(reason, "halt"))
+        reason = _validated_reason(reason, "halt")
+        # Queued before the file is checked: a reset removing the file in
+        # between writes it back for a request it finds queued.
+        self._halt_requests.put(reason)
+        if self._halt_file is not None:
+            try:
+                # A halt already there may be one the store missed, such as a
+                # flatten's; its record says what a restart must review. The
+                # check is inside the try: before Python 3.14, Path.exists
+                # raises on errors such as EACCES or EIO.
+                if not self._halt_file.exists():
+                    write_halt_file(self._halt_file, self._halt_record("Manual Halt", reason))
+            except OSError as exc:
+                self._halt_request_write_failures.put(exc)
         self._wake.put(None)
 
     def request_halt_reset(self) -> None:
@@ -3601,6 +3640,17 @@ class LiveTrader:
                 # Before anything changes, so a failure refuses the reset. The
                 # checkpoint holds the halt by now, so a restart stays halted.
                 self._halt_file.unlink(missing_ok=True)
+                # A halt requested before the removal relied on the file it
+                # removed, and applies only after this reset: a restart in
+                # between must still come up halted, so a failed write refuses
+                # the reset as a failed removal does.
+                pending = self._drain_halt_requests()
+                for requested in pending:
+                    self._halt_requests.put(requested)
+                if pending:
+                    write_halt_file(
+                        self._halt_file, self._halt_record("Manual Halt", "; ".join(pending))
+                    )
             equity, _ = self._calc_account_snapshot()
             was_halted = self._halted
             if was_halted:
@@ -8349,6 +8399,7 @@ class LiveTrader:
         Returns whether it sent a halt's owed cancellation pass.
         """
         reasons = self._drain_halt_requests()
+        self._log_halt_request_write_failures()
         if not reasons:
             return False
         # A manual halt of a halted account skips _enter_halt, yet drops a reset too.

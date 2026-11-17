@@ -1410,7 +1410,8 @@ adapter at submission.
 - Halt file (live): `LiveTrader(halt_file=...)`, which live mode requires,
   holds every live halt until `reset_halt()`, so a restart stays halted
   whether or not the state store recorded the halt. The halt writes it before
-  its checkpoint and cancels, atomically and durably (rationale in
+  its checkpoint and cancels, and `request_halt()` before it returns,
+  atomically and durably (rationale in
   `librae/live/halt_file.py`). A start whose halt file holds a halt its
   checkpoint does not checkpoint it before any order work, alerts **Halt
   Restored**, and continues as a start into a halt; if that write fails, the
@@ -1418,8 +1419,13 @@ adapter at submission.
   `halt file not written (<error>)`, and only if the checkpoint also misses
   the halt does a restart resume unhalted from the last checkpoint, sending
   any order still queued in it, its drawdown breaker measuring from the peak
-  that checkpoint holds; the alert then says so. `reset_halt()` removes the
-  file before it changes anything, so a removal that fails refuses the reset.
+  that checkpoint holds; the alert then says so. A `request_halt()` leaves a
+  halt file that already holds a halt as it is; one whose write fails is
+  logged by the next cycle, not by the request, which may run in a signal
+  handler, and the halt it queued writes again when applied. `reset_halt()`
+  removes the file before it changes anything, then writes it back for a
+  halt request still queued, which applies after the reset; a removal or
+  write-back that fails refuses the reset.
   The reference deployment keeps it on a named Docker volume per deployment
   ([runbook](operational-runbook.md#halt-not-persisted)).
 - Audit trail: every halt alert records one `halted` runtime event, so one
@@ -1454,7 +1460,9 @@ adapter at submission.
   the loop from its sleep; `run()` maps `SIGUSR1` to it on POSIX. The loop
   applies pending requests first in its next cycle, after any cycle in
   progress, before order work and before a pending `request_flatten`,
-  which the halted account then refuses. A restart drops a pending request.
+  which the halted account then refuses. In live mode it writes the halt file
+  before it returns, so a restart before the loop applies it comes up halted
+  (**Halt Restored**); in sim a restart drops a pending request.
 - `LiveTrader.request_halt_reset()` asks the loop to `reset_halt()` without
   waiting and wakes it; `run()` maps `SIGUSR2` to it on POSIX. The next cycle
   applies it after the halt retry above, even one that fails, and before any
