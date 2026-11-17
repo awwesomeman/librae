@@ -49,14 +49,15 @@ def _timestamps_from_dict(raw: dict, *, field: str) -> dict[str, datetime]:
 
 # Bump whenever this document or a persisted nested dataclass changes shape.
 # Old checkpoints are deliberately rejected instead of silently defaulted.
-_STATE_SCHEMA_VERSION = 33
+_STATE_SCHEMA_VERSION = 34
 # The one exception: previous versions that lack only fields no build writing
 # them recorded, which load empty, as that build's own restart would. Version
-# 32 lacks ``pending_decided_at``, ``pending_decided_on`` and
-# ``market_exit_decided_at``; version 31 lacks ``last_funding_settled_at`` too.
-# A later bump decides afresh which of its previous versions are additive in
-# the same way; most are not.
-_ADDITIVE_PREVIOUS_SCHEMA_VERSIONS = (31, 32)
+# 33 lacks ``prev_equity_ts``, ``prev_equity_base``,
+# ``prev_equity_traded_notional`` and ``pending_traded_notional``; version 32
+# lacks ``pending_decided_at``, ``pending_decided_on`` and
+# ``market_exit_decided_at`` too. A later bump decides afresh which of its previous versions are additive
+# in the same way; most are not.
+_ADDITIVE_PREVIOUS_SCHEMA_VERSIONS = (32, 33)
 
 
 def normalize_runtime_revision(
@@ -339,6 +340,13 @@ class LiveRuntimeState:
     live_rebalance: LiveRebalance | None = None
     equity_peak: float = 0.0
     prev_equity: float = 0.0
+    # The latest equity point's timestamp, the equity its period return was
+    # taken against and the notional its turnover counted, which that point
+    # keeps when it is written again; and the notional traded since it.
+    prev_equity_ts: datetime | None = None
+    prev_equity_base: float | None = None
+    prev_equity_traded_notional: float = 0.0
+    pending_traded_notional: float = 0.0
     status_window_equity: float = 0.0
     trade_count: int = 0
     event_sequence: int = 0
@@ -374,9 +382,18 @@ class LiveRuntimeState:
         if self.mode != "live" and self.execution_identity is not None:
             raise ValueError("simulation runtime state cannot carry an execution_identity")
         self.last_feature_as_of = _to_utc(self.last_feature_as_of)
+        self.prev_equity_ts = _to_utc(self.prev_equity_ts)
         if any(
             not isfinite(value)
-            for value in (self.cash, self.equity_peak, self.prev_equity, self.status_window_equity)
+            for value in (
+                self.cash,
+                self.equity_peak,
+                self.prev_equity,
+                self.prev_equity_base if self.prev_equity_base is not None else 0.0,
+                self.prev_equity_traded_notional,
+                self.pending_traded_notional,
+                self.status_window_equity,
+            )
         ):
             raise ValueError("live runtime account values must be finite")
 
@@ -442,6 +459,10 @@ class LiveRuntimeState:
             "live_rebalance": self.live_rebalance.to_dict() if self.live_rebalance else None,
             "equity_peak": self.equity_peak,
             "prev_equity": self.prev_equity,
+            "prev_equity_ts": self.prev_equity_ts.isoformat() if self.prev_equity_ts else None,
+            "prev_equity_base": self.prev_equity_base,
+            "prev_equity_traded_notional": self.prev_equity_traded_notional,
+            "pending_traded_notional": self.pending_traded_notional,
             "status_window_equity": self.status_window_equity,
             "trade_count": self.trade_count,
             "event_sequence": self.event_sequence,
@@ -514,12 +535,8 @@ class LiveRuntimeState:
                 raw["last_financing_ts"],
                 field="last_financing_ts",
             ),
-            last_funding_settled_at=(
-                _timestamps_from_dict(
-                    raw["last_funding_settled_at"], field="last_funding_settled_at"
-                )
-                if schema_version >= 32
-                else {}
+            last_funding_settled_at=_timestamps_from_dict(
+                raw["last_funding_settled_at"], field="last_funding_settled_at"
             ),
             pending_decision=_pending_decision_from_dict(raw["pending_decision"]),
             pending_ohlcv=[PendingOhlcvDelivery.from_dict(item) for item in raw["pending_ohlcv"]],
@@ -528,17 +545,17 @@ class LiveRuntimeState:
             ),
             pending_decided_at=(
                 _timestamps_from_dict(raw["pending_decided_at"], field="pending_decided_at")
-                if schema_version == _STATE_SCHEMA_VERSION
+                if schema_version >= 33
                 else {}
             ),
             pending_decided_on=(
                 _timestamps_from_dict(raw["pending_decided_on"], field="pending_decided_on")
-                if schema_version == _STATE_SCHEMA_VERSION
+                if schema_version >= 33
                 else {}
             ),
             market_exit_decided_at=(
                 _timestamps_from_dict(raw["market_exit_decided_at"], field="market_exit_decided_at")
-                if schema_version == _STATE_SCHEMA_VERSION
+                if schema_version >= 33
                 else {}
             ),
             active_orders=[TrackedOrder.from_dict(item) for item in raw["active_orders"]],
@@ -549,6 +566,24 @@ class LiveRuntimeState:
             ),
             equity_peak=float(raw["equity_peak"]),
             prev_equity=float(raw["prev_equity"]),
+            prev_equity_ts=(
+                _to_utc(raw["prev_equity_ts"]) if schema_version == _STATE_SCHEMA_VERSION else None
+            ),
+            prev_equity_base=(
+                float(raw["prev_equity_base"])
+                if schema_version == _STATE_SCHEMA_VERSION and raw["prev_equity_base"] is not None
+                else None
+            ),
+            prev_equity_traded_notional=(
+                float(raw["prev_equity_traded_notional"])
+                if schema_version == _STATE_SCHEMA_VERSION
+                else 0.0
+            ),
+            pending_traded_notional=(
+                float(raw["pending_traded_notional"])
+                if schema_version == _STATE_SCHEMA_VERSION
+                else 0.0
+            ),
             status_window_equity=float(raw["status_window_equity"]),
             trade_count=int(raw["trade_count"]),
             event_sequence=int(raw["event_sequence"]),

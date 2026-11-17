@@ -176,7 +176,9 @@ def load_position_events(
     if event_types:
         sql += " AND event_type = ANY(%s)"
         params.append(event_types)
-    sql += " ORDER BY ts, event_id"
+    # Event ids of one run differ only in their numeric suffix, so ordering by
+    # length first puts "-e10000" after "-e9999", in the order they happened.
+    sql += " ORDER BY ts, length(event_id), event_id"
     with get_conn(dsn) as conn:
         df = pd.read_sql(sql, conn, params=params)
     if not df.empty:

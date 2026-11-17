@@ -132,6 +132,10 @@ def test_runtime_state_round_trip_preserves_restart_fields():
         active_orders=[_order()],
         equity_peak=1_050.0,
         prev_equity=1_002.0,
+        prev_equity_ts=datetime(2025, 1, 2, tzinfo=UTC),
+        prev_equity_base=998.0,
+        prev_equity_traded_notional=150.0,
+        pending_traded_notional=40.0,
         trade_count=4,
         event_sequence=7,
         period_index=8,
@@ -156,14 +160,25 @@ def test_runtime_state_round_trip_preserves_restart_fields():
 @pytest.mark.parametrize(
     ("versions_back", "missing"),
     [
-        (1, ("pending_decided_at", "pending_decided_on", "market_exit_decided_at")),
+        (
+            1,
+            (
+                "prev_equity_ts",
+                "prev_equity_base",
+                "prev_equity_traded_notional",
+                "pending_traded_notional",
+            ),
+        ),
         (
             2,
             (
+                "prev_equity_ts",
+                "prev_equity_base",
+                "prev_equity_traded_notional",
+                "pending_traded_notional",
                 "pending_decided_at",
                 "pending_decided_on",
                 "market_exit_decided_at",
-                "last_funding_settled_at",
             ),
         ),
     ],
