@@ -61,7 +61,6 @@ from librae.core.executor import (
     PositionEvent,
     RebalanceOrderState,
     RuntimeEvent,
-    TradePnL,
     TradeResult,
     calc_equity,
     calculate_position_weights,
@@ -80,8 +79,6 @@ from librae.core.financing import (
     FUNDING_RATE_FIELD,
     FUNDING_SETTLED_AT_FIELD,
     FinancingCashFlow,
-    FinancingLifecycleEvent,
-    attribute_financing_to_closes,
     calculate_borrow_cash_flows,
     calculate_funding_cash_flows,
 )
@@ -1339,72 +1336,6 @@ def _validate_funding(
             )
 
 
-def _attribute_financing_to_trades(
-    trades: Sequence[TradeResult],
-    trade_notionals: Sequence[float],
-    position_events: Sequence[PositionEvent],
-    financing_cash_flows: Sequence[FinancingCashFlow],
-) -> list[TradePnL]:
-    """Fold causally accrued financing into closed-trade metrics."""
-    if any(event.entry_at is None for event in position_events):
-        raise RuntimeError("position lifecycle event is missing entry_at")
-    lifecycle_events = [
-        FinancingLifecycleEvent(
-            ts=event.ts,
-            symbol=event.symbol,
-            entry_at=event.entry_at,
-            event_type=event.event_type,
-            fill_quantity=event.fill_quantity,
-            remaining_quantity=event.remaining_quantity,
-            # The bar loop accrues over the positions that survived execution;
-            # only the end-of-run liquidation runs after that accrual.
-            after_bar_accrual=event.reason == REASON_FORCE_CLOSE,
-        )
-        for event in position_events
-        if event.entry_at is not None
-    ]
-    close_events = [event for event in lifecycle_events if event.event_type in ("reduce", "close")]
-    if len(close_events) != len(trades):
-        raise RuntimeError("closed trades do not match position lifecycle events")
-    for trade, event in zip(trades, close_events, strict=True):
-        if (
-            trade.symbol != event.symbol
-            or trade.entry_at != event.entry_at
-            or trade.exit_at != event.ts
-            or abs(trade.quantity - event.fill_quantity) > EPSILON
-        ):
-            raise RuntimeError("closed trade identity does not match its lifecycle event")
-
-    financing_by_close = attribute_financing_to_closes(
-        lifecycle_events,
-        financing_cash_flows,
-    )
-
-    trade_pnls = []
-    for trade, notional, financing_pnl in zip(
-        trades,
-        trade_notionals,
-        financing_by_close,
-        strict=True,
-    ):
-        financing_return = financing_pnl / notional * 100.0 if notional > EPSILON else 0.0
-        trade_pnls.append(
-            TradePnL(
-                gross_pnl=trade.gross_pnl + financing_pnl,
-                net_pnl=trade.net_pnl + financing_pnl,
-                commission=trade.commission,
-                slippage=trade.slippage,
-                tax=trade.tax,
-                gross_return=trade.gross_return + financing_return,
-                net_return=trade.net_return + financing_return,
-                exit_commission=0.0,
-                exit_slippage=0.0,
-                exit_tax=trade.tax,
-            )
-        )
-    return trade_pnls
-
-
 # ---------------------------------------------------------------------------
 # Backtest class
 # ---------------------------------------------------------------------------
@@ -2521,7 +2452,7 @@ class Backtest:
             BacktestOutput,
             RunMetadata,
         )
-        from librae.core.metrics import compute_all
+        from librae.core.metrics import closed_trades, compute_all
 
         if self._result is None:
             raise RuntimeError("Call run() before build_output()")
@@ -2539,25 +2470,19 @@ class Backtest:
         timeframe = self._timeframe
 
         account = result.account
-        trade_notionals = [
-            abs(trade.entry_price * trade.quantity * self._get_cost_model(trade.symbol).multiplier)
-            for trade in result.trades
-        ]
-        trade_pnls = _attribute_financing_to_trades(
-            result.trades,
-            trade_notionals,
-            result.position_events,
-            result.financing_cash_flows,
-        )
+        event_records = self._build_event_records(result, run_id)
+        financing_cash_flow_records = self._build_financing_cash_flow_records(result)
         metrics = compute_all(
             equity_values=[snapshot.equity for snapshot in account.equity_curve],
             timestamps=[snapshot.ts for snapshot in account.equity_curve],
-            trade_pnls=trade_pnls,
+            # The stored events are what a refresh reads back, so the summary
+            # is built from the same rows the database will hold.
+            trades=closed_trades(
+                pd.DataFrame(event_records),
+                pd.DataFrame(financing_cash_flow_records),
+            ),
             total_periods=len(account.equity_curve),
             exposed_periods=account.exposed_periods,
-            trade_notionals=trade_notionals,
-            trade_group_ids=[trade.group_id for trade in result.trades],
-            trade_entry_ats=[trade.entry_at for trade in result.trades],
             turnover_values=[snapshot.turnover for snapshot in account.portfolio_snapshots],
             gross_exposure_values=[
                 snapshot.gross_exposure for snapshot in account.portfolio_snapshots
@@ -2597,10 +2522,8 @@ class Backtest:
             auxiliary_subscriptions=self._auxiliary_subscriptions,
         )
 
-        event_records = self._build_event_records(result, run_id)
         position_snapshot_points = self._build_position_snapshot_records(result)
         allocation_snapshot_points = self._build_allocation_snapshot_records(result)
-        financing_cash_flow_records = self._build_financing_cash_flow_records(result)
 
         return BacktestOutput(
             run_metadata=run_metadata,

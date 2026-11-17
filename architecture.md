@@ -563,12 +563,14 @@ document scoped to layering, boundaries, and naming conventions.
 | `scale_into_position(pos, fill, cost_model)` | add to a position in the same direction (weighted-average entry) |
 | `reduce_position(pos, closed_qty)` | pro-rate position state after a partial close |
 | `calc_trade_pnl(...)` | single-trade PnL breakdown |
-| `compute_all(equity_values, timestamps, trade_pnls, ...)` | dependency-light performance calculation |
+| `closed_trades(position_events, financing_cash_flows)` | the closed trades `StrategyMetrics` counts, with their costs and financing, as a DataFrame |
+| `compute_all(equity_values, timestamps, trades, ...)` | dependency-light performance calculation |
 | `side_multiplier(side)` | `"long"` → +1.0, `"short"` → -1.0 |
 
 ### Design decisions
 
 - **Primitive signature**: `compute_all()` accepts `Sequence[float]` / `Sequence[datetime]` rather than depending on `BacktestResult`, so the live engine can call it directly too.
+- **One closed-trade list**: the backtest summary, `refresh_performance()` and the console all count trades through `closed_trades()`, built from stored position events and financing payments, so the in-memory and refreshed `strategy_performance` cannot drift apart. It is derived on demand; no trade table is kept.
 - **Optional integrations, caller-owned reporting**: core metrics use NumPy;
   exchange calendars, CLI YAML, DB, broker, and notification dependencies are
   loaded only by their opt-in features. `librae/core/metrics.py` computes
