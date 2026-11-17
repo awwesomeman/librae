@@ -60,6 +60,7 @@ DOWNSTREAM_IMPORTS = {
     ),
     "librae.testing": ("validate_feature_causality",),
     "librae.config.env": ("RedactSecrets", "SECRET_NAMES", "doctor"),
+    "librae.brokers.shioaji_time": ("fold_closing_minutes", "shioaji_kbar_starts"),
     "librae.db": ("get_conn",),
     "librae.db.timescale_reader": (
         "load_backtest_output",

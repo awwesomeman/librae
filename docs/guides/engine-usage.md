@@ -511,9 +511,12 @@ Shioaji's clock correction remains adapter-specific and is not a calendar:
 Taipei wall clock posing as UTC that marks the minute's end, into the UTC
 minute start. Some TAIFEX futures' kbars give the trades matched at a
 segment's closing instant a minute of their own, stamped one past the close;
-on the TAIFEX calendars the adapter merges that minute into the segment's last
-one, so those trades count toward the session they closed. Stock and index
-kbars are not covered: whether theirs do the same is unverified.
+on the TAIFEX calendars `librae.brokers.shioaji_time.fold_closing_minutes`
+merges that minute into the segment's last one, so those trades count toward
+the session they closed. The adapter applies it; a caller that reads kbars
+itself applies it to the start-stamped minutes before stamping `available_at`.
+Stock and index kbars are not covered: whether theirs do the same is
+unverified.
 
 Session bars follow the venue's attribution rule. Intraday buckets count from
 each segment's open (`XTAIFEX`: 15:00 night, 08:45 day), so a bucket the

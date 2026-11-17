@@ -40,12 +40,10 @@ from librae.config.symbols import (
 )
 from librae.core.trading_calendar import (
     TAIFEX_INDEX_CALENDAR,
-    TAIFEX_LATE_OPEN_CALENDAR,
     next_segment_open_after,
     period_close,
     period_start,
     resample_session_ohlcv,
-    segment_closes,
     session_lookback_days,
 )
 from librae.core.utils import (
@@ -71,7 +69,7 @@ from .base import (
     with_settled_available_at,
 )
 from .shioaji_stream import ShioajiBarStream
-from .shioaji_time import shioaji_kbar_starts
+from .shioaji_time import fold_closing_minutes, shioaji_kbar_starts
 
 logger = logging.getLogger(__name__)
 
@@ -995,53 +993,7 @@ def _kbar_frame(responses: Iterable[Mapping[str, list]], calendar_id: str) -> pd
     # Shioaji names the price columns capitalised.
     df.columns = df.columns.str.lower()
     df["ts"] = shioaji_kbar_starts(df["ts"])
-    return _fold_closing_minutes(
-        df.sort_values("ts", kind="stable", ignore_index=True), calendar_id
-    )
-
-
-def _fold_closing_minutes(df: pd.DataFrame, calendar_id: str) -> pd.DataFrame:
-    """Merge a TAIFEX minute starting at a segment close into the segment's last minute.
-
-    TAIFEX matches trades at a segment's closing instant, and for some
-    contracts kbars() puts them in a minute of their own stamped one past
-    the close, which starts at the close and so lies outside every segment.
-    Observed for TMF 202611 on 2026-11-05: TAIFEX's tick file has its last
-    day-session trade at 13:45:00 (41905, 1 lot), which kbars() returns
-    stamped 13:46; night trades at 05:00:00 come stamped 05:01 the same way.
-    TXF and MTX kbars hold them in the minute stamped at the close, which is
-    also where the tick stream counts a closing print. A minute that starts
-    at a close holds only those trades, since nothing trades between
-    segments; any other minute outside the segments is left for the
-    resampler to handle.
-
-    TAIFEX calendars only: stock and index kbars past the close are
-    unverified, and index kbars run minutes past it (see
-    ``shioaji_kbar_starts``), so a minute there is not known to hold the
-    closing trades.
-    """
-    if calendar_id not in (TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR):
-        return df
-    starts = pd.DatetimeIndex(df["ts"])
-    previous = starts - pd.Timedelta(minutes=1)
-    at_close = segment_closes(previous, "1m", calendar_id) == starts
-    at_close &= segment_closes(starts, "1m", calendar_id).isna()
-    if not at_close.any():
-        return df
-    closing = df.loc[at_close].assign(ts=previous[at_close])
-    rest = df.loc[~at_close]
-    last = rest["ts"].isin(closing["ts"])
-    rules = {column: "sum" for column in df.columns if column != "ts"}
-    rules.update(open="first", high="max", low="min", close="last")
-    # Only each closing minute and the last minute it joins are merged.
-    merged = (
-        pd.concat([rest.loc[last], closing])
-        .sort_values("ts", kind="stable")
-        .groupby("ts", sort=True)
-        .agg(rules)
-        .reset_index()
-    )
-    return pd.concat([rest.loc[~last], merged]).sort_values("ts", kind="stable", ignore_index=True)
+    return fold_closing_minutes(df.sort_values("ts", kind="stable", ignore_index=True), calendar_id)
 
 
 def _kbar_date_chunks(start: date, end: date, max_days: int) -> list[tuple[date, date]]:
