@@ -12,6 +12,7 @@ you need the reasoning behind a decision or the implementation history.
 | Install Librae or set up a local dev environment | [Getting started](getting-started.md) |
 | Run a complete strategy | [Examples](../examples/README.md) |
 | Understand execution semantics and system design | [Architecture](../architecture.md) |
+| Prepare backtest data, configure a run, set up futures bars and costs | [Engine usage](guides/engine-usage.md) |
 | Compare strategies, benchmarks, and backtest results | [Performance analysis](guides/performance-analysis.md) |
 | Analyze a signal's forward outcomes | [Signal outcome analysis](guides/signal-outcome-analysis.md) |
 | Check whether a strategy is ready for the next execution stage | [Strategy readiness checklist](guides/strategy-readiness.md) |

@@ -33,6 +33,48 @@ bt.run()
 output = bt.build_output()  # BacktestOutput
 ```
 
+A minimal `RunConfig` for a registered symbol (here `BTCUSDT`, spot) names
+the strategy, symbols, bar size, market, data source, mode, and account;
+every other field has a default:
+
+```python
+from librae import AccountConfig, RunConfig
+
+config = RunConfig(
+    strategy_name="my_strategy",
+    symbols=("BTCUSDT",),
+    timeframe="H1",
+    market="crypto",
+    data_source="binance_spot",
+    mode="backtest",
+    account=AccountConfig(currency="USDT", initial_cash=100_000.0),
+)
+```
+
+An unregistered symbol is declared in `instrument_overrides`, and a futures
+symbol also needs its costs and rolls; see
+[Daily futures bars](#daily-futures-bars-timestamps-costs-and-rolls). The
+other `RunConfig(..., )` snippets in this guide show only the field they
+discuss; `...` stands for the fields above.
+
+The list of closed trades, one row per trade with its costs and financing,
+comes from `closed_trades` (see [performance analysis](performance-analysis.md)):
+
+```python
+import pandas as pd
+
+from librae import closed_trades
+
+trades = closed_trades(
+    pd.DataFrame(output.position_events),
+    pd.DataFrame(output.financing_cash_flows),
+)
+```
+
+To go from long to short (or the reverse) in one decision, see
+[Reversing a position](#reversing-a-position). `Backtest` only consumes the
+DataFrame it is given: it never reads a database or calls an API.
+
 **Data format**: a MultiIndex DataFrame `(symbol, datetime)` + raw, unshifted
 OHLCV + point-in-time feature columns. A strategy observes completed bar T and
 the engine owns the execution delay, so an intent is first eligible on T+1.
@@ -189,6 +231,144 @@ across bars while a protection can trigger on any of them. Other bar-level engin
 same question with a documented heuristic or a configuration flag — see
 [the intrabar ambiguity ADR](../decisions/2026-09-07-intrabar-ambiguity-defers-rather-than-aborts.md)
 for why waiting is preferred here.
+
+## Daily futures bars: timestamps, costs and rolls
+
+A daily TAIEX-futures backtest from your own store needs three things beyond
+OHLCV: bars stamped where the engine expects them, a cost model with the
+contract's economics, and a roll rule. The `XTAIFEX` calendar needs the
+`calendars` extra.
+
+### Stamp each D1 bar at its period start
+
+A D1 bar's `datetime` is the instant its period opens, and that depends on
+`session_mode`, which the run must declare (`RunConfig.session_mode`, or
+`Backtest(session_mode=...)` without a config):
+
+| `session_mode` | A D1 bar holds | Stamp on `XTAIFEX` (Taipei time) |
+|---|---|---|
+| `extended` (default) | the previous night plus the day session | the night open, 15:00 |
+| `regular` | the day session | the day open, 08:45 |
+| `overnight` | the night session alone | the night open, 15:00 |
+
+Choose the mode the vendor cut its daily bars for. A stamp that belongs to
+another mode is refused, naming the first offending timestamp and the stamp
+expected; a date-only stamp (midnight) falls outside every session and is
+refused as such. `period_start` returns the stamp for any instant inside the
+trading day, such as 09:00 Taipei time. Only trading days have a stamp; a
+vendor row for a closed day raises.
+
+```python
+import pandas as pd
+
+from librae import period_start
+
+def stamp(day: pd.Timestamp, session_mode: str = "extended") -> pd.Timestamp:
+    inside = pd.Timestamp(f"{day:%Y-%m-%d} 09:00", tz="Asia/Taipei")
+    return period_start(inside, "D1", "XTAIFEX", session_mode=session_mode)
+
+days = pd.bdate_range("2026-03-02", periods=6)  # one row per trading day
+close = pd.Series([20100.0, 20150.0, 20050.0, 20200.0, 20300.0, 20250.0], index=days)
+open_ = close.shift(1, fill_value=20000.0)
+vendor = pd.DataFrame(
+    {
+        "open": open_,
+        "high": pd.concat([open_, close], axis=1).max(axis=1) + 50,
+        "low": pd.concat([open_, close], axis=1).min(axis=1) - 50,
+        "close": close,
+        "volume": 900.0,
+    }
+)
+vendor.index = pd.DatetimeIndex([stamp(day) for day in vendor.index], name="datetime")
+```
+
+To build the bars from 1-minute OHLCV instead, `resample_session_ohlcv(minutes,
+86400, "XTAIFEX")` in `librae.core.trading_calendar` cuts `extended` D1 bars
+at the night open. It is not re-exported from `librae` and takes no
+`session_mode`; for another mode, build the daily bars yourself and stamp
+them with `period_start`.
+
+### Cost model
+
+Futures costs are per contract: the multiplier turns index points into
+currency, the broker fee is a fixed amount per contract and side, tax is a
+rate on notional, and margin is a fraction of notional. `*_margin_mode` says
+who sets that fraction and defaults to `unlevered`, which accepts only 1.0:
+
+| `margin_mode` | Margin rate |
+|---|---|
+| `unlevered` | always 1.0 (spot) |
+| `fixed` | set by the exchange or regulator (TAIFEX margin, Reg T) |
+| `dynamic` | chosen by the trader (isolated-margin perpetuals) |
+
+```python
+from librae import CostModel
+
+cost_model = CostModel(
+    multiplier=200.0,  # TX: currency per index point
+    commission_rate=0.0,
+    min_commission=0.0,
+    commission_per_contract=40.0,  # your broker's fee per contract and side
+    slippage_ticks=1.0,
+    tick_size=1.0,
+    tax_rate=0.00002,  # per side, on notional
+    long_margin_rate=0.075,  # initial margin / notional
+    short_margin_rate=0.075,
+    long_margin_mode="fixed",
+    short_margin_mode="fixed",
+)
+```
+
+The figures are examples: use your broker's fee and the exchange's current
+margin. With a `RunConfig`, the symbol's product (`TX`, `MTX`, `TMF`) and
+market (`tw_futures`) already supply these fields, and
+`symbol_cost_overrides={"TXR1": {"commission_per_contract": 30.0}}` replaces
+one of them. A direct `Backtest` takes the model you pass, whose `multiplier`
+must equal the product's.
+
+### Which roll rule applies
+
+A continuous series cannot be held through a contract switch (the rule and
+its checks are under [Backtest data contract](#backtest-data-contract)). A
+direct `Backtest` and a `RunConfig` choose the rule the same way:
+
+| Your series | Declare | Roll rule |
+|---|---|---|
+| A registered alias read from its own source, such as Shioaji's `TXFR1` | nothing | the venue's alias rule, or the `contract` column when the bars carry one |
+| Your own continuous series of a known product, such as `TXR1` | `{"product": "TX", "continuous_alias": True}` in `instrument_overrides` | a `contract` column on every bar; without it the run is refused |
+| One exact contract | `{"product": "TX", "contract_month": "202611"}` | not checked: one contract has no switch |
+
+A direct `Backtest` for the second row, using the stamped `vendor` bars and
+the `cost_model` above, with one contract name per bar:
+
+```python
+from librae import Backtest, Context, OrderIntent, Strategy
+
+class HoldUntilRoll(Strategy):
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
+        held = bool(ctx.positions.get("TXR1"))
+        if held and "TXR1" in ctx.exit_before_roll:
+            return [OrderIntent(action="close", symbol="TXR1")]
+        if not held:
+            return [OrderIntent(action="long", symbol="TXR1", quantity=1.0)]
+        return []
+
+bars = vendor.assign(contract="TX202603")  # the contract each bar is priced on
+bars.index = pd.MultiIndex.from_product(
+    [["TXR1"], bars.index], names=["symbol", "datetime"]
+)
+bt = Backtest(
+    data=bars,
+    strategy=HoldUntilRoll(),
+    currency="TWD",
+    initial_balance=2_000_000.0,
+    cost_model=cost_model,
+    data_source="my_store",
+    session_mode="extended",
+    instrument_overrides={"TXR1": {"product": "TX", "continuous_alias": True}},
+)
+bt.run()
+```
 
 ## Account and multi-asset / stock-picking strategies
 

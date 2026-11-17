@@ -1,127 +1,138 @@
-# Librae
+<div align="center">
 
-Librae is a Python engine for multi-asset backtesting, shadow simulation, and
-broker-confirmed live execution. It gives research and execution the same
-strategy interface.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/awwesomeman/librae/main/docs/assets/librae_banner_dark.png">
+  <img src="https://raw.githubusercontent.com/awwesomeman/librae/main/docs/assets/librae_banner_light.png" alt="Librae" />
+</picture>
+
+</div>
+
+<p align="center">
+    <a href="https://github.com/awwesomeman/librae/actions/workflows/core-tests.yml" title="test workflow">
+        <img src="https://github.com/awwesomeman/librae/actions/workflows/core-tests.yml/badge.svg?branch=main" />
+    </a>
+    <a href="https://github.com/awwesomeman/librae/blob/main/pyproject.toml" title="Python versions">
+        <img src="https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-3670A0?logo=python&logoColor=white" />
+    </a>
+    <a href="https://github.com/awwesomeman/librae/blob/main/LICENSE" title="License">
+        <img src="https://img.shields.io/badge/license-MIT-blue.svg" />
+    </a>
+</p>
+
+<h3 align="center"><b>Backtest, simulate and trade live through one strategy interface.</b></h3>
 
 > **Project status: alpha.** The research engine is usable, but live-trading
 > readiness still depends on the selected broker adapter, account setup,
 > operational controls, and strategy validation.
 
-## Why Librae
+## What Librae does
 
-- **One decision API** — express symbol orders with `OrderIntent`, complete
-  allocations with `PortfolioWeights`, or tie explicitly sized `OrderIntent`s
-  into a best-effort related order group with a shared `group_id`.
-- **One execution-policy source** — fill-field, current-bar participation,
-  optional session-level lagged-ADV assumptions, and the local live-order
-  timeout live in typed
-  `RunConfig.execution`, not free-form strategy parameters.
-- **Causal execution** — simulations own the execution delay; live positions
-  change only from broker execution reports.
-- **Portfolio-aware core** — positions, cash, costs, exposure, concentration,
-  turnover, target drift, and risk limits share one state model.
-- **Composable boundaries** — the engine runs in memory; persistence, broker,
-  notification, monitoring-console, and operational integrations remain
-  optional.
-- **Explicit boundaries** — no hidden optimizer, feature pipeline, exchange
-  calendar-driven event generation, FX ledger, or silent data repair.
+Librae is a Python engine for multi-asset backtesting, shadow simulation, and
+broker-confirmed live execution. A strategy written once runs in all three.
 
-## Choose your path
+- **One decision API** — return `OrderIntent`s or `PortfolioWeights` from
+  `on_bar(ctx)`.
+- **Causal execution** — a strategy sees completed bars; the engine owns the
+  execution delay, and live positions change only from broker execution
+  reports.
+- **Portfolio-aware core** — positions, cash, costs, margin, exposure,
+  turnover, and risk limits share one state model.
+- **Explicit boundaries** — the engine runs in memory. Persistence, brokers,
+  notifications, and monitoring are optional. There is no hidden optimizer,
+  feature pipeline, or silent data repair.
 
-| You are... | Start here | Go deeper |
-|---|---|---|
-| Strategy developer | Run and adapt a [single-asset or portfolio example](examples/README.md) with deterministic data | Review [performance analysis](docs/guides/performance-analysis.md), the [strategy readiness checklist](docs/guides/strategy-readiness.md), [data and execution contract](docs/guides/engine-usage.md), and [signal outcome analysis](docs/guides/signal-outcome-analysis.md) |
-| Backend/platform developer | Read the [system architecture](architecture.md) | Review [optional infrastructure](docs/guides/optional-infrastructure.md), callbacks, adapters, and durable state |
+## Installation
 
-## Quick start
-
-Librae requires Python 3.12 or newer.
-
-Install the library directly from GitHub:
+Librae requires Python 3.12 or newer and is not on PyPI yet. Install it from
+GitHub, pinning a tag or commit to identify the source:
 
 ```bash
-python -m pip install "librae @ git+https://github.com/awwesomeman/librae.git"
+pip install "librae @ git+https://github.com/awwesomeman/librae.git"
+# or
+uv add "librae @ git+https://github.com/awwesomeman/librae.git"
 ```
 
-The base install contains the in-memory backtest engine and depends only on
-NumPy and pandas. Chart viewing, exchange calendars, CLI wiring, persistence,
-notifications, UI, and broker integrations are opt-in extras. Librae is not on
-PyPI yet; pin a tag or commit to identify Librae source, and lock the calling
-application's complete dependency set when the environment must be
-repeatable. See [Getting started](docs/getting-started.md) for package-only,
-editable, restricted-network, and checkout workflows.
+The base install depends only on NumPy and pandas. Add the `calendars` extra
+(`librae[calendars]`) when a symbol trades on an exchange calendar, such as a
+TAIFEX futures series; broker, database, notification, and console integrations
+are separate extras. See [Getting started](docs/getting-started.md) for the
+extras table, version pinning, and the checkout workflow.
 
-To run a complete example from a clone, see
-[Run the examples](docs/getting-started.md#run-the-examples).
+## Quickstart
 
-A strategy implements `on_bar(ctx)` and returns `OrderIntent` objects
-(optionally grouped via `group_id`) or `PortfolioWeights`. Your data pipeline supplies timezone-aware OHLCV and
-point-in-time features; Librae owns validation, execution timing, portfolio
-state, costs, and output. The [examples](examples/README.md) show the complete
-`RunConfig`, DataFrame, and engine wiring.
+A moving-average strategy on synthetic hourly bars. It needs only the base
+install:
 
-## Engine contract
+```python
+import numpy as np
+import pandas as pd
+from librae import Backtest, Context, CostModel, OrderIntent, Strategy
 
-- **Data acquisition:** `Backtest` only consumes the DataFrame you pass; it
-  never reads a DB or calls an API. Sim/live polls completed-bar snapshots
-  through a broker adapter or injected callable; streaming data is not yet
-  supported.
-- **Runtime polling:** `poll_seconds` is user-controlled and runs market-data,
-  active-order, heartbeat, and due-reconciliation checks. It does not create
-  intrabar strategy decisions or quote-based PnL marks.
-- **Backtest input:** a `DataFrame` indexed exactly by
-  `(symbol, datetime)`, with valid OHLCV and any precomputed feature columns.
-  Every symbol is either registered or declared in `instrument_overrides`, with
-  or without a `RunConfig`: the engine must know what it trades, and whether
-  its bars roll between futures contracts, before it can account for it.
-- **Decision timing:** the strategy observes completed data; the engine owns
-  the simulated T → T+1 execution delay. Do not pre-shift a signal to imitate
-  that delay.
-- **Portfolio logic:** alpha, objective, covariance model, and optimizer belong
-  to the strategy. Librae accepts the resulting order intents or target weights
-  and owns their validation, sizing, sequencing, execution, and diagnostics.
-- **Outputs:** `BacktestOutput` contains run metadata, currency-labeled trade
-  and funding events, one equity/PnL/metrics result per account, and optional
-  position/allocation snapshots. Build benchmark,
-  active-return, and cross-run comparisons with the
-  [performance analysis guide](docs/guides/performance-analysis.md).
+# Synthetic hourly bars, indexed by (symbol, datetime) with UTC timestamps.
+rng = np.random.default_rng(0)
+ts = pd.date_range("2024-01-01", periods=500, freq="h", tz="UTC")
+close = 100 * np.cumprod(1 + rng.normal(0, 0.01, len(ts)))
+open_ = np.r_[100.0, close[:-1]]
+bars = pd.DataFrame(
+    {
+        "open": open_,
+        "high": np.maximum(open_, close) * 1.005,
+        "low": np.minimum(open_, close) * 0.995,
+        "close": close,
+        "volume": rng.uniform(100, 1000, len(ts)),
+    },
+    index=pd.MultiIndex.from_product([["DEMO"], ts], names=["symbol", "datetime"]),
+)
+# A feature known at each bar's close; the engine delays the fill to the next bar.
+bars["uptrend"] = bars["close"].rolling(10).mean() > bars["close"].rolling(30).mean()
 
-The exact validation, fill, liquidity, margin, reconciliation, and state
-semantics are documented in the [engine architecture](architecture.md#engine-design-librae).
-For custom broker fetches and third-party factors, see
-[External market data and factors](docs/guides/external-data.md).
 
-## Scope at a glance
+class SmaCross(Strategy):
+    def on_bar(self, ctx: Context) -> list[OrderIntent]:
+        held = bool(ctx.positions.get("DEMO"))
+        if ctx.bar["uptrend"] and not held:
+            return [OrderIntent(action="long", symbol="DEMO", quantity=10.0)]
+        if not ctx.bar["uptrend"] and held:
+            return [OrderIntent(action="close", symbol="DEMO")]
+        return []
 
-| Workflow | Current boundary |
-|---|---|
-| Single-asset research | Supported with next-observed-bar simulated fills |
-| Cross-sectional selection and allocation | Predeclared candidate universe with point-in-time eligibility; optimizer remains strategy-owned; runtime symbol/subscription changes are not managed |
-| Shadow simulation (`mode=sim`) | Simplified bar-fill monitoring, not broker paper trading |
-| Paper/live broker execution (`mode=live`) | Broker-confirmed, restartable lifecycle with periodic reconciliation, single-process lease, post-fill risk checks, latency diagnostics, and explicit `time_in_force` (day/gtc/ioc/fok) per adapter |
-| Related multi-leg execution | Explicitly sized `OrderIntent`s sharing a `group_id`, synchronous backtest/sim approximation; live submits legs serially and cancels only the failing group on a leg failure |
-| Execution account | One named account and currency per run; use separate runs for separate broker accounts or currencies |
-| Cross-account coordination | Caller-owned; the engine does not model FX, transfers, settlement, netting, or atomic execution across runs |
-| Corporate actions / settlement | Must be adjusted or modeled upstream; no internal ledger |
-| Short borrow / funding | Timestamped perpetual funding is supported in backtest/sim; no engine borrow/locate ledger |
 
-See the [full capability matrix](docs/guides/engine-usage.md#use-case-capability-matrix)
-and complete the [strategy readiness checklist](docs/guides/strategy-readiness.md)
-before selecting or promoting a workflow.
+bt = Backtest(
+    data=bars,
+    strategy=SmaCross(),
+    currency="USD",
+    initial_balance=100_000.0,
+    cost_model=CostModel.zero(),
+    instrument_overrides={"DEMO": {"instrument_type": "spot", "currency": "USD"}},
+)
+bt.run()
+output = bt.build_output()
+print(f"trades={output.metrics.trades}  total_return={output.metrics.total_return:.2%}")
+```
+
+A direct `Backtest` must know what each symbol trades: use a registered
+symbol, or declare it in `instrument_overrides` as above. Your data pipeline
+supplies timezone-aware OHLCV and any features; Librae owns validation,
+execution timing, portfolio state, costs, and output. `RunConfig` carries the
+same declarations for sim and live runs; `output` is a `BacktestOutput` with
+metrics, trade events, and equity per account.
+
+## Next steps
+
+- [Examples](examples/README.md) — runnable single-asset and portfolio strategies.
+- [Engine usage](docs/guides/engine-usage.md) — the data contract, `RunConfig`, futures bars and costs, execution policy.
+- [Performance analysis](docs/guides/performance-analysis.md) — metrics, benchmarks, and the closed-trade list.
+- [Strategy readiness checklist](docs/guides/strategy-readiness.md) — what to confirm before sim or live.
+- [External market data and factors](docs/guides/external-data.md) — broker fetches and third-party factors.
+- [Optional infrastructure](docs/guides/optional-infrastructure.md) — database, console, brokers, deployment.
 
 ## Documentation
 
-The [documentation index](docs/README.md) separates current guides and architecture
-from historical decisions, plans, research, and operational learnings.
-
-**Deploying the optional infrastructure to a host with a public IP?** `.env.example` and `.env.secrets.example`'s defaults (port binding, placeholder passwords) are for local dev only — read `SECURITY.md` first.
-
-## Development
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and the code, doc,
-and commit conventions. Coding agents start at [AGENTS.md](AGENTS.md).
+- [Documentation index](docs/README.md) — which doc owns what.
+- [Architecture](architecture.md) — design contract and system boundaries.
+- [Contributing](CONTRIBUTING.md) — setup, checks, and conventions; coding agents start at [AGENTS.md](AGENTS.md).
+- [Security](SECURITY.md) — read before deploying the optional infrastructure to a host with a public IP.
 
 ## License
 
-[MIT](LICENSE)
+Released under the [MIT License](LICENSE).
