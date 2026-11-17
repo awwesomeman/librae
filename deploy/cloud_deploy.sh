@@ -60,7 +60,7 @@ source "${PROJECT_ROOT}/.env.secrets"
 set +a
 : "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.secrets}"
 : "${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env.secrets}"
-: "${POSTGRES_GRAFANA_PASSWORD:?Set POSTGRES_GRAFANA_PASSWORD in .env.secrets}"
+: "${POSTGRES_CONSOLE_PASSWORD:?Set POSTGRES_CONSOLE_PASSWORD in .env.secrets}"
 
 # .env is scp'd wholesale below, so a credential parked here reaches every
 # host that ever syncs. The templates already document the split; this is the

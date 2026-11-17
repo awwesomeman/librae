@@ -37,10 +37,10 @@ BEGIN
 END
 $$;
 
--- Managed roles: quant_app writes runtime data; grafana_reader only reads it.
+-- Managed roles: quant_app writes runtime data; console_reader only reads it.
 -- The connecting quant role remains reserved for migrations and administration.
 \getenv quant_app_password POSTGRES_APP_PASSWORD
-\getenv grafana_reader_password POSTGRES_GRAFANA_PASSWORD
+\getenv console_reader_password POSTGRES_CONSOLE_PASSWORD
 
 SELECT 'CREATE ROLE quant_app'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'quant_app')
@@ -49,45 +49,45 @@ ALTER ROLE quant_app WITH
     LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
     PASSWORD :'quant_app_password';
 
-SELECT 'CREATE ROLE grafana_reader'
-WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'grafana_reader')
+SELECT 'CREATE ROLE console_reader'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'console_reader')
 \gexec
-ALTER ROLE grafana_reader WITH
+ALTER ROLE console_reader WITH
     LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
-    PASSWORD :'grafana_reader_password';
+    PASSWORD :'console_reader_password';
 
 -- Grants follow current_schema(), where the tables below are created.
 DO $$
 DECLARE
     target text := quote_ident(current_schema());
 BEGIN
-    EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %s FROM quant_app, grafana_reader', target);
+    EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %s FROM quant_app, console_reader', target);
     EXECUTE format(
-        'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %s FROM quant_app, grafana_reader', target
+        'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %s FROM quant_app, console_reader', target
     );
     EXECUTE format(
-        'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %s FROM quant_app, grafana_reader',
+        'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %s FROM quant_app, console_reader',
         target
     );
-    EXECUTE format('GRANT USAGE ON SCHEMA %s TO quant_app, grafana_reader', target);
+    EXECUTE format('GRANT USAGE ON SCHEMA %s TO quant_app, console_reader', target);
     EXECUTE format(
         'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %s TO quant_app', target
     );
     EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %s TO quant_app', target);
-    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %s TO grafana_reader', target);
+    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %s TO console_reader', target);
     EXECUTE format(
-        'REVOKE INSERT, UPDATE, DELETE ON %s.librae_schema_revision FROM quant_app, grafana_reader',
+        'REVOKE INSERT, UPDATE, DELETE ON %s.librae_schema_revision FROM quant_app, console_reader',
         target
     );
 
     EXECUTE format(
         'ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA %s '
-        'REVOKE ALL PRIVILEGES ON TABLES FROM quant_app, grafana_reader',
+        'REVOKE ALL PRIVILEGES ON TABLES FROM quant_app, console_reader',
         target
     );
     EXECUTE format(
         'ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA %s '
-        'REVOKE ALL PRIVILEGES ON SEQUENCES FROM quant_app, grafana_reader',
+        'REVOKE ALL PRIVILEGES ON SEQUENCES FROM quant_app, console_reader',
         target
     );
     EXECUTE format(
@@ -102,7 +102,7 @@ BEGIN
     );
     EXECUTE format(
         'ALTER DEFAULT PRIVILEGES FOR ROLE quant IN SCHEMA %s '
-        'GRANT SELECT ON TABLES TO grafana_reader',
+        'GRANT SELECT ON TABLES TO console_reader',
         target
     );
 END

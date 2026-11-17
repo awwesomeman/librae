@@ -54,7 +54,7 @@ after successful registration.
 
 For a database outside the reference Compose setup, run the script with a
 database-owner connection and set `POSTGRES_APP_PASSWORD` and
-`POSTGRES_GRAFANA_PASSWORD` in that `psql` process. `TIMESCALE_DSN` belongs to
+`POSTGRES_CONSOLE_PASSWORD` in that `psql` process. `TIMESCALE_DSN` belongs to
 the non-admin `quant_app` role and must not be used for schema administration.
 It is the host-side endpoint used by local tools. The reference `trade.sh`
 instead reads `TRADE_TIMESCALE_DSN` and passes it into the trade container as
@@ -177,7 +177,7 @@ its signals against the bars it stored, and its runtime events. Nothing in
 
 ```bash
 uv sync --extra console            # or: pip install "librae[console] @ git+..."
-export LIBRAE_CONSOLE_DSN=postgresql://grafana_reader:<password>@localhost:5432/quant
+export LIBRAE_CONSOLE_DSN=postgresql://console_reader:<password>@localhost:5432/quant
 uv run python -m librae.console --server.port 8501
 ```
 
@@ -207,7 +207,7 @@ they can label a standalone analysis without a portfolio backtest.
 without a run ID are not selectable in the console.
 
 - `LIBRAE_CONSOLE_DSN` must name a role that can only `SELECT`: the reference
-  schema's `grafana_reader` (password `POSTGRES_GRAFANA_PASSWORD`). The
+  schema's `console_reader` (password `POSTGRES_CONSOLE_PASSWORD`). The
   console also opens its session read-only, and it never writes.
 - Status panels (run status, equity, open positions, runtime events and latest
   signals) rerun every `LIBRAE_CONSOLE_REFRESH_SECONDS` (default 30) as

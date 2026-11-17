@@ -36,7 +36,7 @@ release notes and CVEs before updating it.
 ### 4. Keep database roles separate
 
 Use `quant` only for migrations, `quant_app` for application reads and writes,
-and `grafana_reader` for the console (`LIBRAE_CONSOLE_DSN`). The console
+and `console_reader` for the console (`LIBRAE_CONSOLE_DSN`). The console
 receives only that reader's password, never the application or admin
 credentials.
 

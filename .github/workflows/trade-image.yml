@@ -37,7 +37,7 @@ jobs:
           for script in deploy/*.sh; do
             bash -n "${script}"
           done
-          POSTGRES_PASSWORD=ci POSTGRES_APP_PASSWORD=ci POSTGRES_GRAFANA_PASSWORD=ci \
+          POSTGRES_PASSWORD=ci POSTGRES_APP_PASSWORD=ci POSTGRES_CONSOLE_PASSWORD=ci \
             docker compose --file deploy/docker-compose.yml config --quiet
 
       - name: Enable multi-platform builds
@@ -234,7 +234,7 @@ jobs:
           printf '%s\n' \
             'POSTGRES_PASSWORD=quant_secret' \
             'POSTGRES_APP_PASSWORD=quant_app_secret' \
-            'POSTGRES_GRAFANA_PASSWORD=grafana_reader_secret' \
+            'POSTGRES_CONSOLE_PASSWORD=console_reader_secret' \
             'TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@localhost:5432/quant' \
             'TRADE_TIMESCALE_DSN=postgresql://quant_app:quant_app_secret@quant_timescaledb:5432/quant' \
             > .env.secrets
