@@ -96,7 +96,7 @@ class EquityCurvePoint:
 
     ts: datetime
     equity: float
-    period_return: float
+    period_return: float | None
     drawdown: float
     gross_exposure: float = 0.0
     net_exposure: float = 0.0

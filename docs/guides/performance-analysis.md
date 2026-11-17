@@ -29,7 +29,7 @@ period_returns = pd.DataFrame(
         ]
     },
     index=pd.DatetimeIndex(point.ts for point in output.equity_curve),
-)
+).dropna()
 
 summary = summarize_performance(
     period_returns,
@@ -46,6 +46,9 @@ paths = compute_performance_series(
     metrics=("cumulative_return", "drawdown"),
 )
 ```
+
+The first curve point has no earlier equity, so its `period_return` is `None`;
+`dropna()` removes it, leaving the same observations `output.metrics` uses.
 
 `period_sharpe`, `period_sortino`, volatility, and downside deviation preserve
 the input observation frequency. Pass `period_target_return` at analysis time
@@ -119,7 +122,7 @@ def returns_from_output(output):
         [point.period_return for point in output.equity_curve],
         index=pd.DatetimeIndex(point.ts for point in output.equity_curve),
         name=output.run_metadata.run_id,
-    )
+    ).dropna()
 
 
 strategy_returns = pd.concat(
@@ -248,6 +251,24 @@ exit, holding-period, or notional facts. Use
 `compute_trade_lifecycle_outcomes()` and `compute_trade_entry_outcomes()` for
 trade analysis, and the [signal outcome guide](signal-outcome-analysis.md) for
 gross forward return, MFE, and MAE.
+
+The trades behind `StrategyMetrics`' trade count, win rate, profit factor and
+average trade return come from `closed_trades()`, one row per trade with its
+costs and financing; build trade reports from it rather than from the events:
+
+```python
+import pandas as pd
+
+from librae import closed_trades
+
+trades = closed_trades(
+    pd.DataFrame(output.position_events),
+    pd.DataFrame(output.financing_cash_flows),
+)
+```
+
+The `timescale_reader` loaders name the timestamp column `_time`; rename it to
+`ts` before passing their frames.
 
 ## Use third-party reporting directly
 

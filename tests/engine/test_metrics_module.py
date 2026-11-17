@@ -1,13 +1,12 @@
 """Tests for the metrics module.
 
 Tests compute_all() which accepts primitive sequences (equity values,
-timestamps, TradePnL objects).
+timestamps, closed trades).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -21,6 +20,7 @@ from librae.core.metrics import (
     DEFAULT_SUMMARY_METRICS,
     PERCENTAGE_POINTS_PER_FRACTION,
     available_metrics,
+    closed_trades,
     compute_all,
     compute_performance_series,
     compute_signal_outcomes,
@@ -192,32 +192,32 @@ class TestPerformanceAnalysis:
             summarize_performance(period_returns, metrics=metrics)
 
 
-def _make_trade_pnl(
-    gross_pnl: float = 0.0,
+def _trade(
     net_pnl: float = 0.0,
     commission: float = 0.0,
     slippage: float = 0.0,
     tax: float = 0.0,
     net_return: float = 0.0,
-) -> SimpleNamespace:
-    """Duck-typed TradePnL for tests."""
-    return SimpleNamespace(
-        gross_pnl=gross_pnl,
-        net_pnl=net_pnl,
-        commission=commission,
-        slippage=slippage,
-        tax=tax,
-        gross_return=0.0,
-        net_return=net_return,
-        exit_commission=0.0,
-        exit_slippage=0.0,
-        exit_tax=tax,
-    )
+    entry_notional: float = 100.0,
+) -> dict[str, float]:
+    """The closed_trades() columns compute_all reads."""
+    return {
+        "net_pnl": net_pnl,
+        "commission": commission,
+        "slippage": slippage,
+        "tax": tax,
+        "entry_notional": entry_notional,
+        "net_return": net_return,
+    }
+
+
+def _trades(*rows: dict[str, float]) -> pd.DataFrame:
+    return pd.DataFrame(list(rows), columns=list(_trade()))
 
 
 def _call_compute_all(
     equity: list[float],
-    trade_pnls: list | None = None,
+    trades: list[dict[str, float]] | None = None,
     exposed_periods: int | None = None,
 ) -> StrategyMetrics:
     """Helper to call compute_all with timestamps derived from equity length."""
@@ -225,7 +225,7 @@ def _call_compute_all(
     return compute_all(
         equity_values=equity,
         timestamps=timestamps,
-        trade_pnls=trade_pnls or [],
+        trades=_trades(*(trades or [])),
         total_periods=len(equity),
         exposed_periods=exposed_periods,
     )
@@ -248,7 +248,7 @@ class TestComputeAllEmpty:
         m = compute_all(
             equity_values=equity,
             timestamps=timestamps,
-            trade_pnls=[],
+            trades=_trades(),
             total_periods=len(equity),
         )
 
@@ -268,7 +268,7 @@ class TestComputeAllValidation:
             compute_all(
                 equity_values=[100.0, 101.0],
                 timestamps=[START],
-                trade_pnls=[],
+                trades=_trades(),
                 total_periods=2,
             )
 
@@ -280,7 +280,7 @@ class TestComputeAllValidation:
             compute_all(
                 equity_values=[100.0, 101.0],
                 timestamps=timestamps,
-                trade_pnls=[],
+                trades=_trades(),
                 total_periods=2,
                 period_target_return=period_target_return,
             )
@@ -293,7 +293,7 @@ class TestComputeAllMetrics:
         metrics = compute_all(
             equity_values=[100.0, 101.0, 100.5],
             timestamps=timestamps,
-            trade_pnls=[],
+            trades=_trades(),
             total_periods=3,
         )
 
@@ -302,68 +302,54 @@ class TestComputeAllMetrics:
         assert metrics.period_sharpe == pytest.approx(expected)
 
     def test_positive_return(self) -> None:
-        pnl = _make_trade_pnl(gross_pnl=100, net_pnl=100, net_return=1.0)
+        pnl = _trade(net_pnl=100, net_return=1.0)
         m = _call_compute_all([10_000.0, 10_000.0, 10_100.0], [pnl])
         assert m.trades == 1
         assert m.total_return > 0
 
     def test_win_rate(self) -> None:
         pnls = [
-            _make_trade_pnl(net_pnl=10, net_return=0.1),  # win
-            _make_trade_pnl(net_pnl=-10, net_return=-0.1),  # loss
-            _make_trade_pnl(net_pnl=5, net_return=0.05),  # win
+            _trade(net_pnl=10, net_return=0.1),  # win
+            _trade(net_pnl=-10, net_return=-0.1),  # loss
+            _trade(net_pnl=5, net_return=0.05),  # win
         ]
         m = _call_compute_all([10_000.0, 10_100.0, 9_900.0, 10_050.0], pnls)
         assert np.isclose(m.win_rate, 2 / 3)
 
     def test_profit_factor(self) -> None:
         pnls = [
-            _make_trade_pnl(net_pnl=20, net_return=0.2),
-            _make_trade_pnl(net_pnl=-10, net_return=-0.1),
+            _trade(net_pnl=20, net_return=0.2),
+            _trade(net_pnl=-10, net_return=-0.1),
         ]
         m = _call_compute_all([10_000.0, 10_200.0, 10_100.0], pnls)
         assert m.profit_factor == 2.0
 
     def test_profit_factor_is_none_without_losses(self) -> None:
         pnls = [
-            _make_trade_pnl(net_pnl=20, net_return=0.2),
-            _make_trade_pnl(net_pnl=10, net_return=0.1),
+            _trade(net_pnl=20, net_return=0.2),
+            _trade(net_pnl=10, net_return=0.1),
         ]
         m = _call_compute_all([10_000.0, 10_020.0, 10_030.0], pnls)
         assert m.profit_factor is None
 
     def test_exposure_ratio(self) -> None:
-        pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)
+        pnl = _trade(net_pnl=10, net_return=0.1)
         m = _call_compute_all([10_000.0] * 20, [pnl], exposed_periods=5)
         assert np.isclose(m.exposure_ratio, 5 / 20)
 
     def test_cost_totals(self) -> None:
-        pnl = _make_trade_pnl(
-            gross_pnl=10.0,
-            net_pnl=6.5,
-            commission=2.0,
-            slippage=1.0,
-            tax=0.5,
-            net_return=0.065,
-        )
-        m = _call_compute_all([10_000.0, 10_003.0, 10_006.5], [pnl])
+        trade = _trade(net_pnl=6.5, commission=2.0, slippage=1.0, tax=0.5, net_return=0.065)
+        m = _call_compute_all([10_000.0, 10_003.0, 10_006.5], [trade])
         assert np.isclose(m.total_commission, 2.0)
         assert np.isclose(m.total_slippage, 1.0)
 
     def test_avg_trade_return_uses_notional_weights(self) -> None:
-        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
         trades = [
-            _make_trade_pnl(net_pnl=10.0, net_return=10.0),
-            _make_trade_pnl(net_pnl=9.0, net_return=1.0),
+            _trade(net_pnl=10.0, net_return=0.10, entry_notional=100.0),
+            _trade(net_pnl=9.0, net_return=0.01, entry_notional=900.0),
         ]
 
-        metrics = compute_all(
-            equity_values=[100.0, 110.0, 119.0],
-            timestamps=timestamps,
-            trade_pnls=trades,
-            total_periods=3,
-            trade_notionals=[100.0, 900.0],
-        )
+        metrics = _call_compute_all([100.0, 110.0, 119.0], trades)
 
         assert metrics.avg_trade_return == pytest.approx(0.019)
 
@@ -371,119 +357,21 @@ class TestComputeAllMetrics:
     def test_trade_notional_weights_must_be_finite_and_positive(
         self, invalid_notional: float
     ) -> None:
-        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
-
-        with pytest.raises(ValueError, match="trade_notionals"):
-            compute_all(
-                equity_values=[100.0, 101.0],
-                timestamps=timestamps,
-                trade_pnls=[_make_trade_pnl(net_pnl=1.0, net_return=1.0)],
-                total_periods=2,
-                trade_notionals=[invalid_notional],
+        with pytest.raises(ValueError, match="entry_notional"):
+            _call_compute_all(
+                [100.0, 101.0],
+                [_trade(net_pnl=1.0, net_return=0.01, entry_notional=invalid_notional)],
             )
 
-    def test_grouped_trades_net_before_win_rate_and_avg_return(self) -> None:
-        """A hedge's spot+perp legs (same group_id) must count as one trade,
-        netting PnL/notional — not two independently volatile legs."""
-        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
-        # Perp leg alone looks like a big loser (-30%); spot leg alone looks
-        # like a modest winner (+5%). Netted: realized_pnl=-5 on notional=600 (-0.833%).
-        perp_leg = _make_trade_pnl(gross_pnl=-30.0, net_pnl=-30.0, net_return=-30.0)
-        spot_leg = _make_trade_pnl(gross_pnl=25.0, net_pnl=25.0, net_return=5.0)
-
-        m = compute_all(
-            equity_values=[10_000.0, 9_990.0, 9_995.0],
-            timestamps=timestamps,
-            trade_pnls=[perp_leg, spot_leg],
-            total_periods=3,
-            trade_notionals=[100.0, 500.0],
-            trade_group_ids=["hedge-1", "hedge-1"],
-            trade_entry_ats=[START, START],
-        )
-
-        assert m.trades == 1
-        assert np.isclose(m.win_rate, 0.0)  # the netted trade lost, not "1 win, 1 loss"
-        assert m.avg_trade_return == pytest.approx(-5.0 / 600.0)
-
-    def test_grouped_trades_scope_to_entry_at_not_just_group_id(self) -> None:
-        """A strategy that reuses one literal group_id for every round-trip
-        of a run must still net each round-trip's legs separately — group_id
-        alone is not a unique key across a run."""
-        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
-        entry_1 = START
-        entry_2 = START + pd.Timedelta(hours=1)
-        cycle_1_perp = _make_trade_pnl(net_pnl=-30.0, net_return=-30.0)
-        cycle_1_spot = _make_trade_pnl(net_pnl=25.0, net_return=5.0)
-        cycle_2_perp = _make_trade_pnl(net_pnl=10.0, net_return=10.0)
-        cycle_2_spot = _make_trade_pnl(net_pnl=-8.0, net_return=-1.6)
-
-        m = compute_all(
-            equity_values=[10_000.0, 9_990.0, 9_995.0],
-            timestamps=timestamps,
-            trade_pnls=[cycle_1_perp, cycle_1_spot, cycle_2_perp, cycle_2_spot],
-            total_periods=3,
-            trade_notionals=[100.0, 500.0, 100.0, 500.0],
-            trade_group_ids=["funding_arb", "funding_arb", "funding_arb", "funding_arb"],
-            trade_entry_ats=[entry_1, entry_1, entry_2, entry_2],
-        )
-
-        assert m.trades == 2  # one netted trade per round-trip, not one for the whole run
-
-    def test_grouped_and_ungrouped_trades_coexist(self) -> None:
-        timestamps = pd.date_range(START, periods=3, freq="h", tz="UTC").tolist()
-        leg_a = _make_trade_pnl(net_pnl=-10.0, net_return=-10.0)
-        leg_b = _make_trade_pnl(net_pnl=10.0, net_return=2.0)
-        standalone = _make_trade_pnl(net_pnl=5.0, net_return=1.0)
-
-        m = compute_all(
-            equity_values=[10_000.0, 10_005.0, 10_005.0],
-            timestamps=timestamps,
-            trade_pnls=[leg_a, leg_b, standalone],
-            total_periods=3,
-            trade_notionals=[100.0, 500.0, 500.0],
-            trade_group_ids=["hedge-1", "hedge-1", None],
-            trade_entry_ats=[START, START, START],
-        )
-
-        assert m.trades == 2  # one netted hedge trade + one standalone trade
-
-    def test_trade_group_ids_requires_trade_notionals(self) -> None:
+    def test_trades_must_carry_the_closed_trade_columns(self) -> None:
         timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
 
-        with pytest.raises(ValueError, match="trade_notionals"):
+        with pytest.raises(ValueError, match="entry_notional"):
             compute_all(
                 equity_values=[100.0, 101.0],
                 timestamps=timestamps,
-                trade_pnls=[_make_trade_pnl(net_pnl=1.0, net_return=1.0)],
+                trades=pd.DataFrame({"net_pnl": [1.0]}),
                 total_periods=2,
-                trade_group_ids=["hedge-1"],
-            )
-
-    def test_trade_group_ids_requires_trade_entry_ats(self) -> None:
-        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
-
-        with pytest.raises(ValueError, match="trade_entry_ats"):
-            compute_all(
-                equity_values=[100.0, 101.0],
-                timestamps=timestamps,
-                trade_pnls=[_make_trade_pnl(net_pnl=1.0, net_return=1.0)],
-                total_periods=2,
-                trade_notionals=[100.0],
-                trade_group_ids=["hedge-1"],
-            )
-
-    def test_trade_group_ids_length_must_match_trade_pnls(self) -> None:
-        timestamps = pd.date_range(START, periods=2, freq="h", tz="UTC").tolist()
-
-        with pytest.raises(ValueError, match="trade_group_ids length"):
-            compute_all(
-                equity_values=[100.0, 101.0],
-                timestamps=timestamps,
-                trade_pnls=[_make_trade_pnl(net_pnl=1.0, net_return=1.0)],
-                total_periods=2,
-                trade_notionals=[100.0],
-                trade_group_ids=["hedge-1", "hedge-2"],
-                trade_entry_ats=[START, START],
             )
 
     def test_portfolio_diagnostics(self) -> None:
@@ -491,7 +379,7 @@ class TestComputeAllMetrics:
         m = compute_all(
             equity_values=[100.0, 101.0, 102.0],
             timestamps=timestamps,
-            trade_pnls=[],
+            trades=_trades(),
             total_periods=3,
             turnover_values=[0.2, 0.1, 0.3],
             gross_exposure_values=[0.5, 1.2, 0.8],
@@ -513,7 +401,7 @@ class TestComputeAllMetrics:
         assert m.max_drawdown == pytest.approx(0.0)
 
     def test_max_drawdown_negative(self) -> None:
-        pnl = _make_trade_pnl(net_pnl=10, net_return=0.1)
+        pnl = _trade(net_pnl=10, net_return=0.1)
         m = _call_compute_all([10_000.0, 10_500.0, 9_800.0, 10_200.0], [pnl])
         assert m.max_drawdown <= 0
 
@@ -523,7 +411,7 @@ class TestComputeAllMetrics:
         metrics = compute_all(
             equity_values=equity,
             timestamps=timestamps,
-            trade_pnls=[_make_trade_pnl(net_pnl=200.0)],
+            trades=_trades(_trade(net_pnl=200.0)),
             total_periods=4,
             period_target_return=0.001,
         )
@@ -537,6 +425,162 @@ class TestComputeAllMetrics:
         assert metrics.period_sortino == pytest.approx(np.mean(excess) / downside)
         assert metrics.period_volatility == pytest.approx(np.std(returns, ddof=1))
         assert metrics.max_drawdown == pytest.approx(max_drawdown)
+
+
+FIRST_EXIT = START + pd.Timedelta(hours=2)
+
+
+def _round_trip(
+    symbol: str,
+    realized_pnl: float,
+    *,
+    side: str = "long",
+    quantity: float = 1.0,
+    entry_price: float = 100.0,
+    exit_price: float = 100.0,
+    multiplier: float = 1.0,
+    entry_at: datetime = START,
+    exit_at: datetime = FIRST_EXIT,
+    group_id: str | None = None,
+) -> list[dict]:
+    """An open and its close, with the fields a stored position event has."""
+    common = {
+        "symbol": symbol,
+        "side": side,
+        "fill_quantity": quantity,
+        "entry_price": entry_price,
+        "entry_at": entry_at,
+        "group_id": group_id,
+        "reason": "",
+    }
+    return [
+        {
+            **common,
+            "ts": entry_at,
+            "event_type": "open",
+            "price": entry_price,
+            "remaining_quantity": quantity,
+            "notional": entry_price * quantity * multiplier,
+            "commission": 1.0,
+            "slippage": 0.5,
+            "tax": 0.0,
+            "realized_pnl": None,
+            "entry_commission": None,
+            "entry_slippage": None,
+            "entry_tax": None,
+            "periods_held": None,
+        },
+        {
+            **common,
+            "ts": exit_at,
+            "event_type": "close",
+            "price": exit_price,
+            "remaining_quantity": 0.0,
+            "notional": exit_price * quantity * multiplier,
+            "commission": 2.0,
+            "slippage": 0.5,
+            "tax": 0.25,
+            "realized_pnl": realized_pnl,
+            "entry_commission": 1.0,
+            "entry_slippage": 0.5,
+            "entry_tax": 0.0,
+            "periods_held": 2,
+        },
+    ]
+
+
+def _events(*round_trips: list[dict]) -> pd.DataFrame:
+    rows = [row for trip in round_trips for row in trip]
+    return pd.DataFrame(rows).sort_values("ts", kind="stable", ignore_index=True)
+
+
+NO_FINANCING = pd.DataFrame()
+
+
+class TestClosedTrades:
+    def test_an_exit_carries_both_sides_costs_and_its_entry_notional(self) -> None:
+        events = _events(
+            _round_trip("FUT", 196.25, quantity=2.0, exit_price=110.0, multiplier=10.0)
+        )
+
+        trade = closed_trades(events, NO_FINANCING).iloc[0]
+
+        assert (trade["symbol"], trade["side"], trade["exit_at"]) == (
+            "FUT",
+            "long",
+            START + pd.Timedelta(hours=2),
+        )
+        assert (trade["commission"], trade["slippage"], trade["tax"]) == (3.0, 1.0, 0.25)
+        # The stored notional is at the exit price; the entry notional is 2 * 100 * 10.
+        assert trade["entry_notional"] == pytest.approx(2_000.0)
+        assert trade["net_return"] == pytest.approx(196.25 / 2_000.0)
+
+    def test_hedge_legs_net_into_one_trade(self) -> None:
+        """A perp leg alone looks like a big loser and the spot leg a winner;
+        together they lost 5 on 600 of notional."""
+        events = _events(
+            _round_trip("PERP", -30.0, side="short", group_id="hedge-1"),
+            _round_trip("SPOT", 25.0, quantity=5.0, group_id="hedge-1"),
+        )
+
+        trades = closed_trades(events, NO_FINANCING)
+
+        assert len(trades) == 1
+        trade = trades.iloc[0]
+        assert (trade["symbol"], trade["side"], trade["group_id"]) == (
+            "PERP / SPOT",
+            None,
+            "hedge-1",
+        )
+        assert trade["net_pnl"] == pytest.approx(-5.0)
+        assert trade["entry_notional"] == pytest.approx(600.0)
+        assert trade["net_return"] == pytest.approx(-5.0 / 600.0)
+
+    def test_a_reused_group_id_nets_each_round_trip_separately(self) -> None:
+        second = START + pd.Timedelta(hours=3)
+        later = {"entry_at": second, "exit_at": second + pd.Timedelta(hours=2)}
+        events = _events(
+            _round_trip("PERP", -30.0, group_id="funding_arb"),
+            _round_trip("SPOT", 25.0, group_id="funding_arb"),
+            _round_trip("PERP", 10.0, group_id="funding_arb", **later),
+            _round_trip("SPOT", -8.0, group_id="funding_arb", **later),
+        )
+
+        trades = closed_trades(events, NO_FINANCING)
+
+        assert trades["net_pnl"].tolist() == pytest.approx([-5.0, 2.0])
+
+    def test_rows_follow_exit_order_across_groups_and_single_trades(self) -> None:
+        events = _events(
+            _round_trip("A", -10.0, group_id="hedge-1", exit_at=START + pd.Timedelta(hours=4)),
+            _round_trip("B", 10.0, group_id="hedge-1", exit_at=START + pd.Timedelta(hours=5)),
+            _round_trip("C", 5.0, exit_at=START + pd.Timedelta(hours=3)),
+        )
+
+        trades = closed_trades(events, NO_FINANCING)
+
+        assert trades["symbol"].tolist() == ["C", "A / B"]
+        assert trades["exit_at"].iloc[1] == START + pd.Timedelta(hours=5)
+
+    def test_no_events_give_no_trades(self) -> None:
+        trades = closed_trades(pd.DataFrame(), NO_FINANCING)
+
+        assert trades.empty
+        assert "net_return" in trades.columns
+
+    def test_an_exit_without_a_positive_price_is_refused(self) -> None:
+        events = _events(_round_trip("A", 0.0))
+        events.loc[events["event_type"] == "close", "price"] = 0.0
+
+        with pytest.raises(ValueError, match="price must be positive"):
+            closed_trades(events, NO_FINANCING)
+
+    def test_an_exit_without_its_entry_costs_is_refused(self) -> None:
+        events = _events(_round_trip("A", 0.0))
+        events.loc[events["event_type"] == "close", "entry_commission"] = None
+
+        with pytest.raises(ValueError, match="entry_commission"):
+            closed_trades(events, NO_FINANCING)
 
 
 class TestComputeAllWithEngine:
@@ -591,8 +635,8 @@ class TestComputeAllWithEngine:
 
 def test_compute_payoff_ratio_none_when_one_sided():
     pnls = [
-        _make_trade_pnl(net_pnl=10, net_return=0.1),
-        _make_trade_pnl(net_pnl=5, net_return=0.05),
+        _trade(net_pnl=10, net_return=0.1),
+        _trade(net_pnl=5, net_return=0.05),
     ]
     m = _call_compute_all([10_000.0, 10_010.0, 10_015.0], pnls)
     assert m.payoff_ratio is None
@@ -600,8 +644,8 @@ def test_compute_payoff_ratio_none_when_one_sided():
 
 def test_compute_payoff_ratio_value():
     pnls = [
-        _make_trade_pnl(net_pnl=20, net_return=0.2),
-        _make_trade_pnl(net_pnl=-10, net_return=-0.1),
+        _trade(net_pnl=20, net_return=0.2),
+        _trade(net_pnl=-10, net_return=-0.1),
     ]
     m = _call_compute_all([10_000.0, 10_200.0, 10_100.0], pnls)
     assert np.isclose(m.payoff_ratio, 2.0)

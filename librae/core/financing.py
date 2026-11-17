@@ -99,7 +99,7 @@ class FinancingCashFlow:
 
     group_id/entry_at are copied from the accruing PositionState so this
     payment can be attributed back to the trade it belongs to (see
-    librae.core.metrics._collapse_trades_by_group's (group_id, entry_at) key)
+    librae.core.metrics.closed_trades's (group_id, entry_at) key)
     — entry_at is stable across a position's whole hold (only set on open,
     untouched by scale-ins).
     """
