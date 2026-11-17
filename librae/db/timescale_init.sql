@@ -27,12 +27,12 @@ CREATE TABLE IF NOT EXISTS librae_schema_revision (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 INSERT INTO librae_schema_revision (singleton, revision)
-VALUES (TRUE, 9)
+VALUES (TRUE, 10)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
-    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 9 THEN
-        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 9';
+    IF (SELECT revision FROM librae_schema_revision WHERE singleton = TRUE) <> 10 THEN
+        RAISE EXCEPTION 'database schema revision does not match bootstrap revision 10';
     END IF;
 END
 $$;
@@ -426,7 +426,7 @@ CREATE TABLE IF NOT EXISTS run_bars (
     high            DOUBLE PRECISION NOT NULL,
     low             DOUBLE PRECISION NOT NULL,
     close           DOUBLE PRECISION NOT NULL,
-    volume          DOUBLE PRECISION NOT NULL,
+    volume          DOUBLE PRECISION,
     CONSTRAINT chk_run_bars_session_mode CHECK (session_mode IN ('regular', 'extended', 'overnight')),
     CONSTRAINT chk_run_bars_available_at CHECK (available_at >= ts)
 );
@@ -436,8 +436,11 @@ SELECT create_hypertable('run_bars', 'ts', if_not_exists => TRUE);
 -- in the key because a source can revise a closed bar without moving its
 -- available_at, which the calendar derives; a restarted run reads the revised
 -- values, and keying on available_at alone would keep only the old ones.
+-- volume is NULL where the source reports none; NULLS NOT DISTINCT makes a
+-- repeat of such a version a conflict like any other.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_bars_unique
-    ON run_bars (run_id, symbol, ts, available_at, open, high, low, close, volume);
+    ON run_bars (run_id, symbol, ts, available_at, open, high, low, close, volume)
+    NULLS NOT DISTINCT;
 
 -- ============================================================
 -- signal_events — 訊號品質監控 (hypertable, 獨立)
@@ -491,8 +494,14 @@ BEGIN
            WHERE table_schema = current_schema()
              AND table_name = 'signal_events'
              AND column_name = 'inputs'
+       )
+       OR NOT EXISTS (
+           SELECT 1
+           FROM pg_index
+           WHERE indexrelid = to_regclass(target || '.idx_run_bars_unique')
+             AND indnullsnotdistinct
        ) THEN
-        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 9';
+        RAISE EXCEPTION 'bootstrap did not produce the complete Librae schema revision 10';
     END IF;
 END
 $$;

@@ -304,6 +304,8 @@ def load_run_bars(run_id: str, dsn: str | None = None) -> pd.DataFrame:
     if not df.empty:
         for column in ("_time", "available_at", "observed_at"):
             df[column] = pd.to_datetime(df[column], utc=True)
+        # NULL volume reads as NaN even when every row lacks it.
+        df["volume"] = df["volume"].astype(float)
     return df
 
 

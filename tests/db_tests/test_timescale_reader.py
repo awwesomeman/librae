@@ -104,6 +104,7 @@ class TestLoadRunBars:
                 "_time": ["2026-01-02T14:30:00-05:00"],
                 "available_at": ["2026-01-02T21:05:00+01:00"],
                 "observed_at": ["2026-01-02T21:05:03+01:00"],
+                "volume": [10.0],
             }
         )
 
@@ -116,6 +117,26 @@ class TestLoadRunBars:
         assert mock_read_sql.call_args.kwargs["params"] == ["run-1"]
         for column in ("_time", "available_at", "observed_at"):
             assert str(result[column].dt.tz) == "UTC"
+
+    @patch("librae.db.timescale_reader.pd.read_sql")
+    @patch("librae.db.timescale_reader.get_conn")
+    def test_a_null_volume_reads_as_nan(self, mock_conn_ctx, mock_read_sql):
+        """With every volume NULL, the driver's Nones would otherwise leave an
+        object column that numeric code cannot use."""
+        mock_conn_ctx.return_value = _mock_conn(MagicMock())
+        mock_read_sql.return_value = pd.DataFrame(
+            {
+                "_time": ["2026-01-02T14:00:00Z", "2026-01-02T15:00:00Z"],
+                "available_at": ["2026-01-02T15:00:00Z", "2026-01-02T16:00:00Z"],
+                "observed_at": [None, None],
+                "volume": [None, None],
+            }
+        )
+
+        volume = load_run_bars("run-1")["volume"]
+
+        assert volume.dtype == "float64"
+        assert volume.isna().all()
 
     @patch("librae.db.timescale_reader.pd.read_sql", return_value=pd.DataFrame())
     @patch("librae.db.timescale_reader.get_conn")
