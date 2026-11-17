@@ -32,12 +32,21 @@ def _load_dotenv_for_tests() -> None:
 
 _load_dotenv_for_tests()
 
+import pytest  # noqa: E402
 from librae.core.run_config import (  # noqa: E402
     AccountConfig,
     ExecutionPolicy,
     RunConfig,
     RuntimePolicy,
 )
+
+
+@pytest.fixture
+def live_halt_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A live deployment's halt file, which ``build_live_trader`` reads from ``LIBRAE_HALT_FILE``."""
+    path = tmp_path / "halt"
+    monkeypatch.setenv("LIBRAE_HALT_FILE", str(path))
+    return path
 
 
 def make_test_cfg(**overrides) -> RunConfig:

@@ -559,6 +559,13 @@ Engine 29.4.0, 2026-09-26. The mount belongs to the container `trade.sh start`
 creates; `trade.sh restart` reuses the existing container as it was created,
 and `inspect` warns about a container without it.
 
+A live container also mounts the named volume `quant_<deployment_id>_halt`
+and sets `LIBRAE_HALT_FILE` to a file on it, which `build_live_trader()`
+passes to `LiveTrader` as `halt_file`; a custom live runner does the same. The
+volume outlives the container, and `trade.sh` never removes it, so a halt the
+state store missed holds across restarts and replacements
+([Halt not persisted](operational-runbook.md#halt-not-persisted)).
+
 Use the lifecycle commands without relying on shell process memory:
 
 ```bash

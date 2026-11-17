@@ -1130,8 +1130,9 @@ adapter at submission.
   checkpointed: a restart reads the head of the order queue and the venue's
   open orders, and halts if either read fails.
   On a halted account failures only alert.
-- Halt durability: every halt applies in memory, writes its checkpoint, and
-  only then cancels, each cancel recording itself before it is sent. Every
+- Halt durability: every halt applies in memory, writes the halt file (live
+  only, below) and its checkpoint, and only then cancels, each cancel
+  recording itself before it is sent. Every
   tracked order the venue has not confirmed ended gets a cancel, whether its
   last status was `cancel_pending` or could not be read at all; the alert
   names a cancellation that fails and every order still awaiting the venue's
@@ -1160,21 +1161,32 @@ adapter at submission.
   succeeds. On success a **Halt Persisted** alert follows, a plain halt's
   cancellations go out, and a flatten's exits, sent or still queued, keep
   working. `reset_halt()` refuses with `halt_not_persisted` until then. A
-  process that exits first restarts from the last written checkpoint,
-  unhalted, and its drawdown breaker measures from the peak that checkpoint
-  holds. No halt waits for a store outage (`StateStoreUnavailableError`):
+  process that exits first restarts halted from the halt file. No halt waits for a store outage (`StateStoreUnavailableError`):
   a cancel adds no exposure, and a drawdown breach or operator flatten would
   leave the book open for as long as the store is down. Once a write meets
   the outage, its cancels, and a flatten's exits, go out without waiting on
   the store again, their rows held in memory for the next checkpoint that
   lands; its alert says `not recorded yet`, and each later
   cycle retries the checkpoint, then goes on with the cancels and exits
-  still owed. A restart before a checkpoint lands resumes trading unhalted
-  from the last one, sending any order still queued in it. It halts, sending
-  nothing, on any position or untracked open order a flatten left at the
-  venue. It reads an order the halt cancelled as one the venue ended: one
-  without `group_id` halts it, a grouped one fails only its group. An
+  still owed. A restart before a checkpoint lands restarts halted from the
+  halt file, then also alerts any position or untracked open order a flatten
+  left at the venue. An
   order whose placement write fails was not sent, and is not taken as sent.
+- Halt file (live): `LiveTrader(halt_file=...)`, which live mode requires,
+  holds every live halt until `reset_halt()`, so a restart stays halted
+  whether or not the state store recorded the halt. The halt writes it before
+  its checkpoint and cancels, atomically and durably (rationale in
+  `librae/live/halt_file.py`). A start whose halt file holds a halt its
+  checkpoint does not checkpoint it before any order work, alerts **Halt
+  Restored**, and continues as a start into a halt; if that write fails, the
+  start fails. A write that fails holds nothing back: the halt alert says
+  `halt file not written (<error>)`, and only if the checkpoint also misses
+  the halt does a restart resume unhalted from the last checkpoint, sending
+  any order still queued in it, its drawdown breaker measuring from the peak
+  that checkpoint holds; the alert then says so. `reset_halt()` removes the
+  file before it changes anything, so a removal that fails refuses the reset.
+  The reference deployment keeps it on a named Docker volume per deployment
+  ([runbook](operational-runbook.md#halt-not-persisted)).
 - Audit trail: every halt alert records one `halted` runtime event, so one
   stop can record several: a flatten whose exit fails records the exit's halt
   and its own, and a halt repeated on an already-halted account records again.

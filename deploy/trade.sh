@@ -43,6 +43,11 @@
 # directory on the machine that trades. Shioaji CA files remain under the
 # ignored .secrets/ directory; a live run mounts the selected account's CA
 # file and refuses to start without it, and a sim run never asks for one.
+#
+# A live run also mounts the named volume quant_<deployment_id>_halt, which
+# holds its halt until `reset` clears it, so a restart, or a start that
+# replaces the container, stays halted even when the state store never
+# recorded the halt. Nothing here removes that volume.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -55,6 +60,11 @@ READY_FILE="/tmp/librae-ready"
 # (https://docs.docker.com/engine/storage/tmpfs/); observed empty after both
 # an automatic and a manual restart on Docker Engine 29.4.0, 2026-09-26.
 READY_MOUNT="/run/librae"
+# A named volume, unlike the container's own filesystem, outlives the
+# container: "Using a volume ensures that the data is persisted even if the
+# container using it is removed"
+# (https://docs.docker.com/engine/storage/volumes/).
+HALT_MOUNT="/var/lib/librae"
 START_TIMEOUT_SECONDS="${TRADE_START_TIMEOUT_SECONDS:-30}"
 STOP_TIMEOUT_SECONDS="${TRADE_STOP_TIMEOUT_SECONDS:-90}"
 
@@ -584,6 +594,13 @@ finally:
         -e LIBRAE_READY_FILE="${ready_file}"
         -e LIBRAE_READY_TOKEN="${ready_token}"
     )
+    local halt_args=()
+    if [[ "${mode}" == "live" ]]; then
+        halt_args=(
+            -v "${container}_halt:${HALT_MOUNT}"
+            -e LIBRAE_HALT_FILE="${HALT_MOUNT}/halt"
+        )
+    fi
     if container_exists "${container}"; then
         echo "Stopping existing ${container}..."
         stop_container "${container}"
@@ -611,6 +628,7 @@ finally:
         --label "io.librae.credentials=${credentials_label}" \
         "${credential_args[@]+"${credential_args[@]}"}" \
         "${env_args[@]}" \
+        "${halt_args[@]+"${halt_args[@]}"}" \
         "${config_mount_args[@]+"${config_mount_args[@]}"}" \
         "${secret_mount_args[@]+"${secret_mount_args[@]}"}" \
         "${host_args[@]+"${host_args[@]}"}" \

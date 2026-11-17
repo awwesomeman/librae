@@ -20,6 +20,7 @@ from librae.live.engine import LiveTrader
 from librae.live.state import MemoryLiveStateStore
 
 from tests.conftest import make_test_cfg
+from tests.engine.live_factories import halt_file_of
 from tests.engine.test_live_runner import _broker_report, _mock_order_adapter
 
 
@@ -382,8 +383,12 @@ class _Runtime:
         state_store = kwargs.pop("state_store", None)
         live: dict = {}
         if (order_adapter := kwargs.pop("order_adapter", None)) is not None:
-            live = {"order_adapter": order_adapter, "runtime_revision": "grid"}
             state_store = MemoryLiveStateStore(restart_durable_for_tests=True)
+            live = {
+                "order_adapter": order_adapter,
+                "runtime_revision": "grid",
+                "halt_file": halt_file_of(state_store),
+            }
             # Reconciliation reads the mock's flat book; these tests are about events.
             kwargs.update(broker="binance", reconciliation_interval_seconds=10**7)
         polls = polls if polls is not None else _publications()

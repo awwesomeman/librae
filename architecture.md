@@ -179,6 +179,9 @@ while live always requires an explicitly injected durable `state_store`. The
 store must declare `restart_durable = True`; the persistence methods alone are
 satisfied by a dictionary, so live fails closed on a store that declares
 nothing rather than reaching order-capable startup with no recovery state.
+Live also requires a local `halt_file`: a halt made while the store is down
+reaches the checkpoint only once the store answers, and the file keeps a
+restart in between halted.
 
 The bars a run saw are evidence of that run, not market data, and the engine
 never reads them back to decide. Sim and live store in `run_bars`, keyed by
@@ -443,6 +446,7 @@ librae/
 │   ├── auxiliary_cache.py    auxiliary refetch cadence + freshness that never holds the run
 │   ├── ohlcv_audit.py        best-effort vs at-least-once OHLCV audit delivery + its queue
 │   ├── halt_recovery.py      whether a halted run may reset, and the blocking reason
+│   ├── halt_file.py          a live halt kept on local disk until reset, for restarts the store missed
 │   └── persistent_alerts.py  alerts for a lasting problem — first, repeat, resolved
 │
 ├── console/                  read-only Streamlit monitoring console (`console` extra)
@@ -783,6 +787,7 @@ adapter = TelegramAdapter(config=config, credentials=creds)
 | `execution_identity` | adapter-observed `ExecutionIdentity`; live-only, compared with the order adapter before checkpoint lookup |
 | `state_store` | `load(state_key) -> LiveRuntimeState \| None`; `save(state, orders=())` atomically checkpoints state and upserts changed order facts; `restart_durable` declares whether those writes survive the process, and live requires `True`. The checkpoint leaves out an order's placement `error`, so an upsert that carries none keeps the one already recorded |
 | `runtime_revision` | caller-owned opaque code/image identity; required in live mode and checked against restored state before broker access |
+| `halt_file` | path of the file a live halt is written to before it acts, in a writable directory that outlives the process; required in live mode, refused in sim. A start finding a halt there that its checkpoint lacks starts halted, and only `reset_halt()` removes it ([engine usage](docs/guides/engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)) |
 | `notifier` | not a plain callable — needs an `.enabled: bool` attribute plus the 5 methods below, each invoked via `getattr(notifier, method_name)(**kwargs)` on a background thread (fire-and-forget) |
 | `status_interval_periods` | optional positive polling-period count for status notifications; scheduling is independent of notifier transport configuration |
 

@@ -309,7 +309,9 @@ stopping it. It sends SIGUSR1, which the engine records as a halt request
   nothing: the flatten's exits keep working, and the alert says how many.
 - `trade.sh stop` is not a halt: the process exits without cancelling resting
   orders, and the checkpoint keeps tracking them for the next start.
-- The halt persists across `trade.sh restart`; resume as below.
+- The halt persists across `trade.sh restart`, and across a `trade.sh
+  start` that replaces the container, even before the state store records
+  it ([Halt not persisted](#halt-not-persisted)); resume as below.
 
 To resume after the review in [Kill-switch rehearsal](#kill-switch-rehearsal),
 run `./deploy/trade.sh reset <deployment_id>`. It sends SIGUSR2, which the
@@ -325,19 +327,22 @@ signal carries no answer back, so the outcome arrives as an alert:
 
 Until one of them arrives, the request lives only in the running process, as
 for `halt`. If the container restarts first, the new runner never saw it and
-starts from its checkpoint, which holds the halt only once it was persisted
-([Halt not persisted](#halt-not-persisted)). If it restarts halted, run
-`reset` again once `inspect` reports `phase=running`.
+restarts halted; run `reset` again once `inspect` reports `phase=running`.
 
 ## Halt not persisted
 
 A halt whose checkpoint write fails is still applied in memory
 ([engine behavior](engine-usage.md#execution-policy-risk-controls-and-portfolio-diagnostics)).
+A live halt is first written to the halt file, which `trade.sh` keeps on the
+named volume `quant_<deployment_id>_halt`; until the checkpoint records the
+halt, that file keeps a restart halted.
 
 | Alert | Meaning | Action |
 |---|---|---|
-| Any halt alert that says `halt not persisted (<error>)`; a flatten's alert may also say `exit submission failed` | Halted in memory; the state store refused the checkpoint with an error that is not an outage. The halt has cancelled nothing yet, and a flatten that says `exit submission failed` submitted nothing. Every later cycle retries the checkpoint and does nothing else until it succeeds, so a Poll Error alert follows if the failure lasts; `halt()` raises the same error until then | Keep the process running and restore the state store. Orders resting at the venue keep working meanwhile: cancel at the venue anything that must not fill |
-| Any halt alert that says `not recorded yet (<error>)` | The state store is down, but the halt went ahead: its cancels went out, and for a **Max Drawdown Breach** or **Operator Flatten** its exits too, their rows held in memory. Halted in memory only: a restart before **Halt Persisted** resumes trading unhalted from the last checkpoint written before the outage and sends any order still queued in it. That restart halts only on a venue position or open order that differs from the checkpoint, or on an order without `group_id` that this halt cancelled. Each later cycle retries the checkpoint, then goes on with the cancels and exits still owed, so a Poll Error alert follows while the store is down | Keep the process running and restore the state store; **Halt Persisted** follows. Do not stop or restart it before then; if it exits first, keep it stopped and halt it again as the end of this section says. After a flatten, do not also close those positions at the venue while it runs: its exits are sized from the ledger and would send a second close, which on a venue without reduce-only orders opens a reverse position (in this codebase the IBKR and Shioaji adapters send no reduce-only flag; the crypto adapter sets it on contract markets). If the store stays down, see [Long store outage](#long-store-outage) |
+| Any halt alert that says `halt not persisted (<error>)`; a flatten's alert may also say `exit submission failed` | Halted in memory and in the halt file; the state store refused the checkpoint with an error that is not an outage. The halt has cancelled nothing yet, and a flatten that says `exit submission failed` submitted nothing. Every later cycle retries the checkpoint and does nothing else until it succeeds, so a Poll Error alert follows if the failure lasts; `halt()` raises the same error until then | Keep the process running and restore the state store. Orders resting at the venue keep working meanwhile: cancel at the venue anything that must not fill |
+| Any halt alert that says `not recorded yet (<error>)` | The state store is down, but the halt went ahead: its cancels went out, and for a **Max Drawdown Breach** or **Operator Flatten** its exits too, their rows held in memory. Halted in memory and in the halt file, so a restart before **Halt Persisted** comes up halted (**Halt Restored**). Each later cycle retries the checkpoint, then goes on with the cancels and exits still owed, so a Poll Error alert follows while the store is down | Keep the process running and restore the state store; **Halt Persisted** follows. After a flatten, do not also close those positions at the venue while it runs: its exits are sized from the ledger and would send a second close, which on a venue without reduce-only orders opens a reverse position (in this codebase the IBKR and Shioaji adapters send no reduce-only flag; the crypto adapter sets it on contract markets). If the store stays down, see [Long store outage](#long-store-outage) |
+| Any halt alert that says `halt file not written (<error>)` | The halt went ahead, but the halt file does not hold it. If the same alert says `not recorded yet` or `halt not persisted`, the checkpoint does not hold it either, and the alert says what a restart would find: it resumes trading unhalted from the last checkpoint and sends any order still queued in it | Fix the volume the error names (full, read-only, missing). Keep the process running until **Halt Persisted**; if it exits first, keep it stopped and halt it again as the end of this section says |
+| Halt Restored | A start found a halt in the halt file that its checkpoint did not hold, so the process exited before **Halt Persisted**. It recorded the halt and started halted, sending nothing; the message names the halt. It cancels tracked orders as any start into a halt does (below), and a flatten's exits it never recorded read as **Position Reconciliation Mismatch** or **Orphan Broker Orders** | Review as for any halt, then `trade.sh reset`, which is what clears the halt file |
 | Halt Persisted | The retry succeeded; a restart now resumes halted. After `halt not persisted`, the halt's cancellations go out now, and the alert names one that fails (below); a flatten's exits, including ones it could not record before, go out and keep working | Continue the normal halt review; `reset_halt()` stops refusing with `halt_not_persisted` |
 
 A halt alert that says `awaiting cancel confirmation for <orders>` lists the
@@ -392,14 +397,18 @@ confirms the order ended. It never halts for it, since a halt would refuse
 the flatten: if the answer stays unappliable, cancel the order at the venue
 and fix the cause.
 
-A process that exits before **Halt Persisted** restarts from the last written
-checkpoint, unhalted: nothing in the engine can recover a halt the store never
-saw. Its container (`--restart unless-stopped`) starts it again once the store
-answers, and it trades on, sending any order that checkpoint still queues.
-Until you can halt it again, keep it stopped with `./deploy/trade.sh stop
-<deployment_id>`. After starting it, halt it as soon as `trade.sh inspect`
-reports `phase=running`; a cycle can run before that halt lands, so if the
-book must not trade at all, close its risk at the broker before restarting.
+A process that exits before **Halt Persisted** restarts halted from the halt
+file once the store answers (**Halt Restored**). The volume outlives the
+container and `trade.sh` never removes it, so the halt holds across
+`trade.sh restart` and `trade.sh start` alike; only `trade.sh reset`
+(`reset_halt()`) removes the file, and a reset that cannot remove it is
+refused with nothing changed. Only when the halt alert also said `halt file
+not written` does that restart resume trading unhalted from the last written
+checkpoint, sending any order it still queues. Then keep it stopped with
+`./deploy/trade.sh stop <deployment_id>` until the volume is fixed; after
+starting it, halt it as soon as `trade.sh inspect` reports `phase=running`. A
+cycle can run before that halt lands, so if the book must not trade at all,
+close its risk at the broker before restarting.
 
 ### Long store outage
 
@@ -416,19 +425,18 @@ yourself instead, or to stop the process before the store returns:
    exits that filled have already closed part of it.
 3. Start again only once the store answers. The process resumes from the
    last checkpoint written before the outage, finds the venue differing
-   from it (an order it tracked and you cancelled reads **Order Cancelled**,
-   and **Position Reconciliation Mismatch** or **Orphan Broker Orders**
-   follows), halts
-   and sends nothing. So does a restart after a flatten that went ahead
-   unrecorded.
+   from it (**Position Reconciliation Mismatch** or **Orphan Broker
+   Orders**), halts and sends nothing. A run that halted in the outage
+   starts halted from the halt file (**Halt Restored**); one that did not
+   reads an order it tracked and you cancelled as **Order Cancelled**.
 4. `reset_halt()` cannot repair that book: the next reconciliation
    mismatches again. Stop flat and start a new checkpoint, keeping the old
    one for audit
    ([Development checkpoint compatibility](optional-infrastructure.md#development-checkpoint-compatibility)).
 
 A process that crashed and restarted on its own after a flatten went ahead
-unrecorded halts on **Orphan Broker Orders** but does not cancel that exit,
-since it does not track it. Cancel it at the venue before closing by hand,
+unrecorded starts halted and alerts **Orphan Broker Orders** but does not
+cancel that exit, since it does not track it. Cancel it at the venue before closing by hand,
 or a later fill on it reverses the position.
 
 The stopped process's lease, a PostgreSQL advisory lock, may stay held until

@@ -583,6 +583,7 @@ def test_factory_rejects_mixed_binance_products_before_building_adapters() -> No
     build_adapter.assert_not_called()
 
 
+@pytest.mark.usefixtures("live_halt_file")
 def test_factory_keys_binance_order_adapter_by_execution_venue() -> None:
     config = make_test_cfg(
         mode="live",
@@ -629,6 +630,7 @@ def test_factory_keys_binance_order_adapter_by_execution_venue() -> None:
     assert trader._executor.get_order_adapter("ETH_PERP") is order_adapter
 
 
+@pytest.mark.usefixtures("live_halt_file")
 def test_live_execution_allows_independent_market_data_sources() -> None:
     config = make_test_cfg(
         mode="live",
@@ -682,7 +684,7 @@ def test_live_execution_allows_independent_market_data_sources() -> None:
     assert trader._executor.get_order_adapter("ETH") is order_adapter
 
 
-def test_factory_reuses_external_adapter_for_live_orders() -> None:
+def _build_vendor_live_trader():
     config = make_test_cfg(
         mode="live",
         broker="vendor_plugin",
@@ -709,9 +711,24 @@ def test_factory_reuses_external_adapter_for_live_orders() -> None:
         state_store=MemoryLiveStateStore(restart_durable_for_tests=True),
         runtime_revision="test-runtime",
     )
+    return trader, factory, adapter
+
+
+def test_factory_reuses_external_adapter_for_live_orders(live_halt_file: Path) -> None:
+    trader, factory, adapter = _build_vendor_live_trader()
 
     factory.assert_called_once_with(trading=True)
     assert trader._executor.get_order_adapter("BTCUSDT") is adapter
+    assert trader._halt_file == live_halt_file
+
+
+def test_live_factory_refuses_a_deployment_without_a_halt_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LIBRAE_HALT_FILE", raising=False)
+
+    with pytest.raises(ValueError, match="LIBRAE_HALT_FILE"):
+        _build_vendor_live_trader()
 
 
 def test_data_adapter_overrides_injects_per_symbol_instance_directly() -> None:
