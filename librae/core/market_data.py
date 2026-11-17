@@ -612,9 +612,15 @@ def validate_bar_cadence(
             for timestamp in timestamps
         ]
     )
-    if np.any(timestamps != expected_starts):
+    mismatched = np.flatnonzero(timestamps != expected_starts)
+    if mismatched.size:
+        first = int(mismatched[0])
         raise ValueError(
-            f"{context} timestamps are not the canonical timeframe={canonical} period starts"
+            f"{context} timestamps are not the canonical timeframe={canonical} period starts: "
+            f"{timestamps[first].isoformat()} should be {expected_starts[first].isoformat()} "
+            f"under session_mode={session_mode!r}; "
+            "stamp each bar at the start its session_mode reads, or set the session_mode "
+            "the bars were cut for"
         )
 
     if canonical.startswith("D"):

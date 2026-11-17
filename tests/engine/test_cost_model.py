@@ -800,3 +800,19 @@ def test_invalid_cost_inputs_fail_fast(field: str, value: float) -> None:
     values[field] = value
     with pytest.raises(ValueError):
         CostModel(**values)
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_unlevered_margin_error_names_the_modes_that_allow_a_rate(side: str) -> None:
+    with pytest.raises(ValueError, match=rf"{side}_margin_mode='unlevered' requires") as raised:
+        CostModel(
+            multiplier=200.0,
+            commission_rate=0.0,
+            min_commission=0.0,
+            slippage_ticks=0.0,
+            tick_size=1.0,
+            tax_rate=0.0,
+            **{f"{side}_margin_rate": 0.075},
+        )
+    assert f"set {side}_margin_mode='fixed'" in str(raised.value)
+    assert "'dynamic'" in str(raised.value)
