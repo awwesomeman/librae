@@ -93,12 +93,14 @@ from .core.run_config import (
 )
 from .core.taifex import taifex_final_settlement_day
 from .core.trading_calendar import (
+    SIFMA_US_CALENDAR,
     TAIFEX_INDEX_CALENDAR,
     next_segment_open_after,
     period_close,
     period_start,
     session_label,
     session_labels,
+    sessions_in_range,
     validate_session_mode,
 )
 from .core.utils import (
@@ -191,12 +193,14 @@ __all__ = [
     "interval_to_timedelta",
     "to_ccxt",
     "to_canonical",
+    "SIFMA_US_CALENDAR",
     "TAIFEX_INDEX_CALENDAR",
     "next_segment_open_after",
     "period_close",
     "period_start",
     "session_label",
     "session_labels",
+    "sessions_in_range",
     "validate_session_mode",
     "taifex_final_settlement_day",
 ]

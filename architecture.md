@@ -480,6 +480,11 @@ Neither belongs in a broker adapter or strategy. `librae/config/symbols.py`
 owns each instrument's `calendar_id`. Package dependencies follow
 [Product position and system boundaries](#product-position-and-system-boundaries).
 
+`SIFMA_US`, the US bond market's trading days, has no exchange_calendars
+counterpart: `_SIFMA_US_RULES` holds the holidays SIFMA recommends a full
+close on, and a row in `_SIFMA_US_OVERRIDES` closes or opens a day against
+them, citing the recommendation.
+
 ### Execution flow (strategy → engine → output)
 
 This is a different thing from the "Data flow" section below: that one is about the read/write pipeline between DB tables; this one is the call sequence within a single run, from strategy code to the final result.

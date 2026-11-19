@@ -13,9 +13,22 @@ from datetime import date, time, timedelta
 from functools import cache
 from math import ceil
 from typing import TYPE_CHECKING, Literal
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+from pandas.tseries.holiday import (
+    GoodFriday,
+    Holiday,
+    USColumbusDay,
+    USLaborDay,
+    USMartinLutherKingJr,
+    USMemorialDay,
+    USPresidentsDay,
+    USThanksgivingDay,
+    nearest_workday,
+    sunday_to_monday,
+)
 
 if TYPE_CHECKING:
     from exchange_calendars import ExchangeCalendar
@@ -28,13 +41,15 @@ ALWAYS_OPEN_CALENDAR = "24/7"
 TAIFEX_INDEX_CALENDAR = "XTAIFEX"
 TAIFEX_LATE_OPEN_CALENDAR = "XTAIFEX_1725"
 _TAIFEX_CALENDARS = frozenset({TAIFEX_INDEX_CALENDAR, TAIFEX_LATE_OPEN_CALENDAR})
+SIFMA_US_CALENDAR = "SIFMA_US"
 # Calendars whose segments already span the whole trading day: librae writes
 # the TAIFEX night and day segments itself (see _session_segments), and 24/7
 # has no outside to extend into.
 _FULL_DAY_CALENDARS = _TAIFEX_CALENDARS | {ALWAYS_OPEN_CALENDAR}
 _TAIPEI = "Asia/Taipei"
 
-# First date a calendar is built from, or its bound_min if that is later.
+# First date a calendar is built from, or its bound_min if that is later;
+# SIFMA_US is built from its own start, _SIFMA_US_START.
 # Without it exchange_calendars builds only the last 20 years, counted from
 # the day the process starts, so a bar older than that reads as out of
 # session and the cutoff moves daily. Not earlier: a calendar keeps every
@@ -58,6 +73,8 @@ def _exchange_calendar(calendar_id: str) -> ExchangeCalendar:
             "Trading calendars require the 'calendars' extra: pip install 'librae[calendars]'"
         ) from exc
 
+    if calendar_id == SIFMA_US_CALENDAR:
+        return _sifma_us_calendar()
     exchange_id = "XTAI" if calendar_id in _TAIFEX_CALENDARS else calendar_id
     if exchange_id == "XTAI":
         return _xtai_calendar()
@@ -75,8 +92,9 @@ def _exchange_calendar(calendar_id: str) -> ExchangeCalendar:
 
 @dataclass(frozen=True)
 class _Override:
-    """A day on which XTAI departs from ``exchange_calendars``: ``closed`` has
-    no session, ``opened`` is a session, a weekend day included."""
+    """A day on which a calendar departs from the rules it is built on
+    (``exchange_calendars``' for XTAI): ``closed`` has no session, ``opened``
+    is a session, a weekend day included."""
 
     day: date
     kind: Literal["closed", "opened"]
@@ -370,6 +388,119 @@ def _xtai_calendar() -> ExchangeCalendar:
     return _XTAI(start=_CALENDAR_START)
 
 
+# The US bond market's trading days: the days SIFMA (before 2006, The Bond
+# Market Association) did not recommend a full close. A recommended early
+# close is a session, closing at the regular hour; this calendar answers which
+# days traded, not when trading stopped.
+#
+# The federal holidays SIFMA recommends a full close on, each observed as SIFMA
+# lists it in its historical table (_SIFMA_HISTORY) and archive
+# (_SIFMA_ARCHIVE): New Year's Day and Veterans Day move from a Sunday to the
+# Monday and have no close when they fall on a Saturday; Independence Day and
+# Christmas move to the nearest weekday. Juneteenth closes from 2022, per
+# SIFMA's revised 2022 recommendations
+# (https://www.sifma.org/news/press-releases/sifma-revises-2022-fixed-income-market-close-recommendations-in-the-u-s-to-include-full-close-for-juneteenth-national-independence-day);
+# a Saturday Juneteenth moving to the Friday is unverified, as none has fallen yet.
+_SIFMA_US_RULES = (
+    Holiday("New Year's Day", month=1, day=1, observance=sunday_to_monday),
+    USMartinLutherKingJr,
+    USPresidentsDay,
+    GoodFriday,
+    USMemorialDay,
+    Holiday("Juneteenth", month=6, day=19, start_date="2022-01-01", observance=nearest_workday),
+    Holiday("Independence Day", month=7, day=4, observance=nearest_workday),
+    USLaborDay,
+    USColumbusDay,
+    Holiday("Veterans Day", month=11, day=11, observance=sunday_to_monday),
+    USThanksgivingDay,
+    Holiday("Christmas", month=12, day=25, observance=nearest_workday),
+)
+# First day of SIFMA_US: the rules and overrides are checked from here on.
+_SIFMA_US_START = pd.Timestamp("1997-01-01")
+_SIFMA_HISTORY = (
+    "https://www.sifma.org/wp-content/uploads/2017/08/"
+    "Misc-US-Historical-Holiday-Market-Recommendations-SIFMA.pdf"
+)
+_SIFMA_ARCHIVE = "https://www.sifma.org/resources/guides-playbooks/us-holiday-archive"
+
+# Every day on which the US bond market departs from _SIFMA_US_RULES. A row
+# cites the recommendation, or a record of it where none was found.
+#
+# The opened Good Fridays are the ones on which the employment report was
+# published; SIFMA then recommends an early close instead
+# (https://www.sifma.org/wp-content/uploads/2018/01/SIFMA-Policy-on-Unscheduled-Changes-in-Trading-Hours-April-2019.pdf).
+# A national day of mourning with an early close, such as 2007-01-02 and
+# 2025-01-09, needs no row: no rule closes it.
+_SIFMA_US_OVERRIDES = (
+    # Trading stopped that morning; no recommendation for the day was found.
+    _row(
+        "2001-09-11",
+        "closed",
+        "https://www.institutionalinvestor.com/article/2btfm6nn69in5iznrsxkw/home/startingover",
+    ),
+    _row(
+        "2001-09-12",
+        "closed",
+        "https://www.emta.org/media/k30hlfnq/fd6ed6ea-6fc2-4d8e-9e8e-ea69f71dc58b.pdf",
+        "https://home.treasury.gov/news/press-releases/po627",
+    ),
+    _row("2004-06-11", "closed", "https://www.isda.org/a/7ViDE/statementfinaljune112004.pdf"),
+    _row("2012-10-30", "closed", _SIFMA_HISTORY),
+    _row("2018-12-05", "closed", _SIFMA_HISTORY),
+    _row("1999-04-02", "opened", _SIFMA_HISTORY),
+    _row("2007-04-06", "opened", _SIFMA_HISTORY),
+    _row("2010-04-02", "opened", _SIFMA_HISTORY),
+    _row("2012-04-06", "opened", _SIFMA_HISTORY),
+    # _SIFMA_HISTORY lists a full close; the confirming release and the archive
+    # list the early close, and H.15 has a Treasury yield for the day.
+    _row(
+        "2015-04-03",
+        "opened",
+        "https://www.sifma.org/news/press-releases/sifma-recommends-early-market-close-on-april-3-for-trading-of-us-dollar-denominated-fixed-income-securities-in-the-us-in-observance-of-the-good-friday-holiday",
+        _SIFMA_ARCHIVE,
+    ),
+    _row("2021-04-02", "opened", _SIFMA_ARCHIVE),
+    _row("2023-04-07", "opened", _SIFMA_ARCHIVE),
+    _row(
+        "2026-04-03",
+        "opened",
+        "https://www.sifma.org/news/press-releases/sifma-fixed-income-market-close-recommendations-in-the-u-s-the-u-k-and-japan-for-good-friday-easter-monday-holidays-2026",
+    ),
+)
+
+
+def _sifma_us_closures(start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Timestamp]:
+    """Full closes from ``start`` to ``end``: the rules' days with the
+    overrides applied."""
+    opened = {pd.Timestamp(row.day) for row in _SIFMA_US_OVERRIDES if row.kind == "opened"}
+    closed = [pd.Timestamp(row.day) for row in _SIFMA_US_OVERRIDES if row.kind == "closed"]
+    ruled = {day for rule in _SIFMA_US_RULES for day in rule.dates(start, end)}
+    return sorted((ruled - opened) | {day for day in closed if start <= day <= end})
+
+
+@cache
+def _sifma_us_calendar() -> ExchangeCalendar:
+    from exchange_calendars import ExchangeCalendar
+
+    class _SIFMAUS(ExchangeCalendar):
+        name = SIFMA_US_CALENDAR
+        tz = ZoneInfo("America/New_York")
+        # SIFMA publishes no regular hours; these are pandas_market_calendars'
+        # SIFMAUS hours, unverified against a venue.
+        open_times = ((None, time(7, 0)),)
+        close_times = ((None, time(17, 30)),)
+
+        @classmethod
+        def bound_min(cls) -> pd.Timestamp:
+            return _SIFMA_US_START
+
+        @property
+        def adhoc_holidays(self) -> list[pd.Timestamp]:
+            return _sifma_us_closures(_SIFMA_US_START, self.default_end())
+
+    return _SIFMAUS(start=_SIFMA_US_START)
+
+
 try:
     from exchange_calendars.errors import InvalidCalendarName
 except ImportError:  # pragma: no cover - resolved by _exchange_calendar's friendly error
@@ -621,6 +752,25 @@ def validate_calendar_id(calendar_id: str) -> None:
     """Resolve a calendar identifier without requiring an in-session timestamp."""
     if calendar_id != ALWAYS_OPEN_CALENDAR:
         _exchange_calendar(calendar_id)
+
+
+def sessions_in_range(start: date, end: date, calendar_id: str) -> tuple[date, ...]:
+    """Trading-session labels from ``start`` to ``end``, both included.
+
+    Raises ``ValueError`` for a range reaching before the calendar's first
+    session or after its last, where an answer would leave out days the
+    calendar does not know.
+    """
+    if type(start) is not date or type(end) is not date:
+        raise TypeError("start and end must be dates")
+    if end < start:
+        raise ValueError(f"end {end.isoformat()} is before start {start.isoformat()}")
+    if calendar_id == ALWAYS_OPEN_CALENDAR:
+        return tuple(start + timedelta(days=n) for n in range((end - start).days + 1))
+    sessions = _exchange_calendar(calendar_id).sessions_in_range(
+        pd.Timestamp(start), pd.Timestamp(end)
+    )
+    return tuple(session.date() for session in sessions)
 
 
 def session_lookback_days(value: object, periods: int, calendar_id: str) -> int:

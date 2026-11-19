@@ -9,7 +9,10 @@ import pytest
 from librae.core.trading_calendar import (
     _CANCELLED_NIGHTS,
     _SESSION_HOURS,
+    _SIFMA_US_OVERRIDES,
+    _SIFMA_US_RULES,
     _XTAI_OVERRIDES,
+    SIFMA_US_CALENDAR,
     TAIFEX_INDEX_CALENDAR,
     TAIFEX_LATE_OPEN_CALENDAR,
     _exchange_calendar,
@@ -27,6 +30,7 @@ from librae.core.trading_calendar import (
     session_bounds,
     session_label,
     session_lookback_days,
+    sessions_in_range,
     validate_session_mode,
 )
 
@@ -889,3 +893,129 @@ def test_hours_row_rejects_a_night_without_weekdays_or_the_reverse(
 ) -> None:
     with pytest.raises(ValueError, match="night and night_weekdays"):
         _Hours(None, (time(8, 45), time(13, 45)), night, (), night_weekdays)
+
+
+def _sifma_us_full_closes() -> list[date]:
+    days = []
+    for line in Path(__file__).with_name("sifma_us_full_closes.txt").read_text().splitlines():
+        if line and not line.startswith("#"):
+            year, *dates = line.split()
+            days += [date.fromisoformat(f"{year}-{day}") for day in dates]
+    return days
+
+
+def test_sifma_us_closes_on_the_weekdays_sifma_recommended_a_full_close() -> None:
+    calendar = _exchange_calendar(SIFMA_US_CALENDAR)
+    first = calendar.first_session.date()
+    closes = [day for day in _sifma_us_full_closes() if day >= first]
+    weekdays = pd.bdate_range(first, closes[-1].replace(month=12, day=31))
+    sessions = set(calendar.sessions)
+    assert [day.date() for day in weekdays if day not in sessions] == closes
+
+
+def test_sifma_us_starts_with_the_bond_series_it_serves() -> None:
+    assert _exchange_calendar(SIFMA_US_CALENDAR).first_session == pd.Timestamp("1997-01-02")
+
+
+@pytest.mark.parametrize(
+    "day",
+    [
+        # Columbus Day and Veterans Day: XNYS trades, the bond market does not.
+        "2002-10-14",
+        "2026-10-12",
+        "2003-11-11",
+        "2026-11-11",
+        # Veterans Day on a Sunday moves to the Monday.
+        "2001-11-12",
+        "2018-11-12",
+    ],
+)
+def test_sifma_us_closes_where_xnys_trades(day: str) -> None:
+    assert pd.Timestamp(day) in _exchange_calendar("XNYS").sessions
+    assert pd.Timestamp(day) not in _exchange_calendar(SIFMA_US_CALENDAR).sessions
+
+
+@pytest.mark.parametrize(
+    "day",
+    [
+        # National days of mourning with a SIFMA early close.
+        "2007-01-02",
+        "2025-01-09",
+        # Good Fridays with a SIFMA early close.
+        "2007-04-06",
+        "2010-04-02",
+        "2012-04-06",
+        "2015-04-03",
+        "2021-04-02",
+        "2023-04-07",
+        "2026-04-03",
+    ],
+)
+def test_sifma_us_trades_where_xnys_closes(day: str) -> None:
+    assert pd.Timestamp(day) not in _exchange_calendar("XNYS").sessions
+    assert pd.Timestamp(day) in _exchange_calendar(SIFMA_US_CALENDAR).sessions
+
+
+@pytest.mark.parametrize(
+    "day",
+    # Veterans Day and New Year's Day on a Saturday have no close.
+    ["2000-11-10", "2017-11-10", "2023-11-10", "1999-12-31", "2004-12-31", "2021-12-31"],
+)
+def test_sifma_us_trades_the_friday_before_a_saturday_holiday_it_does_not_observe(
+    day: str,
+) -> None:
+    assert pd.Timestamp(day) in _exchange_calendar(SIFMA_US_CALENDAR).sessions
+
+
+@pytest.mark.parametrize("row", _SIFMA_US_OVERRIDES, ids=lambda row: f"{row.day}-{row.kind}")
+def test_a_sifma_us_override_departs_from_the_rules_and_takes_effect(row) -> None:
+    day = pd.Timestamp(row.day)
+    ruled = any(day in rule.dates(day, day) for rule in _SIFMA_US_RULES)
+    assert ruled == (row.kind == "opened")
+    assert (day in _exchange_calendar(SIFMA_US_CALENDAR).sessions) == (row.kind == "opened")
+
+
+def test_every_sifma_us_override_is_sourced_and_unique() -> None:
+    assert len({row.day for row in _SIFMA_US_OVERRIDES}) == len(_SIFMA_US_OVERRIDES)
+    for row in _SIFMA_US_OVERRIDES:
+        assert row.sources, row
+        assert all(source.startswith("https://") for source in row.sources), row
+
+
+def test_sifma_us_is_a_calendar_id_like_any_other() -> None:
+    assert session_bounds(date(2026, 11, 18), SIFMA_US_CALENDAR) == (
+        pd.Timestamp("2026-11-18 07:00", tz="America/New_York").tz_convert("UTC"),
+        pd.Timestamp("2026-11-18 17:30", tz="America/New_York").tz_convert("UTC"),
+    )
+    assert session_label(pd.Timestamp("2026-11-18 15:00Z"), SIFMA_US_CALENDAR) == date(2026, 11, 18)
+
+
+@pytest.mark.parametrize(
+    ("calendar_id", "expected"),
+    [
+        # Columbus Day, then a weekend.
+        (SIFMA_US_CALENDAR, ["2026-10-09", "2026-10-13"]),
+        ("XNYS", ["2026-10-09", "2026-10-12", "2026-10-13"]),
+        ("24/7", ["2026-10-09", "2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13"]),
+    ],
+)
+def test_sessions_in_range_includes_both_ends(calendar_id: str, expected: list[str]) -> None:
+    assert sessions_in_range(date(2026, 10, 9), date(2026, 10, 13), calendar_id) == tuple(
+        date.fromisoformat(day) for day in expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [(date(1996, 12, 2), date(1997, 1, 10)), (date(2026, 1, 2), date(2099, 1, 2))],
+)
+def test_sessions_in_range_refuses_days_the_calendar_does_not_hold(start: date, end: date) -> None:
+    with pytest.raises(ValueError):
+        sessions_in_range(start, end, SIFMA_US_CALENDAR)
+
+
+def test_sessions_in_range_refuses_a_reversed_range_or_a_timestamp() -> None:
+    with pytest.raises(ValueError, match="before start"):
+        sessions_in_range(date(2026, 1, 2), date(2026, 1, 1), "XNYS")
+    with pytest.raises(TypeError):
+        sessions_in_range(pd.Timestamp("2026-01-02"), date(2026, 1, 5), "XNYS")
