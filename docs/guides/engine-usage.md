@@ -738,6 +738,13 @@ unregistered instruments set `instrument_overrides[symbol]["calendar_id"]`.
 Standard IDs are resolved by `exchange_calendars`. `XTAIFEX` (15:00 night
 open) and `XTAIFEX_1725` (17:25 night open) are Librae extensions that label a
 Taiwan-futures night session with its following regular-session date.
+`SIFMA_US` is a Librae extension for daily US bond and credit series: its
+sessions are the days SIFMA did not recommend a full close of the bond market,
+an early-close day included; its first session is 1997-01-02. Its daily bars
+are stamped at the 07:00 ET session open; those hours come from
+pandas_market_calendars and are unverified, as SIFMA publishes none.
+`sessions_in_range(start, end, calendar_id)` lists any calendar's sessions
+between two dates.
 Shioaji's clock correction remains adapter-specific and is not a calendar:
 `librae.brokers.shioaji_time.shioaji_kbar_starts` turns its raw kbar stamp, a
 Taipei wall clock posing as UTC that marks the minute's end, into the UTC
